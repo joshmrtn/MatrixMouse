@@ -1,0 +1,37 @@
+[build-system]
+requires = ["uv_build >= 0.10.0, <0.11.0"]
+build-backend = "uv_build"
+
+[project]
+name = "matrixmouse_joshmrtn"
+version = "0.0.1"
+authors = [
+  { name="Josh Martin", email="" },
+]
+description = "A python agent orchestrator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ollama>=0.6.1",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+# license = ""
+# license-files = ["LICEN[CS]E*"]
+
+# [project.urls]
+# Homepage = "https://github.com/pypa/sampleproject"
+# Issues = "https://github.com/pypa/sampleproject/issues"
+
+[project.scripts]
+matrixmouse = "matrixmouse.main:main"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpathes = ["tests"]
