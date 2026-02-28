@@ -29,7 +29,7 @@ from matrixmouse.utils.logging_utils import setup_logging
 # Logging — must come before any other matrixmouse imports so that modules
 # which call logging.getLogger(__name__) at import time get a configured logger.
 # ---------------------------------------------------------------------------
-setup_logging(log_level="INFO", log_to_file=False)
+setup_logging(log_level="INFO", log_to_file=False, repo_root=Path.cwd())
 logger = logging.getLogger(__name__)
 logger.info("MatrixMouse starting up...")
 

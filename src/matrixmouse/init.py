@@ -5,8 +5,13 @@ Everything related to setting up a repo for matrixmouse
 
 """
 
+from pathlib import Path
 
-def _generate_starter_config() -> str:                                               """                                                                             Generate the contents of a starter config.toml from MatrixMouseConfig field metadata.
+from matrixmouse.config import MatrixMousePaths
+
+def _generate_starter_config() -> str:                                               
+    """
+    Generate the contents of a starter config.toml from MatrixMouseConfig field metadata.
     All fields are commented out so the file documents available options without
     overriding any defaults.
 
@@ -18,7 +23,7 @@ def _generate_starter_config() -> str:                                          
         "# Any values set here override your global config at ~/.config/matrixmouse/config.toml",
         "# Remove the leading '#' from a line to activate that setting.",
         "",
-    ]
+        ]
 
     for name, field_info in MatrixMouseConfig.model_fields.items():
         if field_info.description:
@@ -126,106 +131,8 @@ def _ensure_notes_file(paths: MatrixMousePaths) -> None:
     )
     logger.debug("Created %s", paths.agent_notes)
 
-
-def _ensure_design_template(design_dir: Path) -> None:
-    """Create docs/design/ and write template.md if missing."""
-    design_dir.mkdir(parents=True, exist_ok=True)
-
-    template_path = design_dir / "template.md"
-    if template_path.exists():
-        return
-
-    template_path.write_text(
-        "---\n"
-        "module: module.name\n"
-        "status: draft              # draft | critique | approved | implementing | complete | superseded\n"
-        "depends_on: []\n"
-        "implemented: false\n"
-        "last_amended: YYYY-MM-DD\n"
-        "---\n"
-        "\n"
-        "## Responsibility\n"
-        "\n"
-        "Single paragraph. What this module does and does not do.\n"
-        "\n"
-        "## Public Interface\n"
-        "\n"
-        "Function signatures with type annotations and docstrings. No bodies.\n"
-        "\n"
-        "```python\n"
-        "def example(arg: str) -> bool:\n"
-        '    """Brief description. Raises XError if ..."""\n'
-        "```\n"
-        "\n"
-        "## Design Decisions\n"
-        "\n"
-        "Key choices made and brief rationale. One decision per bullet.\n"
-        "\n"
-        "## Open Questions\n"
-        "\n"
-        "Unresolved ambiguities. Any item here blocks `approved` status.\n"
-        "\n"
-        "## Amendments\n"
-        "\n"
-        "Append-only log of changes after initial approval.\n"
-        "Never edit prior entries — add new ones below.\n"
-        "\n"
-        "<!-- YYYY-MM-DD: description of change and reason -->\n"
-    )
-    logger.debug("Created design template at %s", template_path)
-
-
-def _ensure_adr_template(adr_dir: Path) -> None:
-    """Create docs/adr/ and write template.md if missing."""
-    adr_dir.mkdir(parents=True, exist_ok=True)
-
-    template_path = adr_dir / "template.md"
-    if template_path.exists():
-        return
-
-    template_path.write_text(
-        "# NNNN. Title of Decision\n"
-        "\n"
-        "Date: YYYY-MM-DD\n"
-        "Status: proposed  # proposed | accepted | deprecated | superseded by [NNNN](NNNN-title.md)\n"
-        "\n"
-        "## Context\n"
-        "\n"
-        "What is the issue that motivated this decision?\n"
-        "Describe the forces at play: technical, political, social, project-specific.\n"
-        "\n"
-        "## Decision\n"
-        "\n"
-        "What was decided. State it in full sentences, actively:\n"
-        "\"We will use X because Y.\"\n"
-        "\n"
-        "## Consequences\n"
-        "\n"
-        "What becomes easier or harder as a result of this decision.\n"
-        "Include both positive and negative consequences.\n"
-        "\n"
-        "## Alternatives Considered\n"
-        "\n"
-        "What other options were evaluated and why they were not chosen.\n"
-    )
-    logger.debug("Created ADR template at %s", template_path)
-
-
-
 def _ensure_docs_structure(paths: MatrixMousePaths) -> None:
-    """
-    Scaffold the docs/ directory structure at repo root if it doesn't exist.
-
-    Creates:
-        docs/design/    — per-module design artifacts (one file per module)
-        docs/adr/       — Architectural Decision Records (MADR format)
-
-    Template files are written only if they don't already exist.
-    Existing content is never overwritten.
-    """
-    _ensure_design_template(paths.design_docs)
-    _ensure_adr_template(paths.design_docs.parent / "adr")
-
+    """Scaffold docs/design/ and docs/adr/ with template files if missing."""
 
 def setup_repo(repo_root: Path) -> MatrixMousePaths:
     """

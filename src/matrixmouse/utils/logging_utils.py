@@ -8,24 +8,21 @@ Responsible for setting up global logging configuration.
 
 import logging
 import sys
-from matrixmouse.config import MatrixMouseConfig
 from pathlib import Path
 
 
-def setup_logging(repo_root: Path):
+def setup_logging(log_level: str, log_to_file: bool, repo_root: Path):
     """Configures root logger based on application settings.
 
-    Should be called once in main.py before other modules start working.
+    Should be called in main.py before other modules start working.
 
     Args:
-        repo_root (Path): The path to the repository root.
+        log_level (str): The log level to set the logger to.
+        log_to_file (bool): whether file logging is enabled.
+        repo_root (Path): Path to the repository root. 
     """
-    config = MatrixMouseConfig
-
-    # Get log level from application config.
-    log_to_file = MatrixMouseConfig.log_to_file
-    log_level_str = MatrixMouseConfig.log_level.upper()
-    log_level = getattr(logging, log_level_str, logging.INFO)
+    # Convert log_level to the logging level object or use INFO as fallback.
+    log_level = getattr(logging, log_level, logging.INFO)
 
     # Set up logging format.
     formatter = logging.Formatter(
@@ -53,5 +50,5 @@ def setup_logging(repo_root: Path):
         root_logger.addHandler(file_handler)
         logging.info(f"File logging enabled: {log_path}")
 
-    logging.info(f"Logging initialized. Level: {log_level_str}")
+    logging.info(f"Logging initialized.")
 
