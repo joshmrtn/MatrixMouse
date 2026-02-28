@@ -1,19 +1,271 @@
 """
 matrixmouse/loop.py
 
-The inner loop that drives a single agent role for a single task. 
+The inner loop that drives a single agent role for a single task.
 
 Responsibilities:
     - Calling the active model via Ollama
-    - Catching malformed tool call parsing errors at the chat_completion 
-    level and feeding them back as error messages
+    - Catching malformed tool call parsing errors at the chat_completion
+      level and feeding them back as error messages
     - Executing tool calls and appending results to message history
     - Calling stuck.py after each turn to check for escalation signals
-    - Calling context.py before each inference to ensure the context window 
-    is within bounds
-    - Checking comms.py for pending human interjections at the top of each 
-    iteration
-    - Terminating on declare_complete or when the orchestrator signals phase 
-    transition
+    - Calling context.py before each inference to ensure the context window
+      is within bounds
+    - Checking comms.py for pending human interjections at the top of each
+      iteration
+    - Terminating on declare_complete or when the orchestrator signals phase
+      transition
+
+Do not add orchestration logic, model selection, or task management here.
+Those responsibilities belong to orchestrator.py and router.py respectively.
 """
 
+import logging
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any
+
+import ollama
+
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
+from matrixmouse.tools import TOOLS, TOOL_REGISTRY
+
+logger = logging.getLogger(__name__)
+
+
+class LoopExitReason(Enum):
+    """
+    Describes why the agent loop terminated.
+    Returned to the orchestrator so it can decide what to do next.
+    """
+    COMPLETE        = auto()  # agent called declare_complete
+    ESCALATE        = auto()  # stuck detector triggered escalation
+    MAX_TURNS       = auto()  # safety limit reached
+    ERROR           = auto()  # unrecoverable error
+
+
+@dataclass
+class LoopResult:
+    """
+    The outcome of a single agent loop run.
+    Returned to the orchestrator after the loop exits.
+    """
+    exit_reason: LoopExitReason
+    messages: list          # full message history at time of exit
+    turns_taken: int
+    completion_summary: str = ""   # populated when exit_reason is COMPLETE
+
+
+class AgentLoop:
+    """
+    Drives a single agent role for a single task.
+
+    Instantiated by the orchestrator with a model, a starting message
+    history, and references to the subsystems it needs. Call run() to
+    start the loop. The loop runs until the agent declares completion,
+    the stuck detector signals escalation, or the turn limit is reached.
+    """
+
+    # Safety ceiling on turns regardless of other signals.
+    # Prevents runaway loops during development. 
+    # TODO: Make MAX_TURNS configurable once the system is stable.
+    MAX_TURNS = 50
+
+    def __init__(
+        self,
+        model: str,
+        messages: list,
+        config: MatrixMouseConfig,
+        paths: MatrixMousePaths,
+        # These are passed as callables so the loop stays decoupled from
+        # the concrete implementations. Stubs can be injected for testing.
+        context_manager=None,   # callable: (messages, config) -> messages
+        stuck_detector=None,    # callable: (tool_name, arguments, had_error) -> bool
+        comms=None,             # callable: () -> str | None
+    ):
+        self.model = model
+        self.messages = list(messages)  # defensive copy — don't mutate caller's list
+        self.config = config
+        self.paths = paths
+
+        # Subsystem callables — fall back to no-ops until implemented
+        self._check_context = context_manager or _noop_context_manager
+        self._check_stuck = stuck_detector or _noop_stuck_detector
+        self._check_interjection = comms or _noop_comms
+
+        self._is_done = False
+        self._turns = 0
+
+    def run(self) -> LoopResult:
+        """
+        Run the agent loop until a terminal condition is reached.
+
+        Returns a LoopResult describing why the loop exited and the
+        full message history at the time of exit.
+        """
+        logger.info("AgentLoop starting. Model: %s", self.model)
+
+        while not self._is_done:
+
+            # --- Safety ceiling ---
+            if self._turns >= self.MAX_TURNS:
+                logger.warning("Turn limit (%d) reached. Exiting loop.", self.MAX_TURNS)
+                return LoopResult(
+                    exit_reason=LoopExitReason.MAX_TURNS,
+                    messages=self.messages,
+                    turns_taken=self._turns,
+                )
+
+            # --- Human interjection check ---
+            # Checked at the top of every iteration so the agent picks up
+            # messages at the next clean loop boundary, never mid-inference.
+            interjection = self._check_interjection()
+            if interjection:
+                logger.info("Human interjection received.")
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[Human operator note — please incorporate before continuing]: {interjection}",
+                })
+
+            # --- Context window check ---
+            self.messages = self._check_context(self.messages, self.config)
+
+            # --- Inference ---
+            try:
+                response = self._chat_completion()
+            except Exception as e:
+                # Ollama failed to parse the model's output (e.g. malformed
+                # tool call XML). Feed the error back so the model can retry.
+                logger.warning("chat_completion failed: %s", e)
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response caused a parsing error and no "
+                        "tool was executed. Please try again with a valid tool "
+                        f"call. Details: {e}"
+                    ),
+                })
+                self._turns += 1
+                continue
+
+            self._turns += 1
+
+            # --- Log model output ---
+            if response.message.thinking:
+                logger.debug("Thinking: %s", response.message.thinking)
+            if response.message.content:
+                logger.info("Content: %s", response.message.content)
+
+            # --- Append response to history ---
+            self.messages.append(response.message)
+
+            # --- Tool dispatch ---
+            if response.message.tool_calls:
+                exit_result = self._dispatch_tools(response.message.tool_calls)
+                if exit_result is not None:
+                    return exit_result
+            else:
+                # No tool calls and no declare_complete — model produced a
+                # plain text response. Log it and continue; the model may
+                # be reasoning before its next tool call.
+                logger.debug("No tool calls in turn %d.", self._turns)
+
+        # Should not be reachable — loop exits via return inside the while.
+        # Included as a safety net.
+        return LoopResult(
+            exit_reason=LoopExitReason.ERROR,
+            messages=self.messages,
+            turns_taken=self._turns,
+        )
+
+    def _chat_completion(self):
+        """
+        Send the current message history to Ollama and return the response.
+        Raises on parse errors so the caller can handle them.
+        """
+        return ollama.chat(
+            model=self.model,
+            messages=self.messages,
+            stream=False,
+            tools=TOOLS,
+        )
+
+    def _dispatch_tools(self, tool_calls) -> LoopResult | None:
+        """
+        Execute each tool call in the response and append results to history.
+
+        Returns a LoopResult if the loop should exit (declare_complete or
+        escalation), or None to continue the loop.
+        """
+        for call in tool_calls:
+            name = call.function.name
+            arguments = call.function.arguments
+
+            # --- declare_complete is a special exit signal, not a real tool ---
+            if name == "declare_complete":
+                summary = arguments.get("summary", "")
+                logger.info("Agent declared task complete. Summary: %s", summary)
+                self._is_done = True
+                return LoopResult(
+                    exit_reason=LoopExitReason.COMPLETE,
+                    messages=self.messages,
+                    turns_taken=self._turns,
+                    completion_summary=summary,
+                )
+
+            # --- Normal tool dispatch ---
+            had_error = False
+            func = TOOL_REGISTRY.get(name)
+
+            if func is None:
+                result = f"ERROR: Unknown tool '{name}'. Available tools: {list(TOOL_REGISTRY.keys())}"
+                had_error = True
+                logger.warning("Unknown tool called: %s", name)
+            else:
+                try:
+                    result = func(**arguments)
+                    logger.info("Tool: %s(%s) → %s", name, arguments, str(result)[:120])
+                except Exception as e:
+                    result = f"ERROR calling {name}: {e}"
+                    had_error = True
+                    logger.warning("Tool %s raised: %s", name, e)
+
+            self.messages.append({
+                "role": "tool",
+                "name": name,
+                "content": str(result),
+            })
+
+            # --- Stuck check after each tool call ---
+            if self._check_stuck(name, arguments, had_error):
+                logger.warning("Stuck detector triggered on tool: %s", name)
+                return LoopResult(
+                    exit_reason=LoopExitReason.ESCALATE,
+                    messages=self.messages,
+                    turns_taken=self._turns,
+                )
+
+        return None  # continue the loop
+
+
+# TODO: replace noop stubs when subsystems are ready.
+
+# ---------------------------------------------------------------------------
+# No-op stubs for subsystems not yet implemented.
+# These allow the loop to run end-to-end before every dependency exists.
+# Replace by passing real callables when the subsystems are ready.
+# ---------------------------------------------------------------------------
+
+def _noop_context_manager(messages: list, config: Any) -> list:
+    """Passthrough until context.py is implemented."""
+    return messages
+
+
+def _noop_stuck_detector(tool_name: str, arguments: dict, had_error: bool) -> bool:
+    """Never escalates until stuck.py is implemented."""
+    return False
+
+
+def _noop_comms() -> None:
+    """No interjections until comms.py is implemented."""
+    return None
