@@ -22,7 +22,7 @@ import signal
 import sys
 from pathlib import Path
 
-from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, load_config, init_local_config, generate_starter_config
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, load_config
 from matrixmouse.utils.logging_utils import setup_logging
 
 # ---------------------------------------------------------------------------
@@ -68,19 +68,9 @@ def cmd_init(args):
     Safe to call when already initialised — reports status and exits.
     """
     repo_root = Path.cwd()
-    matrixmouse_dir = repo_root / ".matrixmouse"
+    paths = setup_repo(repo_root)
 
-    if matrixmouse_dir.exists():
-        logger.info("Already initialised at %s", matrixmouse_dir)
-        print("Already initialized.")
-        return
-
-    init_local_config(repo_root)
-    (matrixmouse_dir / "AGENT_NOTES.md").touch()
-    logger.info("MatrixMouse initialised at %s", matrixmouse_dir)
-    
-    # Call new setup_repo utility from init module
-    setup_repo(repo_root) # Idempotent, safe to call every run
+    logger.info("MatrixMouse initialised at %s", paths.config_dir)
     print(f"Initialized matrixmouse in {repo_root}")
 
 
@@ -94,7 +84,7 @@ def cmd_run(args):
     repo_root = Path.cwd()
 
     # --- Config ---
-    init_local_config(repo_root)
+    paths = setup_repo(repo_root)
     config = load_config(repo_root)
 
     # --- Reconfigure logging with user preferences ---
@@ -105,15 +95,6 @@ def cmd_run(args):
     )
     logger.info("Configuration loaded. Log level: %s", config.log_level)
 
-    # --- Resolve paths ---
-    paths = MatrixMousePaths(
-        repo_root=repo_root,
-        config_dir=repo_root / ".matrixmouse",
-        log_file=repo_root / ".matrixmouse" / "agent.log",
-        agent_notes=repo_root / ".matrixmouse" / "AGENT_NOTES.md",
-        design_docs=repo_root / "docs" / "design",
-    )
-
     # --- AST graph ---
     logger.info("Building AST graph for %s ...", repo_root)
     graph = analyze_project(str(repo_root))
@@ -123,41 +104,14 @@ def cmd_run(args):
         len(graph.classes),
     )
 
-    # --- Git sanity check ---
-    _verify_git(repo_root)
-
     # --- Web server ---
     # TODO: start_server is currently a stub. Wire up when server.py is ready.
     # start_server(config, paths)
-
-
-    # Call new setup_repo utility from init module
-    setup_repo(repo_root) # Idempotent, safe to call every run
 
     # --- Orchestrator ---
     logger.info("Handing control to orchestrator...")
     orchestrator = Orchestrator(config=config, paths=paths, graph=graph)
     orchestrator.run()
-
-
-def _verify_git(repo_root: Path) -> None:
-    """
-    Confirm the repo root is a git repository. Logs a warning if not,
-    but does not abort — the agent can still run without git tools.
-    """
-    import subprocess
-    result = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        logger.warning(
-            "No git repository detected at %s. Git tools will not function.", repo_root
-        )
-    else:
-        logger.info("Git repository confirmed at %s", repo_root)
 
 
 # ---------------------------------------------------------------------------

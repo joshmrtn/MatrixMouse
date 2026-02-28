@@ -144,25 +144,6 @@ def generate_starter_config() -> str:
     return "\n".join(lines)
 
 
-def init_local_config(repo_root: Path) -> Path:
-    """
-    Write a starter config to <repo_root>/.matrixmouse/config.toml if one does
-    not already exist. Safe to call on every startup.
-
-    Args:
-        repo_root: Root directory of the repo.
-
-    Returns:
-        Path to the config file.
-    """
-    config_dir = repo_root / ".matrixmouse"
-    config_path = config_dir / "config.toml"
-
-    if not config_path.exists():
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(generate_starter_config())
-
-    return config_path
 
 
 @dataclass  
