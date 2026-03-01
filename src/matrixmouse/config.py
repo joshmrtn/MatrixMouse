@@ -93,6 +93,16 @@ class MatrixMouseConfig(BaseSettings):
         description="Number of recent turns to preserve during context compression.",
     )
 
+    # --- Comms ---
+    ntfy_url: str = Field(
+            default = "",
+            description = "ntfy server URL, e.g. https://ntfy.sh"
+            )
+    ntfy_topic: str = Field(
+            default="matrixmouse",
+            description = "ntfy topic name"
+            )
+
     model_config = {"extra": "ignore"}  # silently ignore unknown keys from TOML
 
 

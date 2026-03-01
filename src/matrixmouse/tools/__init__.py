@@ -46,6 +46,7 @@ from matrixmouse.tools.navigation_tools import (
     project_find,
 )
 from matrixmouse.tools.test_tools import run_tests, run_single_test
+from matrixmouse.tools.comms_tools import request_clarification
 
 TOOLS = [
     # file_tools
@@ -83,6 +84,8 @@ TOOLS = [
     # test_tools
     run_tests,
     run_single_test,
+    # comms_tools
+    request_clarification,
 
     # Add tools here as modules are implemented
 ]

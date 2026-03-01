@@ -269,6 +269,8 @@ class Orchestrator:
         queue_path = paths.config_dir / "tasks.json"
         self.queue = TaskQueue(queue_path)
         self._router = Router(config)
+        from matrixmouse.comms import get_manager
+        self._comms = get_manager()
 
     def run(self) -> None:
         """
@@ -370,6 +372,7 @@ class Orchestrator:
         Returns a PhaseResult containing both the loop outcome and the
         stuck detector so the caller can use diagnostics for escalation.
         """
+        from matrixmouse.comms import poll_interjection
         detector = StuckDetector(phase=phase)
         context_manager = ContextManager(
             config=self.config,
@@ -383,6 +386,7 @@ class Orchestrator:
             paths=self.paths,
             context_manager=context_manager,
             stuck_detector=detector,
+            comms=poll_interjection,
         )
         result = loop.run()
 

@@ -42,6 +42,7 @@ import argparse
 from matrixmouse.init import setup_repo, validate_models
 from matrixmouse.graph import ProjectAnalyzer, analyze_project
 from matrixmouse import memory
+from matrixmouse import comms
 from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.server import start_server
 from matrixmouse.tools import _safety, code_tools, TOOLS, TOOL_REGISTRY  # noqa: F401  (used by orchestrator)
@@ -116,6 +117,9 @@ def cmd_run(args):
 
     # --- Configure memory module ---
     memory.configure(paths.agent_notes)
+
+    # --- Configure comms module ---
+    comms.configure(config)
 
     # --- Web server ---
     # TODO: start_server is currently a stub. Wire up when server.py is ready.
