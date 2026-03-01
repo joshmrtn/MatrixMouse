@@ -27,7 +27,7 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 
-from matrixmouse.orchestrator import Phase
+from matrixmouse.phases import Phase
 
 logger = logging.getLogger(__name__)
 
