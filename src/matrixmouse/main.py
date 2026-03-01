@@ -43,7 +43,7 @@ from matrixmouse.init import setup_repo, validate_models
 from matrixmouse.graph import ProjectAnalyzer, analyze_project
 from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.server import start_server
-from matrixmouse.tools import _safety, TOOLS, TOOL_REGISTRY  # noqa: F401  (used by orchestrator)
+from matrixmouse.tools import _safety, code_tools, TOOLS, TOOL_REGISTRY  # noqa: F401  (used by orchestrator)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +109,9 @@ def cmd_run(args):
         len(graph.functions),
         len(graph.classes),
     )
+
+    # --- Configure code_tools with AST graph
+    code_tools.configure(graph)
 
     # --- Web server ---
     # TODO: start_server is currently a stub. Wire up when server.py is ready.

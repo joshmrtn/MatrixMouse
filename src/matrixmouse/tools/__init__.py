@@ -32,11 +32,16 @@ from matrixmouse.tools.git_tools import (
     push_branch,
     open_pull_request,
 )
+from matrixmouse.tools.code_tools import (
+    get_function_def,
+    get_function_list,
+    get_class_summary,
+    get_dependencies,
+    get_call_sites,
+    get_imports,
+)
 # from matrixmouse.tools.navigation_tools import (
 #     get_project_directory_structure, project_grep, project_find
-# )
-# from matrixmouse.tools.code_tools import (
-#     get_function_def, get_function_list, get_class_summary
 # )
 # from matrixmouse.tools.test_tools import run_tests
 
@@ -61,6 +66,14 @@ TOOLS = [
     get_git_status,
     push_branch,
     open_pull_request,
+    # code_tools
+    get_function_def,
+    get_function_list,
+    get_class_summary,
+    get_dependencies,
+    get_call_sites,
+    get_imports,
+
     # TODO: add tools here as modules are implemented
 ]
 

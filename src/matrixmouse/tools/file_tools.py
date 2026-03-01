@@ -15,6 +15,8 @@ Do not add navigation, git, or AST tools here.
 import logging
 from matrixmouse.tools._safety import is_safe_path
 
+from matrixmouse.tools import code_tools
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +97,10 @@ def str_replace(filename: str, old_str: str, new_str: str) -> str:
     except Exception as e:
         return f"ERROR writing {filename}: {e}"
 
+    # Update AST graph for this file
+    if code_tools._graph is not None:
+        code_tools._graph.update_file(result)
+
     logger.info("str_replace: %s — replaced 1 occurrence.", filename)
     return "OK: Replacement made successfully."
 
@@ -126,6 +132,10 @@ def append_to_file(filename: str, content: str) -> str:
                 f.write("\n")
     except Exception as e:
         return f"ERROR appending to {filename}: {e}"
+
+    # Update AST graph for this file
+    if code_tools._graph is not None:
+        code_tools._graph.update_file(result)
 
     logger.info("append_to_file: %s", filename)
     return f"OK: Content appended to {filename} successfully."
