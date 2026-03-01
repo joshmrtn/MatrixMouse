@@ -23,9 +23,15 @@ from matrixmouse.tools.file_tools import read_file, str_replace, append_to_file
 from matrixmouse.tools.system_tools import declare_complete
 
 # TODO: uncomment as each tool module is implemented
-# from matrixmouse.tools.git_tools import (
-#     create_task_branch, commit_progress, get_git_diff, get_git_log
-# )
+from matrixmouse.tools.git_tools import (
+    create_task_branch,
+    commit_progress,
+    get_git_diff,
+    get_git_log,
+    get_git_status,
+    push_branch,
+    open_pull_request,
+)
 # from matrixmouse.tools.navigation_tools import (
 #     get_project_directory_structure, project_grep, project_find
 # )
@@ -35,10 +41,26 @@ from matrixmouse.tools.system_tools import declare_complete
 # from matrixmouse.tools.test_tools import run_tests
 
 TOOLS = [
+    # file_tools
     read_file,
     str_replace,
     append_to_file,
+    # system_tools
     declare_complete,
+    # git_tools
+    create_task_branch,
+    commit_progress,
+    get_git_diff,
+    get_git_log,
+    get_git_status,
+    push_branch,
+    open_pull_request,create_task_branch,
+    commit_progress,
+    get_git_diff,
+    get_git_log,
+    get_git_status,
+    push_branch,
+    open_pull_request,
     # TODO: add tools here as modules are implemented
 ]
 
