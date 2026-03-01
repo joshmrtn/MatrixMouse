@@ -39,6 +39,7 @@ from typing import Optional
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.stuck import StuckDetector
+from matrixmouse.context import ContextManager
 
 logger = logging.getLogger(__name__)
 
