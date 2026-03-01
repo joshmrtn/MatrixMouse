@@ -14,13 +14,13 @@ Early development.
 
 ## Notes
 
-Ollama uses an `OLLAMA_MAX_LOADED_MODELS` variable that may cause excessive loading/unloading of models if not adjusted to your system's capabilities. Ideally, you would set this to the number of distinct models you have chosen to use. Recommend setting this value to 2 or more as long as your system can handle it. (By default, it is set to 1 for CPU only systems, and 3 for systems with a GPU).  
+Ollama uses an `OLLAMA_MAX_LOADED_MODELS` variable that may cause excessive loading/unloading of models if not adjusted to your system's capabilities. Ideally, you would set this to the number of distinct models you have chosen to use. Recommend setting this value to 4 or more as long as your system can handle it. (By default, it is set to 1 for CPU only systems, and 3 for systems with a GPU).  
 
 Example:
 
 ```bash
-# start matrixmouse with a maximum of 2 models
-OLLAMA_MAX_LOADED_MODELS=2 matrixmouse run
+# start matrixmouse with a maximum of 4 models
+OLLAMA_MAX_LOADED_MODELS=4 matrixmouse run
 ```
 
 You may also set this globally in your shell profile or Ollama's systemd service.
