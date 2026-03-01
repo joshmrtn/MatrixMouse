@@ -188,7 +188,7 @@ class AgentLoop:
             messages=self.messages,
             stream=False,
             tools=TOOLS,
-            keep_alive="30m",
+            keep_alive="2h",
         )
 
     def _dispatch_tools(self, tool_calls) -> LoopResult | None:
