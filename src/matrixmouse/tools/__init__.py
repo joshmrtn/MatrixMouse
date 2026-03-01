@@ -40,9 +40,12 @@ from matrixmouse.tools.code_tools import (
     get_call_sites,
     get_imports,
 )
-# from matrixmouse.tools.navigation_tools import (
-#     get_project_directory_structure, project_grep, project_find
-# )
+from matrixmouse.tools.navigation_tools import (
+    get_project_directory_structure,
+    get_file_summary,
+    project_grep,
+    project_find,
+)
 # from matrixmouse.tools.test_tools import run_tests
 
 TOOLS = [
@@ -73,6 +76,11 @@ TOOLS = [
     get_dependencies,
     get_call_sites,
     get_imports,
+    # navigation_tools
+    get_project_directory_structure,
+    get_file_summary,
+    project_grep,
+    project_find,
 
     # TODO: add tools here as modules are implemented
 ]
