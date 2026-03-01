@@ -39,7 +39,7 @@ logger.info("MatrixMouse starting up...")
 # ---------------------------------------------------------------------------
 import argparse
 
-from matrixmouse.init import setup_repo
+from matrixmouse.init import setup_repo, validate_models
 from matrixmouse.graph import ProjectAnalyzer, analyze_project
 from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.server import start_server
@@ -94,6 +94,9 @@ def cmd_run(args):
         repo_root=repo_root,
     )
     logger.info("Configuration loaded. Log level: %s", config.log_level)
+
+    # --- Validate Ollama Models ---
+    validate_models(config)
 
     # --- AST graph ---
     logger.info("Building AST graph for %s ...", repo_root)

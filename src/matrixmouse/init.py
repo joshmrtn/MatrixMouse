@@ -7,6 +7,7 @@ Everything related to setting up a repo for matrixmouse
 
 from pathlib import Path
 import logging
+import ollama
 
 logger = logging.getLogger(__name__)
 
@@ -289,3 +290,56 @@ def setup_repo(repo_root: Path) -> MatrixMousePaths:
     _ensure_docs_structure(paths)
     _verify_git(repo_root)
     return paths
+
+
+
+def validate_models(config: MatrixMouseConfig) -> None:
+    """
+    Verify all configured models are available and support tools.
+    Attempts to pull missing models. Raises on unsupported capabilities.
+    Called once at startup in cmd_run before the orchestrator starts.
+    """
+    models_to_check = {
+        "coder": config.coder,
+        "planner": config.planner,
+        "judge": config.judge,
+        # summarizer doesn't need tool support
+        "summarizer": (config.summarizer, False),
+    }
+
+    for role, model_name in models_to_check.items():
+        requires_tools = True
+        if isinstance(model_name, tuple):
+            model_name, requires_tools = model_name
+
+        _ensure_model_available(model_name)
+
+        if requires_tools:
+            _ensure_model_supports_tools(model_name, role)
+
+
+def _ensure_model_available(model_name: str) -> None:
+    """Pull the model if not already present."""
+    try:
+        ollama.show(model_name)
+        logger.info("Model available: %s", model_name)
+    except ollama.ResponseError as e:
+        if e.status_code == 404:
+            logger.info("Model %s not found locally. Pulling...", model_name)
+            print(f"Pulling model {model_name}...")
+            ollama.pull(model_name)
+            logger.info("Model %s pulled successfully.", model_name)
+        else:
+            raise
+
+
+def _ensure_model_supports_tools(model_name: str, role: str) -> None:
+    """Raise a clear error if the model doesn't support tool calling."""
+    info = ollama.show(model_name)
+    capabilities = getattr(info, "capabilities", []) or []
+    if "tools" not in capabilities:
+        raise ValueError(
+            f"Model '{model_name}' (configured for role '{role}') does not support "
+            f"tool calling. Choose a model with 'tools' in its capabilities. "
+            f"Run 'ollama show {model_name}' to check."
+        )
