@@ -6,8 +6,11 @@ Everything related to setting up a repo for matrixmouse
 """
 
 from pathlib import Path
+import logging
 
-from matrixmouse.config import MatrixMousePaths
+logger = logging.getLogger(__name__)
+
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
 
 def _generate_starter_config() -> str:                                               
     """
@@ -42,18 +45,18 @@ def _generate_starter_config() -> str:
     return "\n".join(lines)
 
 
-def _ensure_starter_config(paths) -> None:
+def _ensure_starter_config(paths: MatrixMousePaths) -> None:
     """
     Write a starter config to <repo_root>/.matrixmouse/config.toml if one does
     not already exist. Safe to call on every startup.
 
     Args:
-        repo_root: Root directory of the repo.
+        paths (MatrixMousePaths): Root directory of the repo.
 
     Returns:
         Path to the config file.
     """
-    config_dir = repo_root / ".matrixmouse"
+    config_dir = paths.config_dir 
     config_path = config_dir / "config.toml"
 
     if not config_path.exists():
@@ -231,6 +234,21 @@ def _ensure_docs_structure(paths: MatrixMousePaths) -> None:
     _ensure_design_template(paths.design_docs)
     _ensure_adr_template(paths.design_docs.parent / "adr")
 
+
+def _ensure_matrixmouse_dir(paths: MatrixMousePaths) -> None:
+    """
+    Create the .matrixmouse/ directory if it doesn't exist.
+    Must be called before any other _ensure_* functions since they all
+    write files into this directory.
+
+    Args:
+        paths: Resolved MatrixMousePaths for the current session.
+    """
+    if not paths.config_dir.exists():
+        paths.config_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Created .matrixmouse/ at %s", paths.config_dir)
+    else:
+        logger.debug(".matrixmouse/ already exists at %s", paths.config_dir)
 
 
 def _build_paths(repo_root: Path) -> MatrixMousePaths:
