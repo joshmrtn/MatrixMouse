@@ -39,20 +39,30 @@ class MatrixMouseConfig(BaseSettings):
 
     # --- Models ---
     coder: str = Field(
-            default="qwen3:8b",
+            default="qwen3:4b",
         description="Model for code generation and implementation tasks.",
     )
     planner: str = Field(
-        default="qwen3:8b",
+        default="qwen3:4b",
         description="Model for planning, design, and architectural decisions.",
     )
     judge: str = Field(
-        default="qwen3:8b",
+        default="qwen3:4b",
         description="Model for critique, review, and stuck detection.",
     )
     summarizer: str = Field(
         default="qwen3:4b",
         description="Model for context summarisation. Should be small and fast.",
+    )
+
+    # --- Coder Cascade Ladder ---
+    coder_cascade: list[str] = Field(
+            default = ["qwen3:4b", "qwen3:8b", "qwen3:14b", "qwen3-coder:30b"],
+            description = (
+                "Ordered list of models for the coder cascade, smallest to largest. "
+                "If empty, only config.coder is used with no escalation. "
+                "Example: ['qwen2.5-coder:7b', 'qwen2.5-coder:14b', 'qwen2.5-coder:30b']"
+            ),
     )
 
     # --- Logging ---

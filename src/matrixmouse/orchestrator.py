@@ -32,18 +32,33 @@ Do not add model selection logic here. That belongs to router.py.
 import json
 import logging
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from pathlib import Path
 from typing import Optional
 
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
-from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
-from matrixmouse.stuck import StuckDetector
 from matrixmouse.context import ContextManager
+from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
+from matrixmouse.phases import Phase, PHASE_SEQUENCE, next_phase
+from matrixmouse.router import Router
+from matrixmouse.stuck import StuckDetector
 
 logger = logging.getLogger(__name__)
 
-from matrixmouse.phases import Phase, PHASE_SEQUENCE, next_phase
+
+# ---------------------------------------------------------------------------
+# PhaseResult — bundles loop outcome with stuck diagnostics
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PhaseResult:
+    """
+    The outcome of a single phase run.
+    Bundles the LoopResult with the StuckDetector so _run_task can
+    access diagnostics when handling escalation.
+    """
+    loop_result: LoopResult
+    detector: StuckDetector
+
 
 # ---------------------------------------------------------------------------
 # Task model
@@ -57,12 +72,12 @@ class Task:
     Designed to be source-agnostic — the orchestrator doesn't care whether
     a task was loaded from a local file or fetched from a GitHub issue.
     """
-    id: str                         # unique identifier, e.g. "task-001" or "issue-42"
-    title: str                      # short human-readable description
-    description: str                # full task specification handed to the agent
-    phase: Phase = Phase.DESIGN     # current phase in the SDLC state machine
-    target_files: list = field(default_factory=list)   # files the agent should focus on
-    notes: str = ""                 # any scoping notes added by the orchestrator
+    id: str
+    title: str
+    description: str
+    phase: Phase = Phase.DESIGN
+    target_files: list = field(default_factory=list)
+    notes: str = ""
     source: str = "local"           # "local" | "github" | "gitea"
 
 
@@ -245,7 +260,7 @@ class Orchestrator:
         self,
         config: MatrixMouseConfig,
         paths: MatrixMousePaths,
-        graph=None,             # ProjectAnalyzer instance, optional until graph.py is implemented
+        graph=None,
     ):
         self.config = config
         self.paths = paths
@@ -253,10 +268,7 @@ class Orchestrator:
 
         queue_path = paths.config_dir / "tasks.json"
         self.queue = TaskQueue(queue_path)
-
-        # TODO: wire in router.py for model selection per phase/role
-        # For now, all phases use the configured coder model
-        self._model = config.coder
+        self._router = Router(config)
 
     def run(self) -> None:
         """
@@ -275,7 +287,6 @@ class Orchestrator:
             task = self.queue.get_next()
             if task is None:
                 break
-
             logger.info("Starting task: [%s] %s", task.id, task.title)
             self._run_task(task)
 
@@ -293,13 +304,20 @@ class Orchestrator:
         while current_phase != Phase.DONE:
             logger.info("Task %s entering phase: %s", task.id, current_phase.name)
 
-            result = self._run_phase(task, current_phase, messages)
+            phase_result = self._run_phase(task, current_phase, messages)
+            result = phase_result.loop_result
+            detector = phase_result.detector
 
             if result.exit_reason == LoopExitReason.COMPLETE:
                 logger.info(
                     "Task %s phase %s complete. Summary: %s",
                     task.id, current_phase.name, result.completion_summary
                 )
+
+                # Record success toward de-escalation if this was a coding phase
+                if current_phase in (Phase.IMPLEMENT, Phase.TEST):
+                    self._router.record_success()
+
                 advanced = next_phase(current_phase)
                 if advanced is None or advanced == Phase.DONE:
                     self.queue.mark_complete(task.id)
@@ -307,19 +325,28 @@ class Orchestrator:
                     return
 
                 current_phase = advanced
-                # Carry message history forward into the next phase with
-                # an updated system prompt.
                 messages = self._splice_phase_prompt(result.messages, task, current_phase)
 
             elif result.exit_reason == LoopExitReason.ESCALATE:
-                # TODO: wire into router.py to try a larger model
-                # For now, route to human and pause
-                logger.warning(
-                    "Task %s escalated during phase %s. Awaiting human input.",
-                    task.id, current_phase.name
-                )
-                self._request_human_intervention(task, current_phase, result)
-                return
+                escalated, new_model = self._router.escalate(detector)
+
+                if escalated:
+                    logger.info(
+                        "Task %s escalating to %s for phase %s.",
+                        task.id, new_model, current_phase.name
+                    )
+                    # Build clean handoff context and retry the same phase
+                    messages = self._router.build_handoff(detector, result.messages)
+                    # Loop continues — same phase, new model via _router.model_for_phase()
+                else:
+                    # Already at top of cascade — needs human
+                    logger.warning(
+                        "Task %s at cascade ceiling during phase %s. "
+                        "Human intervention required.",
+                        task.id, current_phase.name
+                    )
+                    self._request_human_intervention(task, current_phase, result)
+                    return
 
             elif result.exit_reason == LoopExitReason.MAX_TURNS:
                 logger.error(
@@ -337,19 +364,20 @@ class Orchestrator:
                 self._request_human_intervention(task, current_phase, result)
                 return
 
-    def _run_phase(self, task: Task, phase: Phase, messages: list) -> LoopResult:
+    def _run_phase(self, task: Task, phase: Phase, messages: list) -> PhaseResult:
         """
         Instantiate and run an AgentLoop for a single phase of a task.
-        Returns the LoopResult for the orchestrator to act on.
+        Returns a PhaseResult containing both the loop outcome and the
+        stuck detector so the caller can use diagnostics for escalation.
         """
         detector = StuckDetector(phase=phase)
         context_manager = ContextManager(
             config=self.config,
             paths=self.paths,
-            coder_model=self._model,
+            coder_model=self._router.model_for_phase(phase),
         )
         loop = AgentLoop(
-            model=self._model,
+            model=self._router.model_for_phase(phase),
             messages=messages,
             config=self.config,
             paths=self.paths,
@@ -358,12 +386,10 @@ class Orchestrator:
         )
         result = loop.run()
 
-        # Attach diagnostic summary for router.py to use later
         if result.exit_reason == LoopExitReason.ESCALATE:
             logger.warning("Stuck summary: %s", detector.summary)
 
-        return result
-
+        return PhaseResult(loop_result=result, detector=detector)
 
     def _build_initial_messages(self, task: Task, phase: Phase) -> list:
         """
@@ -396,7 +422,6 @@ class Orchestrator:
             "role": "system",
             "content": _build_system_prompt(new_phase, task),
         }
-        # Replace first message (system prompt) and keep everything else
         return [new_system] + messages[1:]
 
     def _request_human_intervention(
@@ -404,7 +429,6 @@ class Orchestrator:
     ) -> None:
         """
         Signal that a task needs human attention and cannot proceed.
-        Logs the situation clearly.
 
         TODO: wire into comms.py to send a push notification and
         surface the blocked task in the web UI.
