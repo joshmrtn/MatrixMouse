@@ -287,9 +287,6 @@ class ContextManager:
 
         This is a best-effort operation — failures are logged but do not
         block compression.
-
-        TODO: Make this smarter once memory.py is implemented. For now
-        it appends a brief summary to the [CONTEXT SUMMARY] section.
         """
         try:
             notes_path = self.paths.agent_notes
@@ -320,6 +317,31 @@ class ContextManager:
         except Exception as e:
             logger.warning("Failed to write discoveries to notes: %s", e)
 
+    def _save_discoveries_to_notes(self, messages: list) -> None:
+        """
+        Extract and append any notable discoveries from the messages
+        being compressed to AGENT_NOTES.md, so they survive compression.
+    
+        This is a best-effort operation — failures are logged but do not
+        block compression.
+        """
+        try:
+            from matrixmouse import memory
+            from datetime import datetime
+    
+            if memory._manager is None:
+                logger.debug("Memory not configured — skipping discovery save.")
+                return
+    
+            summary = self._summarise(messages)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            entry = f"### {timestamp}\n{summary}"
+    
+            memory._manager.append_to_section("context_compression_log", entry)
+            logger.debug("Discoveries written to context_compression_log before compression.")
+
+        except Exception as e:
+            logger.warning("Failed to write discoveries to notes: %s", e)
 
 # ---------------------------------------------------------------------------
 # Convenience function for use before ContextManager is wired into the loop
