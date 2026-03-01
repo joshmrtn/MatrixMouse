@@ -280,42 +280,6 @@ class ContextManager:
                 f"{len(messages)} messages were compressed without summary.)"
             )
 
-    def _save_discoveries_to_notes(self, messages: list) -> None:
-        """
-        Extract and append any notable discoveries from the messages
-        being compressed to AGENT_NOTES.md, so they survive compression.
-
-        This is a best-effort operation — failures are logged but do not
-        block compression.
-        """
-        try:
-            notes_path = self.paths.agent_notes
-            if not notes_path.exists():
-                return
-
-            summary = self._summarise(messages)
-            existing = notes_path.read_text()
-
-            # Append to a compression log section
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-            entry = (
-                f"\n### Compression record — {timestamp}\n"
-                f"{summary}\n"
-            )
-
-            # Insert after the [CONTEXT SUMMARY] header if it exists,
-            # otherwise append to end of file
-            if "## context_summary" in existing.lower():
-                updated = existing + entry
-            else:
-                updated = existing + "\n## Context Compression Log\n" + entry
-
-            notes_path.write_text(updated)
-            logger.debug("Discoveries written to AGENT_NOTES.md before compression.")
-
-        except Exception as e:
-            logger.warning("Failed to write discoveries to notes: %s", e)
 
     def _save_discoveries_to_notes(self, messages: list) -> None:
         """
