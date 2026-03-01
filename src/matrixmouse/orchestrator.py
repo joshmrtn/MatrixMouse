@@ -38,6 +38,7 @@ from typing import Optional
 
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
+from matrixmouse.stuck import StuckDetector
 
 logger = logging.getLogger(__name__)
 
@@ -374,15 +375,28 @@ class Orchestrator:
         Instantiate and run an AgentLoop for a single phase of a task.
         Returns the LoopResult for the orchestrator to act on.
         """
+        detector = StuckDetector(phase=phase)
+        context_manager = ContextManager(
+            config=self.config,
+            paths=self.paths,
+            coder_model=self._model,
+        )
         loop = AgentLoop(
             model=self._model,
             messages=messages,
             config=self.config,
             paths=self.paths,
-            # TODO: pass real context_manager, stuck_detector, comms
-            # once those subsystems are implemented
+            context_manager=context_manager,
+            stuck_detector=detector,
         )
-        return loop.run()
+        result = loop.run()
+
+        # Attach diagnostic summary for router.py to use later
+        if result.exit_reason == LoopExitReason.ESCALATE:
+            logger.warning("Stuck summary: %s", detector.summary)
+
+        return result
+
 
     def _build_initial_messages(self, task: Task, phase: Phase) -> list:
         """
