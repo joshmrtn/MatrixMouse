@@ -14,8 +14,6 @@ Do not add navigation, git, or AST tools here.
 
 def read_file(filename):
     """Read entire file content"""
-    if filename not in ALLOWED_FILES:
-        return "Error: File access denied"
     try:
         with open(filename, 'r') as f:
             return f.read()
