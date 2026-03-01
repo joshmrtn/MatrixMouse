@@ -39,19 +39,19 @@ class MatrixMouseConfig(BaseSettings):
 
     # --- Models ---
     coder: str = Field(
-        default="qwen3-coder:30b",
+            default="qwen3:8b",
         description="Model for code generation and implementation tasks.",
     )
     planner: str = Field(
-        default="gpt-oss:20b",
+        default="qwen3:8b",
         description="Model for planning, design, and architectural decisions.",
     )
     judge: str = Field(
-        default="gpt-oss:20b",
+        default="qwen3:8b",
         description="Model for critique, review, and stuck detection.",
     )
     summarizer: str = Field(
-        default="phi3-mini",
+        default="qwen3:4b",
         description="Model for context summarisation. Should be small and fast.",
     )
 
