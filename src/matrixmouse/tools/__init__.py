@@ -22,7 +22,6 @@ Submodules:
 from matrixmouse.tools.file_tools import read_file, str_replace, append_to_file
 from matrixmouse.tools.system_tools import declare_complete
 
-# TODO: uncomment as each tool module is implemented
 from matrixmouse.tools.git_tools import (
     create_task_branch,
     commit_progress,
@@ -46,7 +45,7 @@ from matrixmouse.tools.navigation_tools import (
     project_grep,
     project_find,
 )
-# from matrixmouse.tools.test_tools import run_tests
+from matrixmouse.tools.test_tools import run_tests, run_single_test
 
 TOOLS = [
     # file_tools
@@ -81,8 +80,11 @@ TOOLS = [
     get_file_summary,
     project_grep,
     project_find,
+    # test_tools
+    run_tests,
+    run_single_test,
 
-    # TODO: add tools here as modules are implemented
+    # Add tools here as modules are implemented
 ]
 
 # Built automatically — never update this manually
