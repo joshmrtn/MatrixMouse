@@ -272,6 +272,32 @@ def _build_paths(repo_root: Path) -> MatrixMousePaths:
         design_docs=repo_root / "docs" / "design",
     )
 
+
+def _ensure_ignore_file(paths: MatrixMousePaths) -> None:
+    """
+    Write a starter .matrixmouse/ignore file if one does not exist.
+    Patterns here are appended to the hardcoded safety blacklist in _safety.py.
+    """
+    ignore_path = paths.config_dir / "ignore"
+    if ignore_path.exists():
+        return
+
+    ignore_path.write_text(
+        "# MatrixMouse ignore file\n"
+        "# Paths matching these patterns cannot be read or written by the agent.\n"
+        "# Uses fnmatch syntax (same as .gitignore glob patterns).\n"
+        "# Lines starting with # are comments.\n"
+        "#\n"
+        "# The following patterns are always enforced regardless of this file:\n"
+        "#   .env, .env.*, **/secrets.*, **/*.pem, **/*.key\n"
+        "#\n"
+        "# Add project-specific patterns below:\n"
+        "# pyproject.toml\n"
+        "# src/matrixmouse/main.py\n"
+    )
+    logger.debug("Created .matrixmouse/ignore at %s", ignore_path)
+
+
 def setup_repo(repo_root: Path) -> MatrixMousePaths:
     """
     Idempotent repo setup. Safe to call on every run.
@@ -288,6 +314,7 @@ def setup_repo(repo_root: Path) -> MatrixMousePaths:
     _ensure_notes_file(paths)
     _ensure_gitignore(repo_root)
     _ensure_docs_structure(paths)
+    _ensure_ignore_file(paths)
     _verify_git(repo_root)
     return paths
 

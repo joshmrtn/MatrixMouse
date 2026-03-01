@@ -43,7 +43,7 @@ from matrixmouse.init import setup_repo, validate_models
 from matrixmouse.graph import ProjectAnalyzer, analyze_project
 from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.server import start_server
-from matrixmouse.tools import TOOLS, TOOL_REGISTRY  # noqa: F401  (used by orchestrator)
+from matrixmouse.tools import _safety, TOOLS, TOOL_REGISTRY  # noqa: F401  (used by orchestrator)
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,9 @@ def cmd_run(args):
     # --- Config ---
     paths = setup_repo(repo_root)
     config = load_config(repo_root)
+
+    # --- Set up safety module ---
+    _safety.configure(repo_root=paths.repo_root)
 
     # --- Reconfigure logging with user preferences ---
     setup_logging(
