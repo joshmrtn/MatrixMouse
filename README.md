@@ -16,7 +16,7 @@ Early development.
 
 ### Prerequisites
 
-MatrixMouse is only developed for Linux. You'll need (Docker)[https://docs.docker.com/engine/install/], (Docker Compose)[https://docs.docker.com/compose/install/linux/#install-using-the-repository], and (Ollama)[https://ollama.com/download/linux] installed on the host machine.
+MatrixMouse is only developed for Linux. You'll need [Docker](https://docs.docker.com/engine/install/), [Docker Compose](https://docs.docker.com/compose/install/linux/#install-using-the-repository), and [Ollama](https://ollama.com/download/linux) installed on the host machine.
 
 ### Installation steps
 
