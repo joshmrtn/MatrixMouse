@@ -574,6 +574,387 @@ def cmd_status(args):
 
 
 
+def _load_tasks_file() -> tuple["Path", list[dict]]:
+    """
+    Load tasks.json from the workspace. Does not require the agent to
+    be running — reads the file directly.
+
+    Returns:
+        (tasks_file_path, list_of_raw_task_dicts)
+    """
+    workspace_root = _resolve_workspace()
+    tasks_file = workspace_root / ".matrixmouse" / "tasks.json"
+
+    if not tasks_file.exists():
+        return tasks_file, []
+
+    with open(tasks_file) as f:
+        return tasks_file, json.load(f)
+
+
+def _save_tasks_file(tasks_file: "Path", tasks: list[dict]) -> None:
+    """Write tasks back to tasks.json."""
+    tasks_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(tasks_file, "w") as f:
+        json.dump(tasks, f, indent=2)
+
+
+def _find_task(tasks: list[dict], task_id: str) -> dict | None:
+    """Find a task by ID prefix match (allows short IDs like 'a1b2')."""
+    exact = next((t for t in tasks if t.get("id") == task_id), None)
+    if exact:
+        return exact
+    # Prefix match
+    matches = [t for t in tasks if t.get("id", "").startswith(task_id)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        ids = ", ".join(t["id"] for t in matches)
+        print(f"Ambiguous ID '{task_id}' matches: {ids}")
+        return None
+    return None
+
+
+def _fmt_task_row(t: dict) -> str:
+    """Format a task as a single-line summary row."""
+    status  = t.get("status", "pending")
+    title   = t.get("title", "(no title)")
+    tid     = t.get("id", "?")
+    repo    = ", ".join(t.get("repo", [])) or "—"
+    imp     = t.get("importance", 0.5)
+    urg     = t.get("urgency", 0.5)
+    blocked = " [BLOCKED]" if "blocked" in status else ""
+    return f"[{tid}] {title}{blocked}  repo={repo}  i={imp} u={urg}  ({status})"
+
+
+def _fmt_task_detail(t: dict) -> str:
+    """Format a task as a full detail block."""
+    lines = [
+        f"ID:           {t.get('id', '?')}",
+        f"Title:        {t.get('title', '')}",
+        f"Status:       {t.get('status', 'pending')}",
+        f"Phase:        {t.get('phase', '?')}",
+        f"Repo:         {', '.join(t.get('repo', [])) or '—'}",
+        f"Importance:   {t.get('importance', 0.5)}",
+        f"Urgency:      {t.get('urgency', 0.5)}",
+        f"Created:      {t.get('created_at', '?')}",
+    ]
+    if t.get("target_files"):
+        lines.append(f"Target files: {', '.join(t['target_files'])}")
+    if t.get("blocked_by"):
+        lines.append(f"Blocked by:   {', '.join(t['blocked_by'])}")
+    if t.get("blocking"):
+        lines.append(f"Blocking:     {', '.join(t['blocking'])}")
+    if t.get("parent_task"):
+        lines.append(f"Parent:       {t['parent_task']}")
+    if t.get("subtasks"):
+        lines.append(f"Subtasks:     {', '.join(t['subtasks'])}")
+    if t.get("notes"):
+        lines.append(f"\nNotes:\n{t['notes']}")
+    if t.get("description"):
+        lines.append(f"\nDescription:\n{t['description']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# cmd_tasks dispatcher
+# ---------------------------------------------------------------------------
+
+def cmd_tasks(args):
+    """Route to the appropriate tasks subcommand."""
+    subcmd = getattr(args, "tasks_subcmd", None)
+    dispatch = {
+        "list":   cmd_tasks_list,
+        "show":   cmd_tasks_show,
+        "add":    cmd_tasks_add,
+        "edit":   cmd_tasks_edit,
+        "cancel": cmd_tasks_cancel,
+    }
+    if subcmd not in dispatch:
+        print("Usage: matrixmouse tasks <list|show|add|edit|cancel>")
+        sys.exit(1)
+    dispatch[subcmd](args)
+
+
+def cmd_tasks_list(args):
+    """
+    List tasks in the queue.
+
+    Filters:
+        --status:  pending, active, blocked_by_task, blocked_by_human,
+                   complete, cancelled. Default: all non-terminal.
+        --repo:    Filter by repo name.
+        --all:     Include terminal (complete/cancelled) tasks.
+    """
+    _, tasks = _load_tasks_file()
+
+    if not tasks:
+        print("No tasks found. Add one with: matrixmouse tasks add")
+        return
+
+    status_filter = getattr(args, "status", None)
+    repo_filter   = getattr(args, "repo", None)
+    show_all      = getattr(args, "all", False)
+
+    terminal = {"complete", "cancelled"}
+    filtered = tasks
+
+    if not show_all and not status_filter:
+        filtered = [t for t in filtered if t.get("status", "pending") not in terminal]
+
+    if status_filter:
+        filtered = [t for t in filtered if t.get("status") == status_filter]
+
+    if repo_filter:
+        filtered = [t for t in filtered if repo_filter in t.get("repo", [])]
+
+    if not filtered:
+        print("No tasks match the filter.")
+        return
+
+    # Sort by priority score approximation (importance * 0.6 + urgency * 0.4)
+    filtered.sort(
+        key=lambda t: t.get("importance", 0.5) * 0.6 + t.get("urgency", 0.5) * 0.4,
+        reverse=True,
+    )
+
+    for t in filtered:
+        print(_fmt_task_row(t))
+
+    print(f"\n{len(filtered)} task(s) shown.")
+
+
+def cmd_tasks_show(args):
+    """Show full details of a single task."""
+    _, tasks = _load_tasks_file()
+
+    task = _find_task(tasks, args.id)
+    if task is None:
+        print(f"ERROR: Task '{args.id}' not found.")
+        sys.exit(1)
+
+    print(_fmt_task_detail(task))
+
+
+def cmd_tasks_add(args):
+    """
+    Interactively create a new task and append it to tasks.json.
+    Prompts for essential fields only — dependency links can be set
+    later with 'matrixmouse tasks edit'.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    workspace_root = _resolve_workspace()
+    tasks_file, tasks = _load_tasks_file()
+
+    print("Adding a new task. Press Ctrl+C to cancel.\n")
+
+    # Discover registered repos for the prompt hint
+    repos_file = workspace_root / ".matrixmouse" / "repos.json"
+    known_repos = []
+    if repos_file.exists():
+        with open(repos_file) as f:
+            known_repos = [r.get("name", "") for r in json.load(f)]
+    repo_hint = f" (known: {', '.join(known_repos)})" if known_repos else ""
+
+    title = input(f"Title: ").strip()
+    if not title:
+        print("Aborted — title is required.")
+        sys.exit(1)
+
+    print("Description (end with a line containing only '.'):")
+    desc_lines = []
+    while True:
+        line = input()
+        if line == ".":
+            break
+        desc_lines.append(line)
+    description = "\n".join(desc_lines).strip()
+
+    repo_input = input(f"Repo{repo_hint} (comma-separated, or leave blank): ").strip()
+    repo = [r.strip() for r in repo_input.split(",") if r.strip()] if repo_input else []
+
+    files_input = input("Target files (comma-separated, or leave blank): ").strip()
+    target_files = [f.strip() for f in files_input.split(",") if f.strip()] if files_input else []
+
+    try:
+        importance = float(input("Importance 0.0-1.0 [0.5]: ").strip() or "0.5")
+        importance = max(0.0, min(1.0, importance))
+    except ValueError:
+        importance = 0.5
+
+    try:
+        urgency = float(input("Urgency 0.0-1.0 [0.5]: ").strip() or "0.5")
+        urgency = max(0.0, min(1.0, urgency))
+    except ValueError:
+        urgency = 0.5
+
+    task = {
+        "id": str(uuid.uuid4())[:8],
+        "title": title,
+        "description": description,
+        "repo": repo,
+        "phase": "DESIGN",
+        "status": "pending",
+        "target_files": target_files,
+        "notes": "",
+        "blocked_by": [],
+        "blocking": [],
+        "parent_task": None,
+        "subtasks": [],
+        "importance": importance,
+        "urgency": urgency,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": None,
+        "completed_at": None,
+        "source": "local",
+    }
+
+    tasks.append(task)
+    _save_tasks_file(tasks_file, tasks)
+
+    print(f"\nTask created: [{task['id']}] {title}")
+    print(f"Saved to: {tasks_file}")
+
+
+def cmd_tasks_edit(args):
+    """
+    Edit mutable fields of an existing task.
+
+    Editable fields: title, description, importance, urgency,
+    target_files, repo, notes.
+
+    Non-editable via this command: status, phase, dependency links
+    (managed by the agent or orchestrator).
+    """
+    tasks_file, tasks = _load_tasks_file()
+
+    task = _find_task(tasks, args.id)
+    if task is None:
+        print(f"ERROR: Task '{args.id}' not found.")
+        sys.exit(1)
+
+    print(f"Editing task [{task['id']}]: {task.get('title', '')}")
+    print("Press Enter to keep current value. Press Ctrl+C to cancel.\n")
+
+    EDITABLE = [
+        ("title",        "Title",        str),
+        ("description",  "Description",  str),
+        ("importance",   "Importance",   float),
+        ("urgency",      "Urgency",      float),
+        ("notes",        "Notes",        str),
+    ]
+
+    for field, label, ftype in EDITABLE:
+        current = task.get(field, "")
+        display = str(current)[:60] + ("..." if len(str(current)) > 60 else "")
+        new_val = input(f"{label} [{display}]: ").strip()
+        if not new_val:
+            continue
+        try:
+            if ftype == float:
+                task[field] = max(0.0, min(1.0, float(new_val)))
+            else:
+                task[field] = new_val
+        except ValueError:
+            print(f"  Invalid value for {label}, keeping current.")
+
+    # Repo edit
+    current_repo = ", ".join(task.get("repo", []))
+    new_repo = input(f"Repo [{current_repo}]: ").strip()
+    if new_repo:
+        task["repo"] = [r.strip() for r in new_repo.split(",") if r.strip()]
+
+    # Target files edit
+    current_files = ", ".join(task.get("target_files", []))
+    new_files = input(f"Target files [{current_files}]: ").strip()
+    if new_files:
+        task["target_files"] = [f.strip() for f in new_files.split(",") if f.strip()]
+
+    _save_tasks_file(tasks_file, tasks)
+    print(f"\nTask [{task['id']}] updated.")
+
+
+def cmd_tasks_cancel(args):
+    """Cancel a task, setting its status to 'cancelled'."""
+    from datetime import datetime, timezone
+
+    tasks_file, tasks = _load_tasks_file()
+
+    task = _find_task(tasks, args.id)
+    if task is None:
+        print(f"ERROR: Task '{args.id}' not found.")
+        sys.exit(1)
+
+    current_status = task.get("status", "pending")
+    if current_status in ("complete", "cancelled"):
+        print(f"Task [{task['id']}] is already {current_status}.")
+        return
+
+    confirm = input(
+        f"Cancel task [{task['id']}] '{task.get('title', '')}'? [y/N]: "
+    ).strip().lower()
+
+    if confirm != "y":
+        print("Aborted.")
+        return
+
+    task["status"] = "cancelled"
+    task["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    _save_tasks_file(tasks_file, tasks)
+    print(f"Task [{task['id']}] cancelled.")
+
+
+# ---------------------------------------------------------------------------
+# cmd_answer
+# ---------------------------------------------------------------------------
+
+def cmd_answer(args):
+    """
+    Answer a pending clarification request from the agent.
+
+    First fetches the pending question from the running agent so you
+    know what you're replying to, then sends your reply as an interjection
+    routed to the blocking wait in request_clarification().
+    """
+    port = _resolve_port()
+
+    # Fetch the pending question
+    pending = _agent_get("/pending", port)
+    question = pending.get("pending")
+
+    if not question:
+        print("No pending clarification request from the agent.")
+        print("Use 'matrixmouse interject' to send an unsolicited message.")
+        return
+
+    print(f"Agent is asking:\n\n  {question}\n")
+
+    try:
+        reply = input("Your answer: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\nAborted.")
+        return
+
+    if not reply:
+        print("Aborted — reply cannot be empty.")
+        return
+
+    # Send as a workspace-wide interjection — clarification replies
+    # are always workspace-wide since the agent is blocked waiting for them
+    result = _agent_post("/interject", {"message": reply, "repo": None}, port)
+
+    if result.get("ok"):
+        print("Reply sent to agent.")
+    else:
+        print(f"ERROR: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+
+
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -630,6 +1011,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the directory name in the workspace. Defaults to repo name.",
     )
     add_parser.set_defaults(func=cmd_add_repo)
+
+    
+
+    # --- tasks ---
+    tasks_parser = subparsers.add_parser(
+        "tasks",
+        help="View and manage the task queue.",
+    )
+    tasks_subparsers = tasks_parser.add_subparsers(
+        dest="tasks_subcmd",
+        required=True,
+    )
+    tasks_parser.set_defaults(func=cmd_tasks)
+
+    # tasks list
+    tlist = tasks_subparsers.add_parser("list", help="List tasks.")
+    tlist.add_argument("--status", help="Filter by status.")
+    tlist.add_argument("--repo",   help="Filter by repo name.")
+    tlist.add_argument("--all",    action="store_true",
+                       help="Include completed and cancelled tasks.")
+
+    # tasks show
+    tshow = tasks_subparsers.add_parser("show", help="Show task details.")
+    tshow.add_argument("id", metavar="ID", help="Task ID (or prefix).")
+
+    # tasks add
+    tasks_subparsers.add_parser("add", help="Create a new task interactively.")
+
+    # tasks edit
+    tedit = tasks_subparsers.add_parser("edit", help="Edit a task.")
+    tedit.add_argument("id", metavar="ID", help="Task ID (or prefix).")
+
+    # tasks cancel
+    tcancel = tasks_subparsers.add_parser("cancel", help="Cancel a task.")
+    tcancel.add_argument("id", metavar="ID", help="Task ID (or prefix).")
+
+    # --- answer ---
+    subparsers.add_parser(
+        "answer",
+        help="Answer a pending clarification request from the agent.",
+    ).set_defaults(func=cmd_answer)
+
+
 
     # --- interject ---
     interject_parser = subparsers.add_parser(

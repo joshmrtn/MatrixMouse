@@ -157,6 +157,20 @@ def _build_app(comms_module: Any):
         message: str
         repo: str | None = None
 
+
+    @app.get("/pending")
+    async def pending():
+        """
+        Return the current pending clarification question, if any.
+        Used by cmd_answer to show the operator what they're replying to.
+        """
+        m = comms_module.get_manager()
+        if m is None:
+            return {"pending": None}
+        question = m.get_pending_question()
+        return {"pending": question}
+
+
     @app.post("/interject")
     async def interject(body: InterjectionRequest):
         """

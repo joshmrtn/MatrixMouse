@@ -356,6 +356,7 @@ class CommsManager:
             message=question,
             priority="high" if blocking else "default",
         )
+        self.set_pending_question(question)
         self.emit("clarification_request", {
             "question": question,
             "blocking": blocking,
@@ -370,6 +371,7 @@ class CommsManager:
 
         logger.info("Loop paused waiting for human reply (timeout: %ds)...", timeout)
         reply = self.wait_for_interjection(timeout=timeout, current_repo=None)
+        self.set_pending_question(None)
 
         self.update_status(blocked=False)
 
@@ -383,6 +385,22 @@ class CommsManager:
 
         logger.info("Clarification reply received: %s", reply[:80])
         return reply
+
+
+    def set_pending_question(self, question: str | None) -> None:
+        """
+        Record the current pending clarification question so the CLI
+        and web UI can display it to the operator.
+
+        Args:
+            question: The question text, or None to clear.
+        """
+        self._status["pending_question"] = question
+
+    def get_pending_question(self) -> str | None:
+        """Return the current pending clarification question, or None."""
+        return self._status.get("pending_question")
+
 
 
 # ---------------------------------------------------------------------------
