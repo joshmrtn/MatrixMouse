@@ -3,22 +3,31 @@ matrixmouse/tools/test_tools.py
 
 Tools for running the project's test suite and interpreting results.
 
-Pytest is the default and preferred runner. If pytest is not installed,
-falls back to Python's built-in unittest discovery.
+In production (Docker deployment), test execution is delegated to a
+locked-down temporary container via a FIFO pipe pair. The agent has no
+knowledge of this — it calls run_tests() and gets a result string back.
+
+In development (no FIFO available), falls back to running pytest directly
+in the current process for convenience.
+
+The FIFO protocol:
+    Request:  "<8-hex-token> <optional-test-path>\n"
+    Response: "<8-hex-token> <exit-code>\n<output>\n"
+
+The token is generated per-call and verified on response to prevent
+stale results from a previous crashed session being injected into a
+new one.
 
 Tools exposed:
     run_tests       — run the full suite or a specific file/directory
-    run_single_test — run one specific test by node ID
+    run_single_test — run one specific test by pytest node ID
 
 Do not add file editing, git, or navigation tools here.
-
-Dependencies:
-    pytest          — strongly recommended, install via: pip install pytest
-    pytest-mock     — optional, for mocking support: pip install pytest-mock
 """
 
 import logging
-import shutil
+import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -27,62 +36,168 @@ from matrixmouse.tools._safety import project_root
 
 logger = logging.getLogger(__name__)
 
-
 # ---------------------------------------------------------------------------
-# Runner detection
+# FIFO configuration — must match docker-compose volume mount
 # ---------------------------------------------------------------------------
 
-def _has_pytest() -> bool:
-    """Return True if pytest is available in the current environment."""
-    return shutil.which("pytest") is not None or _module_available("pytest")
+_FIFO_DIR = Path(os.environ.get("MM_FIFO_DIR", "/run/matrixmouse-pipes"))
+_REQUEST_FIFO = _FIFO_DIR / "request.fifo"
+_RESULT_FIFO = _FIFO_DIR / "result.fifo"
 
+# How long to wait for a test result before giving up (seconds)
+_RESULT_TIMEOUT = int(os.environ.get("MM_TEST_TIMEOUT", "360"))
 
-def _module_available(name: str) -> bool:
-    """Return True if a Python module can be imported."""
-    import importlib.util
-    return importlib.util.find_spec(name) is not None
-
-
-def _detect_runner() -> str:
-    """Return 'pytest' or 'unittest' based on what's available."""
-    if _has_pytest():
-        return "pytest"
-    logger.warning(
-        "pytest not found. Falling back to unittest. "
-        "Install pytest for better output: pip install pytest"
-    )
-    return "unittest"
+# Maximum number of stale results to discard before giving up
+_MAX_STALE_READS = 3
 
 
 # ---------------------------------------------------------------------------
-# Internal runner
+# FIFO availability check
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list[str], cwd: Path) -> str:
+def _fifo_available() -> bool:
+    """Return True if the FIFO pipes exist and are usable."""
+    return _REQUEST_FIFO.is_fifo() and _RESULT_FIFO.is_fifo()
+
+
+# ---------------------------------------------------------------------------
+# FIFO-based execution (production path)
+# ---------------------------------------------------------------------------
+
+def _run_via_fifo(test_path: str) -> str:
     """
-    Execute a subprocess command and return formatted output.
+    Send a test request through the FIFO pair and return the result.
 
-    Captures both stdout and stderr, combines them in order, and
-    returns the full output with a pass/fail summary appended.
+    Generates a fresh token per call. Discards stale results from
+    previous sessions to handle crash-restart scenarios cleanly.
+
+    Args:
+        test_path: Relative path to test file or directory, e.g. "tests/"
+                   or "tests/test_config.py::test_load_defaults".
+
+    Returns:
+        Test output string with pass/fail summary appended.
+    """
+    token = secrets.token_hex(4)  # 8 hex chars
+    request_line = f"{token} {test_path}".strip()
+
+    logger.info("Sending test request via FIFO. Token: %s Path: %s", token, test_path)
+
+    # Write request — open in write mode (blocks until host reads it)
+    try:
+        with open(_REQUEST_FIFO, "w") as req:
+            req.write(request_line + "\n")
+            req.flush()
+    except Exception as e:
+        return f"ERROR: Failed to write to request FIFO: {e}"
+
+    # Read result — discard stale results from previous sessions
+    for attempt in range(_MAX_STALE_READS + 1):
+        try:
+            result = _read_result_fifo(timeout=_RESULT_TIMEOUT)
+        except TimeoutError:
+            return (
+                f"ERROR: Test runner did not respond within {_RESULT_TIMEOUT}s. "
+                "The host-side test_runner.sh may not be running, or the tests "
+                "are taking longer than expected."
+            )
+        except Exception as e:
+            return f"ERROR: Failed to read from result FIFO: {e}"
+
+        # Parse first line: "<token> <exit_code>"
+        lines = result.split("\n", 1)
+        header = lines[0].strip()
+        output = lines[1] if len(lines) > 1 else ""
+
+        parts = header.split(" ", 1)
+        if len(parts) != 2:
+            logger.warning("Malformed result header: %s", header)
+            continue
+
+        result_token, exit_code_str = parts[0], parts[1]
+
+        if result_token != token:
+            logger.warning(
+                "Stale result discarded. Expected token %s got %s (attempt %d/%d).",
+                token, result_token, attempt + 1, _MAX_STALE_READS
+            )
+            if attempt >= _MAX_STALE_READS:
+                return (
+                    "ERROR: Received too many stale results. "
+                    "The test runner may be in an inconsistent state. "
+                    "Restart test_runner.sh on the host."
+                )
+            continue
+
+        # Token matches — this is our result
+        try:
+            exit_code = int(exit_code_str)
+        except ValueError:
+            exit_code = 1
+
+        status = "PASSED" if exit_code == 0 else "FAILED"
+        logger.info("Test result received. Token: %s Status: %s", token, status)
+        return f"{output.rstrip()}\n\n--- {status} (exit code {exit_code}) ---"
+
+    return "ERROR: Unexpected state in FIFO result handling."
+
+
+def _read_result_fifo(timeout: int) -> str:
+    """
+    Read the full result from result.fifo with a timeout.
+    Uses a subprocess cat with timeout rather than a raw open() call,
+    which would block indefinitely if the host script crashes mid-write.
+
+    Args:
+        timeout: Seconds to wait before raising TimeoutError.
+
+    Returns:
+        Raw result string from the host script.
+
+    Raises:
+        TimeoutError: If no result arrives within timeout seconds.
+        Exception:    On other read failures.
+    """
+    try:
+        result = subprocess.run(
+            ["cat", str(_RESULT_FIFO)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"No result after {timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# Direct execution (development fallback)
+# ---------------------------------------------------------------------------
+
+def _run_direct(cmd: list[str]) -> str:
+    """
+    Run a test command directly in the current process.
+    Used as a fallback when the FIFO is not available (development mode).
+
+    Args:
+        cmd: Full command list to execute.
+
+    Returns:
+        Test output with pass/fail summary appended.
     """
     try:
         result = subprocess.run(
             cmd,
-            cwd=cwd,
+            cwd=project_root(),
             capture_output=True,
             text=True,
-            timeout=300,  # 5 minute ceiling — long tests shouldn't block forever
+            timeout=300,
         )
         output = result.stdout
         if result.stderr:
             output += "\n--- stderr ---\n" + result.stderr
-
         status = "PASSED" if result.returncode == 0 else "FAILED"
-        output += f"\n--- {status} (exit code {result.returncode}) ---"
-
-        logger.info("Test run %s. Command: %s", status, " ".join(cmd))
-        return output.strip()
-
+        return f"{output.rstrip()}\n\n--- {status} (exit code {result.returncode}) ---"
     except subprocess.TimeoutExpired:
         return "ERROR: Test run timed out after 5 minutes."
     except FileNotFoundError as e:
@@ -92,64 +207,59 @@ def _run(cmd: list[str], cwd: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Path validation
+# ---------------------------------------------------------------------------
+
+def _validate_test_path(path: str) -> tuple[bool, str]:
+    """
+    Validate that a test path is safe to pass to the test runner.
+    Must be under the tests/ directory and contain no traversal.
+
+    Returns:
+        (valid, reason) where reason is empty if valid.
+    """
+    if not path or path == "tests" or path.startswith("tests/"):
+        if ".." in path:
+            return False, "Path contains '..'"
+        return True, ""
+    return False, f"Test path must start with 'tests/' — got '{path}'"
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
 def run_tests(path: str = "tests") -> str:
     """
-    Run the test suite using pytest (preferred) or unittest (fallback).
+    Run the test suite and return the full output.
 
-    Run after making changes to verify nothing is broken. The output
+    Run this after making changes to verify nothing is broken. The output
     includes individual test results and a final pass/fail summary.
 
     Args:
-        path: Path to a test file or directory to run. Defaults to
-              'tests/', which runs the full suite. Accepts pytest node
-              IDs like 'tests/test_config.py' or a directory like 'tests/'.
+        path: Path to a test file or directory. Defaults to 'tests/',
+              which runs the full suite. Must be under the tests/ directory.
 
     Returns:
-        Full test output including pass/fail summary, or an error message.
+        Full test output with pass/fail summary, or an error message.
     """
-    root = project_root()
-    runner = _detect_runner()
+    valid, reason = _validate_test_path(path)
+    if not valid:
+        return f"ERROR: {reason}"
 
-    # Validate the path is within the project
-    try:
-        resolved = (root / path).resolve()
-        resolved.relative_to(root)
-    except ValueError:
-        return f"ERROR: Path '{path}' is outside the project root."
+    if _fifo_available():
+        logger.info("Using FIFO test runner (production mode).")
+        return _run_via_fifo(path)
 
-    if not resolved.exists():
-        return (
-            f"ERROR: Test path '{path}' does not exist. "
-            f"Check the path relative to the project root ({root})."
-        )
-
-    if runner == "pytest":
-        cmd = [
-            sys.executable, "-m", "pytest",
-            str(resolved),
-            "-v",               # verbose: show individual test names
-            "--tb=short",       # short tracebacks — enough to diagnose, not overwhelming
-            "--no-header",      # skip the pytest header to save context space
-            "-q",               # quiet summary line
-        ]
-    else:
-        # unittest discover requires a directory, not a file
-        if resolved.is_file():
-            # Run a single file with unittest
-            cmd = [sys.executable, "-m", "unittest", str(resolved)]
-        else:
-            cmd = [
-                sys.executable, "-m", "unittest",
-                "discover",
-                "-s", str(resolved),
-                "-p", "test_*.py",
-                "-v",
-            ]
-
-    return _run(cmd, root)
+    logger.info("FIFO not available — running tests directly (development mode).")
+    cmd = [
+        sys.executable, "-m", "pytest",
+        path,
+        "--tb=short",
+        "--no-header",
+        "-v",
+    ]
+    return _run_direct(cmd)
 
 
 def run_single_test(test_id: str) -> str:
@@ -165,32 +275,26 @@ def run_single_test(test_id: str) -> str:
 
     Args:
         test_id: Full pytest node ID of the test to run.
+                 Must start with 'tests/'.
 
     Returns:
         Test output with pass/fail result, or an error message.
     """
-    root = project_root()
+    valid, reason = _validate_test_path(test_id.split("::")[0])
+    if not valid:
+        return f"ERROR: {reason}"
 
-    if not _has_pytest():
-        return (
-            "ERROR: run_single_test requires pytest. "
-            "Install it with: pip install pytest"
-        )
+    if _fifo_available():
+        logger.info("Using FIFO test runner (production mode).")
+        return _run_via_fifo(test_id)
 
-    # Validate the file portion of the node ID is within the project
-    file_part = test_id.split("::")[0]
-    try:
-        resolved_file = (root / file_part).resolve()
-        resolved_file.relative_to(root)
-    except ValueError:
-        return f"ERROR: Test file '{file_part}' is outside the project root."
-
+    logger.info("FIFO not available — running tests directly (development mode).")
     cmd = [
         sys.executable, "-m", "pytest",
         test_id,
-        "-v",
-        "--tb=long",    # full tracebacks for single test runs — more useful for debugging
+        "--tb=long",
         "--no-header",
+        "-v",
     ]
+    return _run_direct(cmd)
 
-    return _run(cmd, root)

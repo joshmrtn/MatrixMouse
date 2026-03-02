@@ -1,0 +1,28 @@
+# Dockerfile.testrunner
+# Minimal image used to run the project's test suite in isolation.
+#
+# Build:
+#   docker build -f Dockerfile.testrunner -t matrixmouse-test-runner .
+#
+# This image:
+#   - Has pytest and pytest-mock installed
+#   - Has NO network access when run (enforced by --network none in test_runner.sh)
+#   - Receives the workspace as a read-only volume mount
+#   - Is destroyed immediately after each test run (--rm)
+#
+# Keep this image minimal — it should have nothing the tests don't need.
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-mock \
+    pydantic \
+    pydantic-settings
+
+# No source code here — the workspace is mounted at runtime
+WORKDIR /workspace
+
+# Run as non-root even inside the container
+RUN useradd --create-home --shell /bin/bash testrunner
+USER testrunner

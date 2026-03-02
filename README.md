@@ -12,6 +12,36 @@ Designed with local LLMs in mind, with a lot of focus on breaking problems down 
 
 Early development.
 
+## Installation
+
+### Prerequisites
+
+MatrixMouse is only developed for Linux. 
+
+You'll need to install (Ollama)[https://ollama.com/download/linux] if you haven't already.
+
+```bash
+# Installation script for Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+### Installation steps
+
+Clone this repository.
+
+```bash
+git clone https://github.com/joshmrtn/MatrixMouse.git
+```
+
+```bash
+# cd into the newly cloned directory
+cd MatrixMouse
+# Set the path to the agent's workspace
+echo "WORKSPACE_PATH=/path/to/your/repo" > .env
+# Make test_runner.sh executable
+chmod +x test_runner.sh
+```
+
 ## Notes
 
 ### Ollama configuration
