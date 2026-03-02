@@ -117,6 +117,7 @@ class MatrixMouseConfig(BaseSettings):
             default = 8080,
             description = "Port for the web UI server."
             )
+    tasks_file: Path = Field(default=None) # set in _build_paths
 
     model_config = {"extra": "ignore"}  # silently ignore unknown keys from TOML
 

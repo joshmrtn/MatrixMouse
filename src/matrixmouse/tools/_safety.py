@@ -46,7 +46,7 @@ _project_root: Path | None = None
 _extra_patterns: list[str] = []
 
 
-def configure(repo_root: Path, ignore_file: Path | None = None) -> None:
+def configure(repo_root: Path, allowed_roots: list[Path], ignore_file: Path | None = None) -> None:
     """
     Initialise path safety with the project root and optional ignore file.
 

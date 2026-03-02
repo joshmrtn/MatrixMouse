@@ -276,6 +276,7 @@ def _build_paths(repo_root: Path, workspace_root: Path | None = None) -> MatrixM
 
     return MatrixMousePaths(
         workspace_root=workspace_root.resolve(),
+        tasks_file = workspace_root / ".matrixmouse" / "tasks.json",
         repo_root=resolved_repo,
         config_dir=resolved_repo / ".matrixmouse",
         log_file=resolved_repo / ".matrixmouse" / "agent.log",
