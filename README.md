@@ -16,31 +16,27 @@ Early development.
 
 ### Prerequisites
 
-MatrixMouse is only developed for Linux. 
-
-You'll need to install (Ollama)[https://ollama.com/download/linux] if you haven't already.
-
-```bash
-# Installation script for Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-```
+MatrixMouse is only developed for Linux. You'll need (Docker)[https://docs.docker.com/engine/install/], (Docker Compose)[https://docs.docker.com/compose/install/linux/#install-using-the-repository], and (Ollama)[https://ollama.com/download/linux] installed on the host machine.
 
 ### Installation steps
 
-Clone this repository.
-
+Clone this repository and run the installation script:
 ```bash
 git clone https://github.com/joshmrtn/MatrixMouse.git
+cd MatrixMouse
+chmod +x install.sh
+./install.sh
 ```
 
-```bash
-# cd into the newly cloned directory
-cd MatrixMouse
-# Set the path to the agent's workspace
-echo "WORKSPACE_PATH=/path/to/your/repo" > .env
-# Make test_runner.sh executable
-chmod +x test_runner.sh
-```
+The script will guide you through the rest of the setup.
+
+## Troubleshooting
+
+- Web UI connects and immediately disconnects -> websocket timeout, check nginx `proxy_read_timeout`
+- Tests time out -> `test_runner.sh` not running, check `systemctl status matrixmouse-test-runner`
+- Agent loops without making progress -> model doesn't support tools or is too small, check `ollama show <model>`
+
+
 
 ## Notes
 
