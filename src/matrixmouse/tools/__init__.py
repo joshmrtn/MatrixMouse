@@ -20,7 +20,7 @@ Submodules:
 """
 
 from matrixmouse.tools.file_tools import read_file, str_replace, append_to_file
-from matrixmouse.tools.system_tools import declare_complete
+from matrixmouse.tools.task_tools import declare_complete
 
 from matrixmouse.tools.git_tools import (
     create_task_branch,
