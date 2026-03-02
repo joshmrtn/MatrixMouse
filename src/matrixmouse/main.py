@@ -122,8 +122,7 @@ def cmd_run(args):
     comms.configure(config)
 
     # --- Web server ---
-    # TODO: start_server is currently a stub. Wire up when server.py is ready.
-    # start_server(config, paths)
+    start_server(config, paths)
 
     # --- Orchestrator ---
     logger.info("Handing control to orchestrator...")

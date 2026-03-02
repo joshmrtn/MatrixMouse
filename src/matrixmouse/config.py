@@ -103,6 +103,12 @@ class MatrixMouseConfig(BaseSettings):
             description = "ntfy topic name"
             )
 
+    # --- Server ---
+    server_port: int = Field(
+            default = 8080,
+            description = "Port for the web UI server."
+            )
+
     model_config = {"extra": "ignore"}  # silently ignore unknown keys from TOML
 
 
