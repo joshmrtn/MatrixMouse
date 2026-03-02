@@ -117,7 +117,16 @@ class MatrixMouseConfig(BaseSettings):
             default = 8080,
             description = "Port for the web UI server."
             )
-    tasks_file: Path = Field(default=None) # set in _build_paths
+
+    # --- Tasks ---
+    priority_aging_rate: float = Field(
+        default=0.01,
+        description="Daily priority increase for incomplete tasks. Prevents starvation.",
+    )
+    priority_max_aging_bonus: float = Field(
+        default=0.3,
+        description="Maximum priority bonus from aging (caps at this value).",
+    )
 
     model_config = {"extra": "ignore"}  # silently ignore unknown keys from TOML
 
