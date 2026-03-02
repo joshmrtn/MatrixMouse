@@ -46,6 +46,7 @@ from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.phases import Phase, PHASE_SEQUENCE, next_phase
 from matrixmouse.router import Router
 from matrixmouse.stuck import StuckDetector
+from matrixmouse.tools._safety import reconfigure_for_task
 
 logger = logging.getLogger(__name__)
 
@@ -652,6 +653,9 @@ class Orchestrator:
         current_phase = task.phase
         messages = self._build_initial_messages(task, current_phase)
 
+        # Configure safety module to task
+        reconfigure_for_task(task.repo, self.paths.workspace_root)
+
         while current_phase != Phase.DONE:
             logger.info("Task %s entering phase: %s", task.id, current_phase.name)
 
@@ -721,6 +725,10 @@ class Orchestrator:
         Returns a PhaseResult containing both the loop outcome and the
         stuck detector so the caller can use diagnostics for escalation.
         """
+        # configure task_tools with current task info
+        from matrixmouse.tools import task_tools
+        task_tools.configure(self.queue, task.id)
+
         from matrixmouse.comms import poll_interjection
         detector = StuckDetector(phase=phase)
         context_manager = ContextManager(

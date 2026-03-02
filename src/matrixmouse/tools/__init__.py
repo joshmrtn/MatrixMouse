@@ -20,7 +20,12 @@ Submodules:
 """
 
 from matrixmouse.tools.file_tools import read_file, str_replace, append_to_file
-from matrixmouse.tools.task_tools import declare_complete
+from matrixmouse.tools.task_tools import (
+        declare_complete,
+        add_subtask,
+        get_task_info,
+        list_tasks,
+        )
 
 from matrixmouse.tools.git_tools import (
     create_task_branch,
@@ -53,8 +58,11 @@ TOOLS = [
     read_file,
     str_replace,
     append_to_file,
-    # system_tools
+    # task_tools 
     declare_complete,
+    add_subtask,
+    get_task_info,
+    list_tasks,
     # git_tools
     create_task_branch,
     commit_progress,
