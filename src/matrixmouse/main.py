@@ -440,6 +440,140 @@ def _post_add_instructions(name: str, dest: Path, workspace_root: Path) -> None:
     print(f"       matrixmouse run --repo {name}")
 
 
+
+# ---------------------------------------------------------------------------
+# Shared HTTP helper
+# ---------------------------------------------------------------------------
+
+def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
+    """
+    POST to the running agent's web server.
+
+    Args:
+        endpoint: Path including leading slash, e.g. '/interject'
+        payload:  JSON-serialisable dict to send as request body.
+        port:     Server port from config or env.
+
+    Returns:
+        Parsed JSON response dict.
+
+    Raises:
+        SystemExit on connection failure or non-200 response.
+    """
+    import json
+    import urllib.request
+    import urllib.error
+
+    url = f"http://localhost:{port}{endpoint}"
+    data = json.dumps(payload).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except urllib.error.URLError as e:
+        print(
+            f"ERROR: Could not reach the agent at {url}\n"
+            f"Is MatrixMouse running? (matrixmouse run)\n"
+            f"Details: {e.reason}"
+        )
+        sys.exit(1)
+
+
+def _agent_get(endpoint: str, port: int) -> dict:
+    """GET from the running agent's web server."""
+    import json
+    import urllib.request
+    import urllib.error
+
+    url = f"http://localhost:{port}{endpoint}"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return json.loads(resp.read())
+    except urllib.error.URLError as e:
+        print(
+            f"ERROR: Could not reach the agent at {url}\n"
+            f"Is MatrixMouse running? (matrixmouse run)\n"
+            f"Details: {e.reason}"
+        )
+        sys.exit(1)
+
+
+def _resolve_port() -> int:
+    """Read the server port from environment or fall back to default."""
+    return int(os.environ.get("MM_SERVER_PORT", "8080"))
+
+
+# ---------------------------------------------------------------------------
+# cmd_interject
+# ---------------------------------------------------------------------------
+
+def cmd_interject(args):
+    """
+    Send a message to the running agent.
+
+    The message is injected into the agent loop at the next iteration
+    boundary. If --repo is given, the message is scoped to that repo's
+    context. Without --repo, the message goes to the workspace-level queue.
+
+    The agent will see the message as a user interjection and can
+    respond to it before continuing its current task.
+    """
+    port = _resolve_port()
+    message = args.message
+    repo = getattr(args, "repo", None)
+
+    payload = {"message": message}
+    if repo:
+        payload["repo"] = repo
+
+    result = _agent_post("/interject", payload, port)
+
+    if result.get("ok"):
+        scope = f"repo '{repo}'" if repo else "workspace"
+        print(f"Message sent to agent ({scope}).")
+    else:
+        print(f"ERROR: Agent rejected the message: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# cmd_status
+# ---------------------------------------------------------------------------
+
+def cmd_status(args):
+    """
+    Show the current agent status — task, phase, model, and blocked tasks.
+    """
+    port = _resolve_port()
+    status = _agent_get("/status", port)
+
+    if "error" in status:
+        print(f"ERROR: {status['error']}")
+        sys.exit(1)
+
+    task    = status.get("task")    or "—"
+    phase   = status.get("phase")   or "—"
+    model   = status.get("model")   or "—"
+    turns   = status.get("turns")
+    blocked = status.get("blocked", False)
+
+    print(f"Task:    {task}")
+    print(f"Phase:   {phase}")
+    print(f"Model:   {model}")
+    if turns is not None:
+        print(f"Turns:   {turns}")
+    print(f"Blocked: {'yes' if blocked else 'no'}")
+
+
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -497,11 +631,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_parser.set_defaults(func=cmd_add_repo)
 
-    # Future commands stubbed here for discoverability:
-    # subparsers.add_parser("interject", help="Send a message to the running agent.")
-    # subparsers.add_parser("tasks",     help="View and manage the task queue.")
-    # subparsers.add_parser("status",    help="Show current agent status.")
-    # subparsers.add_parser("answer",    help="Answer a pending clarification request.")
+    # --- interject ---
+    interject_parser = subparsers.add_parser(
+        "interject",
+        help="Send a message to the running agent.",
+    )
+    interject_parser.add_argument(
+        "message",
+        metavar="MESSAGE",
+        help="Message to send to the agent.",
+    )
+    interject_parser.add_argument(
+        "--repo",
+        metavar="NAME",
+        help="Scope the message to a specific repo. Defaults to workspace-wide.",
+    )
+    interject_parser.set_defaults(func=cmd_interject)
+
+    # --- status ---
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show current agent status.",
+    )
+    status_parser.set_defaults(func=cmd_status)
 
     return parser
 

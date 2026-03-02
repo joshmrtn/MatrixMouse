@@ -155,6 +155,7 @@ def _build_app(comms_module: Any):
 
     class InterjectionRequest(BaseModel):
         message: str
+        repo: str | None = None
 
     @app.post("/interject")
     async def interject(body: InterjectionRequest):
@@ -167,7 +168,7 @@ def _build_app(comms_module: Any):
             return {"error": "comms not configured"}
         if not body.message.strip():
             return {"error": "message cannot be empty"}
-        m.put_interjection(body.message)
+        m.put_interjection(body.message, repo=getattr(body, "repo", None))
         logger.info("Interjection received via web UI: %s", body.message[:80])
         return {"ok": True, "message": body.message}
 

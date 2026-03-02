@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import functools
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -729,7 +730,13 @@ class Orchestrator:
         from matrixmouse.tools import task_tools
         task_tools.configure(self.queue, task.id)
 
+        # Bind current_repo into comms callable
+
+
         from matrixmouse.comms import poll_interjection
+        current_repo = task.repo[0] if task.repo else None
+        scoped_comms = functools.partial(poll_interjection, current_repo=current_repo)
+
         detector = StuckDetector(phase=phase)
         context_manager = ContextManager(
             config=self.config,
@@ -743,7 +750,8 @@ class Orchestrator:
             paths=self.paths,
             context_manager=context_manager,
             stuck_detector=detector,
-            comms=poll_interjection,
+            comms=scoped_comms,
+            current_repo=current_repo,
         )
         result = loop.run()
 

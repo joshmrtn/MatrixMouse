@@ -82,11 +82,13 @@ class AgentLoop:
         context_manager=None,   # callable: (messages, config) -> messages
         stuck_detector=None,    # callable: (tool_name, arguments, had_error) -> bool
         comms=None,             # callable: () -> str | None
+        current_repo: str | None = None,
     ):
         self.model = model
         self.messages = list(messages)  # defensive copy — don't mutate caller's list
         self.config = config
         self.paths = paths
+        self.current_repo = current_repo
 
         # Subsystem callables — fall back to no-ops until implemented
         self._check_context = context_manager or _noop_context_manager

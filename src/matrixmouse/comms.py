@@ -87,46 +87,107 @@ class CommsManager:
     # Interjection queue — human → agent
     # ------------------------------------------------------------------
 
-    def put_interjection(self, message: str) -> None:
+
+    def put_interjection(self, message: str, repo: str | None = None) -> None:
         """
         Add a human message to the interjection queue.
-        Called by server.py when a POST /interject request arrives.
+        Called by server.py when a POST /interject request arrives,
+        or directly by the CLI cmd_interject command.
 
         Args:
             message: The human's message to inject into the agent loop.
+            repo:    Optional repo scope. If set, the loop should only
+                     inject this message when working on that repo.
+                     None means workspace-wide (inject regardless of repo).
         """
-        self._interjection_queue.put(message.strip())
-        logger.info("Interjection queued: %s", message[:80])
+        item = {"message": message.strip(), "repo": repo}
+        self._interjection_queue.put(item)
+        scope = f"repo='{repo}'" if repo else "workspace-wide"
+        logger.info("Interjection queued (%s): %s", scope, message[:80])
 
-    def get_interjection(self) -> str | None:
+
+
+    def get_interjection(self, current_repo: str | None = None) -> str | None:
         """
-        Return the next pending interjection, or None if the queue is empty.
-        Called by AgentLoop at the top of each iteration.
+        Return the next pending interjection message, or None if empty.
+        Non-blocking — never waits.
+
+        Repo-scoped interjections are only returned when current_repo
+        matches. Workspace-wide interjections (repo=None) are always
+        returned regardless of current_repo.
+
+        Args:
+            current_repo: The repo subdirectory name currently being
+                          worked on. Pass None if not in a repo context.
 
         Returns:
-            Message string if one is pending, None otherwise.
-            Non-blocking — never waits.
+            Message string if one is pending and in-scope, None otherwise.
         """
         try:
-            return self._interjection_queue.get_nowait()
+            item = self._interjection_queue.get_nowait()
         except queue.Empty:
             return None
 
-    def wait_for_interjection(self, timeout: float | None = None) -> str | None:
+        item_repo = item.get("repo")
+
+        # Workspace-wide interjection — always deliver
+        if item_repo is None:
+            return item["message"]
+
+        # Repo-scoped — only deliver if it matches current context
+        if item_repo == current_repo:
+            return item["message"]
+
+        # Out of scope — put it back and return None
+        # put() goes to the back of the queue, which is acceptable since
+        # repo-scoped interjections are rare and order within repo is
+        # preserved across cycles.
+        self._interjection_queue.put(item)
+        return None
+
+
+
+    def wait_for_interjection(
+        self,
+        timeout: float | None = None,
+        current_repo: str | None = None,
+    ) -> str | None:
         """
-        Block until a human message arrives or timeout expires.
+        Block until a relevant interjection arrives or timeout expires.
         Used by request_clarification(blocking=True).
 
         Args:
-            timeout: Seconds to wait. None means wait forever.
+            timeout:      Seconds to wait. None means wait forever.
+            current_repo: Repo scope filter, same as get_interjection.
 
         Returns:
-            Message string if one arrived, None if timeout expired.
+            Message string if one arrived in scope, None if timed out.
         """
-        try:
-            return self._interjection_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        import time
+        deadline = (time.monotonic() + timeout) if timeout is not None else None
+
+        while True:
+            remaining = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+
+            try:
+                item = self._interjection_queue.get(timeout=min(remaining or 1.0, 1.0))
+            except queue.Empty:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return None
+                continue
+
+            item_repo = item.get("repo")
+
+            if item_repo is None or item_repo == current_repo:
+                return item["message"]
+
+            # Out of scope — put back and keep waiting
+            self._interjection_queue.put(item)
+
 
     # ------------------------------------------------------------------
     # Notifications — agent → human (push)
@@ -308,7 +369,7 @@ class CommsManager:
             )
 
         logger.info("Loop paused waiting for human reply (timeout: %ds)...", timeout)
-        reply = self.wait_for_interjection(timeout=timeout)
+        reply = self.wait_for_interjection(timeout=timeout, current_repo=None)
 
         self.update_status(blocked=False)
 
@@ -360,14 +421,19 @@ def get_manager() -> CommsManager | None:
 # Callable for AgentLoop — polls the interjection queue
 # ---------------------------------------------------------------------------
 
-def poll_interjection() -> str | None:
+
+def poll_interjection(current_repo: str | None = None) -> str | None:
     """
     Poll the interjection queue for pending human messages.
     Passed to AgentLoop as the comms callable.
 
+    Args:
+        current_repo: The repo currently being worked on, for scope filtering.
+
     Returns:
-        Pending message string, or None if queue is empty.
+        Pending message string, or None if queue is empty or no in-scope message.
     """
     if _manager is None:
         return None
-    return _manager.get_interjection()
+    return _manager.get_interjection(current_repo=current_repo)
+
