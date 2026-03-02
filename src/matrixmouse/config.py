@@ -36,6 +36,15 @@ class MatrixMouseConfig(BaseSettings):
     is used to generate the starter config file, so write it as a
     human-readable comment for the end user.
     """
+    # --- Agent git name/email
+    agent_git_name: str = Field(
+            default="MatrixMouse Bot", 
+            description="Name used for git commits made by the agent.",
+            )
+    agent_git_email: str = Field(
+            default="matrixmouse-bot@users.noreply.github.com", 
+            description="Email used for git commits made by the agent."
+            )
 
     # --- Models ---
     coder: str = Field(
@@ -115,29 +124,53 @@ class MatrixMouseConfig(BaseSettings):
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "matrixmouse" / "config.toml"
 
 
-def load_config(repo_root: Path) -> MatrixMouseConfig:
+def load_config(repo_root: Path, workspace_root: Path | None = None) -> MatrixMouseConfig:
     """
-    Load and merge configuration from all sources.
+    Load and merge configuration from all sources in order of
+    increasing priority:
+        1. Field defaults
+        2. Global config     — ~/.config/matrixmouse/config.toml
+        3. Workspace config  — <workspace_root>/.matrixmouse/config.toml
+        4. Repo-local config — <repo_root>/.matrixmouse/config.toml
 
-    Reads the global config and then the repo-local config, with each
-    layer overwriting keys from the previous. Returns a validated,
-    typed MatrixMouseConfig instance.
+    Each layer overwrites keys from the previous. Keys not present
+    in a source are inherited unchanged.
 
     Args:
-        repo_root: Root directory of the repo being worked on.
+        repo_root:       Root directory of the repo being worked on.
+        workspace_root:  Root of the MatrixMouse workspace. If None,
+                         falls back to the WORKSPACE_PATH environment
+                         variable, then skips the workspace layer.
 
     Returns:
         A fully merged and validated MatrixMouseConfig instance.
     """
+    import os
+
     merged: dict[str, Any] = {}
 
-    for config_path in (GLOBAL_CONFIG_PATH, repo_root / ".matrixmouse" / "config.toml"):
+    # Resolve workspace root — explicit arg wins, then env var, then skip
+    if workspace_root is None:
+        env_workspace = os.environ.get("WORKSPACE_PATH")
+        if env_workspace:
+            workspace_root = Path(env_workspace)
+
+    config_paths = [GLOBAL_CONFIG_PATH]
+
+    if workspace_root is not None:
+        config_paths.append(workspace_root / ".matrixmouse" / "config.toml")
+
+    config_paths.append(repo_root / ".matrixmouse" / "config.toml")
+
+    for config_path in config_paths:
         if config_path.exists():
             with open(config_path, "rb") as f:
-                merged.update(tomllib.load(f))
+                layer = tomllib.load(f)
+                merged.update(layer)
 
     return MatrixMouseConfig(**merged)
 
+_loaded_config: MatrixMouseConfig | None = None
 
 def generate_starter_config() -> str:
     """
@@ -184,6 +217,7 @@ class MatrixMousePaths:
 
     All paths are absolute and resolved at construction time.
     """
+    workspace_root: Path
     repo_root: Path
     config_dir: Path
     log_file: Path

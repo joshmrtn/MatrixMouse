@@ -134,30 +134,83 @@ success "Workspace .matrixmouse/ directory ready"
 # Step 3 — Agent GitHub credentials
 # ---------------------------------------------------------------------------
 
-header "Step 3 — Agent GitHub credentials"
+header "Step 3 — Agent credentials"
 
-echo "MatrixMouse uses a dedicated GitHub bot account for commits and pushes."
-echo "The SSH key for that account should be stored on this machine."
+echo "MatrixMouse uses a dedicated GitHub bot account for commits, pushes, and PRs."
+echo "Two separate credentials are needed:"
+echo "  1. An SSH key     — for git clone/push operations"
+echo "  2. A PAT file     — for opening pull requests via the GitHub API"
+echo ""
+echo "Both should be stored OUTSIDE the workspace directory."
+echo "Recommended location: $HOME/.matrixmouse-secrets/"
 echo ""
 
+# SSH key
 prompt AGENT_GH_KEY_PATH \
     "Path to the agent's GitHub SSH private key" \
-    "$HOME/.ssh/matrixmouse_agent_ed25519"
-
+    "$HOME/.matrixmouse-secrets/agent_ed25519"
 AGENT_GH_KEY_PATH="$(eval echo "$AGENT_GH_KEY_PATH")"
 
 if [ -f "$AGENT_GH_KEY_PATH" ]; then
     success "SSH key found at $AGENT_GH_KEY_PATH"
 else
     warn "SSH key not found at $AGENT_GH_KEY_PATH"
-    warn "You can generate one with:"
-    warn "  ssh-keygen -t ed25519 -C 'matrixmouse-bot' -f $AGENT_GH_KEY_PATH"
-    warn "Then add the public key to your GitHub bot account."
-    warn "Continuing — the key path will be saved to .env for when you're ready."
+    if confirm "Generate a new SSH key now?"; then
+        mkdir -p "$(dirname "$AGENT_GH_KEY_PATH")"
+        chmod 700 "$(dirname "$AGENT_GH_KEY_PATH")"
+        ssh-keygen -t ed25519 -C "matrixmouse-bot" -f "$AGENT_GH_KEY_PATH" -N ""
+        success "SSH key generated at $AGENT_GH_KEY_PATH"
+        echo ""
+        echo "Add this public key to your GitHub bot account:"
+        echo "  https://github.com/settings/keys"
+        echo ""
+        cat "${AGENT_GH_KEY_PATH}.pub"
+        echo ""
+        read -rp "Press Enter when you have added the key to GitHub..."
+    else
+        warn "Skipping key generation. Create it manually before running the agent."
+    fi
+fi
+
+# GitHub PAT file
+echo ""
+echo "A GitHub Personal Access Token (PAT) is needed to open pull requests."
+echo "Create one at: https://github.com/settings/tokens"
+echo "Required scopes: repo (full)"
+echo ""
+prompt AGENT_GH_TOKEN_FILE \
+    "Path to the file containing the agent's GitHub PAT" \
+    "$HOME/.matrixmouse-secrets/github_token"
+AGENT_GH_TOKEN_FILE="$(eval echo "$AGENT_GH_TOKEN_FILE")"
+
+if [ -f "$AGENT_GH_TOKEN_FILE" ]; then
+    success "GitHub token file found at $AGENT_GH_TOKEN_FILE"
+else
+    warn "Token file not found at $AGENT_GH_TOKEN_FILE"
+    if confirm "Create the token file now? (you will be prompted to paste the token)"; then
+        mkdir -p "$(dirname "$AGENT_GH_TOKEN_FILE")"
+        chmod 700 "$(dirname "$AGENT_GH_TOKEN_FILE")"
+        read -rsp "Paste your GitHub PAT (input hidden): " GH_PAT
+        echo ""
+        echo -n "$GH_PAT" > "$AGENT_GH_TOKEN_FILE"
+        chmod 600 "$AGENT_GH_TOKEN_FILE"
+        unset GH_PAT
+        success "Token saved to $AGENT_GH_TOKEN_FILE"
+    else
+        warn "Skipping. Create $AGENT_GH_TOKEN_FILE manually before using PR tools."
+    fi
 fi
 
 prompt AGENT_GH_NAME  "Agent git commit name"  "MatrixMouse Bot"
 prompt AGENT_GH_EMAIL "Agent git commit email" "matrixmouse-bot@users.noreply.github.com"
+
+# Secrets directory — the parent of both credential files
+SECRETS_DIR="$(dirname "$AGENT_GH_KEY_PATH")"
+TOKEN_SECRETS_DIR="$(dirname "$AGENT_GH_TOKEN_FILE")"
+if [ "$SECRETS_DIR" != "$TOKEN_SECRETS_DIR" ]; then
+    warn "SSH key and token are in different directories."
+    warn "Consider keeping them together for easier Docker mount management."
+fi
 
 # ---------------------------------------------------------------------------
 # Step 4 — Model configuration
@@ -207,8 +260,16 @@ cat > "$ENV_FILE" << EOF
 # Absolute path to the workspace directory on the host
 WORKSPACE_PATH=$WORKSPACE_PATH
 
-# Path to the agent's GitHub SSH private key on the host
-MATRIXMOUSE_AGENT_GH_KEY=$AGENT_GH_KEY_PATH
+# Credentials directory — mounted read-only into the container
+# Contains SSH key and GitHub PAT file
+# Must be OUTSIDE the workspace directory
+SECRETS_PATH=$SECRETS_DIR
+
+# Filename of the SSH private key within SECRETS_PATH
+MATRIXMOUSE_AGENT_GH_KEY_FILE=$(basename "$AGENT_GH_KEY_PATH")
+
+# Filename of the GitHub PAT file within SECRETS_PATH
+MATRIXMOUSE_GITHUB_TOKEN_FILE=$(basename "$AGENT_GH_TOKEN_FILE")
 
 # Ollama configuration
 OLLAMA_HOST=http://host.docker.internal:11434
@@ -484,6 +545,9 @@ echo "  Environment:      $INSTALL_DIR/.env"
 echo "  FIFO pipes:       $FIFO_DIR"
 echo "  Docker images:    matrixmouse, matrixmouse-test-runner"
 echo "  nginx template:   $NGINX_CONF"
+echo "  Secrets directory: $SECRETS_DIR"
+echo "    SSH key:   $AGENT_GH_KEY_PATH"
+echo "    PAT file:  $AGENT_GH_TOKEN_FILE"
 if $HAS_SYSTEMD; then
 echo "  test_runner:      systemd service (matrixmouse-test-runner)"
 fi
@@ -492,22 +556,27 @@ echo -e "${BOLD}Next steps:${RESET}"
 echo ""
 echo "  1. Add your TLS certs to nginx/certs/ and create a .htpasswd file:"
 echo "       htpasswd -c nginx/certs/.htpasswd yourusername"
+echo "  2. If your GitHub PAT file doesn't exist yet:"
+echo "       Visit https://github.com/settings/tokens/new"
+echo "       Required scopes: repo (full)"
+echo "       Save the token to: $AGENT_GH_TOKEN_FILE"
+echo "       chmod 600 $AGENT_GH_TOKEN_FILE"
 echo ""
-echo "  2. If your agent SSH key doesn't exist yet, generate it:"
+echo "  3. If your agent SSH key doesn't exist yet, generate it:"
 echo "       ssh-keygen -t ed25519 -C 'matrixmouse-bot' -f $AGENT_GH_KEY_PATH"
 echo "     Then add the public key to your GitHub bot account's SSH keys."
 echo ""
-echo "  3. Clone a repo into the workspace and initialise it:"
+echo "  4. Clone a repo into the workspace and initialise it:"
 echo "       cd $WORKSPACE_PATH"
 echo "       git clone git@github.com:you/yourrepo.git"
 echo "       docker compose run --rm matrixmouse python -m matrixmouse init --repo yourrepo"
 echo ""
-echo "  4. Add tasks to <repo>/.matrixmouse/tasks.json"
+echo "  5. Add tasks to <repo>/.matrixmouse/tasks.json"
 echo ""
-echo "  5. Start MatrixMouse:"
+echo "  6. Start MatrixMouse:"
 echo "       docker compose up -d"
 echo ""
-echo "  6. Open the web UI at https://$DOMAIN (or http://localhost:8080 for local access)"
+echo "  7. Open the web UI at https://$DOMAIN (or http://localhost:8080 for local access)"
 echo ""
 echo -e "${YELLOW}Remember:${RESET} test_runner.sh must be running on the host for isolated test execution."
 if $HAS_SYSTEMD; then

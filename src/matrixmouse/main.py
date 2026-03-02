@@ -88,6 +88,8 @@ def cmd_run(args):
     # --- Config ---
     paths = setup_repo(repo_root)
     config = load_config(repo_root)
+    import matrixmouse.config as _config_module
+    _config_module._loaded_config = config
 
     # --- Set up safety module ---
     _safety.configure(repo_root=paths.repo_root)

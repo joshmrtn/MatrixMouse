@@ -16,6 +16,7 @@ Tools exposed:
 Do not add file, navigation, or AST tools here.
 """
 
+import os
 import logging
 import subprocess
 from matrixmouse.tools._safety import project_root
@@ -27,23 +28,68 @@ logger = logging.getLogger(__name__)
 # Internal helper
 # ---------------------------------------------------------------------------
 
-def _git(args: list[str]) -> tuple[bool, str]:
+
+def _git_env() -> dict:
     """
-    Run a git command in the project root.
+    Build the environment for git subprocess calls.
+
+    Injects:
+        - GIT_SSH_COMMAND: uses the agent's SSH key so all git operations
+          are attributed to the bot account, not the host user's key.
+        - GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL: agent identity for commits.
+        - GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL: same.
+
+    The SSH key path is read from MATRIXMOUSE_AGENT_GH_KEY env var.
+    If not set, falls back to the host's default SSH config — fine for
+    development, but production should always have the key configured.
+    """
+    env = os.environ.copy()
+
+    key_file = os.environ.get("MATRIXMOUSE_AGENT_GH_KEY_FILE")
+    key_path = f"/run/secrets/{key_file}" if key_file else None
+    if key_path:
+        env["GIT_SSH_COMMAND"] = (
+            f"ssh -i {key_path} "
+            f"-o IdentitiesOnly=yes "
+            f"-o StrictHostKeyChecking=accept-new"
+        )
+    else:
+        logger.debug(
+            "MATRIXMOUSE_AGENT_GH_KEY not set. "
+            "Git operations will use the host's default SSH config."
+        )
+
+    # Agent git identity — set here so it overrides any host-level
+    # git config without modifying it
+    from matrixmouse import config as config_module
+    cfg = getattr(config_module, "_loaded_config", None)
+    if cfg:
+        env["GIT_AUTHOR_NAME"]     = cfg.agent_git_name
+        env["GIT_AUTHOR_EMAIL"]    = cfg.agent_git_email
+        env["GIT_COMMITTER_NAME"]  = cfg.agent_git_name
+        env["GIT_COMMITTER_EMAIL"] = cfg.agent_git_email
+
+    return env
+
+
+def _git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
+    """
+    Run a git command in the project root (or a specified directory).
 
     Args:
-        args: git subcommand and arguments, e.g. ["log", "-5", "--oneline"]
+        args: git subcommand and arguments.
+        cwd:  Working directory. Defaults to project_root().
 
     Returns:
-        (success: bool, output: str) where output is stdout on success
-        or stderr on failure.
+        (success: bool, output: str)
     """
     try:
         result = subprocess.run(
             ["git"] + args,
-            cwd=project_root(),
+            cwd=cwd or project_root(),
             capture_output=True,
             text=True,
+            env=_git_env(),
         )
         if result.returncode != 0:
             return False, result.stderr.strip() or result.stdout.strip()
@@ -52,7 +98,6 @@ def _git(args: list[str]) -> tuple[bool, str]:
         return False, "git is not installed or not in PATH."
     except Exception as e:
         return False, f"Unexpected error running git: {e}"
-
 
 def _fmt(success: bool, output: str, context: str = "") -> str:
     """Format a git result as a tool response string."""
@@ -253,3 +298,69 @@ def open_pull_request(title: str, body: str, base: str = "main") -> str:
         f"To open a PR manually: push the branch with push_branch(), "
         f"then open a PR on GitHub/Gitea from '{branch}' into '{base}'."
     )
+
+def clone_repo(remote_url: str, directory: str | None = None) -> str:
+    """
+    Clone a remote repository into the MatrixMouse workspace.
+
+    The repo is cloned into <workspace_root>/<directory>, where directory
+    defaults to the repository name inferred from the URL.
+
+    After cloning, run `matrixmouse init --repo <directory>` to register
+    it before running tasks against it.
+
+    Args:
+        remote_url: The remote URL to clone, e.g.
+                    'git@github.com:you/myrepo.git' or
+                    'https://github.com/you/myrepo'
+        directory:  Name of the subdirectory to clone into. Defaults to
+                    the repo name from the URL.
+
+    Returns:
+        Success message with the clone path, or an error.
+    """
+    import os
+    from matrixmouse.tools._safety import project_root as get_project_root
+
+    # Infer directory name from URL if not provided
+    if not directory:
+        # Strip trailing .git and take the last path component
+        directory = remote_url.rstrip("/").rstrip(".git").rsplit("/", 1)[-1]
+        if directory.endswith(".git"):
+            directory = directory[:-4]
+
+    if not directory:
+        return "ERROR: Could not infer directory name from URL. Pass directory explicitly."
+
+    # Sanitise directory name — no path traversal
+    if ".." in directory or "/" in directory:
+        return "ERROR: Directory name must not contain '..' or '/'."
+
+    # Clone into workspace root, not project root
+    workspace = os.environ.get("WORKSPACE_PATH")
+    if not workspace:
+        # Fall back to parent of project root for development
+        workspace = str(get_project_root().parent)
+
+    workspace_path = Path(workspace)
+    clone_path = workspace_path / directory
+
+    if clone_path.exists():
+        return (
+            f"ERROR: Directory '{clone_path}' already exists. "
+            "To re-clone, remove it first or choose a different directory name."
+        )
+
+    logger.info("Cloning %s into %s", remote_url, clone_path)
+    success, output = _git(
+        ["clone", remote_url, str(clone_path)],
+        cwd=workspace_path,
+    )
+
+    if success:
+        logger.info("Cloned %s to %s", remote_url, clone_path)
+        return (
+            f"OK: Cloned '{remote_url}' to '{clone_path}'.\n"
+            f"Next: run 'matrixmouse init --repo {directory}' to register it."
+        )
+    return _fmt(success, output, "clone_repo")

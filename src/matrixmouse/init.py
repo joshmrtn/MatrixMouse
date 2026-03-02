@@ -252,26 +252,36 @@ def _ensure_matrixmouse_dir(paths: MatrixMousePaths) -> None:
         logger.debug(".matrixmouse/ already exists at %s", paths.config_dir)
 
 
-def _build_paths(repo_root: Path) -> MatrixMousePaths:
+def _build_paths(repo_root: Path, workspace_root: Path | None = None) -> MatrixMousePaths:
     """
     Resolve all standard MatrixMouse paths from the repo root.
-    Called once at startup; the resulting object is passed to subsystems
-    that need filesystem access.
 
     Args:
-        repo_root: Absolute path to the root of the repo being worked on.
+        repo_root:      Absolute path to the root of the repo being worked on.
+        workspace_root: Absolute path to the MatrixMouse workspace root.
+                        If None, falls back to WORKSPACE_PATH env var,
+                        then defaults to repo_root's parent.
 
     Returns:
         A MatrixMousePaths instance with all paths resolved.
     """
-    return MatrixMousePaths(
-        repo_root=repo_root.resolve(),
-        config_dir=repo_root / ".matrixmouse",
-        log_file=repo_root / ".matrixmouse" / "agent.log",
-        agent_notes=repo_root / ".matrixmouse" / "AGENT_NOTES.md",
-        design_docs=repo_root / "docs" / "design",
-    )
+    import os
 
+    resolved_repo = repo_root.resolve()
+
+    if workspace_root is None:
+        env_workspace = os.environ.get("WORKSPACE_PATH")
+        workspace_root = Path(env_workspace).resolve() if env_workspace \
+                         else resolved_repo.parent
+
+    return MatrixMousePaths(
+        workspace_root=workspace_root.resolve(),
+        repo_root=resolved_repo,
+        config_dir=resolved_repo / ".matrixmouse",
+        log_file=resolved_repo / ".matrixmouse" / "agent.log",
+        agent_notes=resolved_repo / ".matrixmouse" / "AGENT_NOTES.md",
+        design_docs=resolved_repo / "docs" / "design",
+    )
 
 def _ensure_ignore_file(paths: MatrixMousePaths) -> None:
     """
@@ -298,17 +308,21 @@ def _ensure_ignore_file(paths: MatrixMousePaths) -> None:
     logger.debug("Created .matrixmouse/ignore at %s", ignore_path)
 
 
-def setup_repo(repo_root: Path) -> MatrixMousePaths:
+def setup_repo(repo_root: Path, workspace_root: Path | None = None) -> MatrixMousePaths:
     """
     Idempotent repo setup. Safe to call on every run.
     Creates .matrixmouse/ structure, writes starter config if missing,
     ensures .gitignore entries, scaffolds docs structure, verifies git.
 
+    Args:
+        repo_root:      Root directory of the repo being worked on.
+        workspace_root: Root of the MatrixMouse workspace. Optional —
+                        falls back to WORKSPACE_PATH env var or repo parent.
+
     Returns:
         MatrixMousePaths object containing relevant paths in the repo.
     """
-
-    paths = _build_paths(repo_root)
+    paths = _build_paths(repo_root, workspace_root)
     _ensure_matrixmouse_dir(paths)
     _ensure_starter_config(paths)
     _ensure_notes_file(paths)
@@ -317,7 +331,6 @@ def setup_repo(repo_root: Path) -> MatrixMousePaths:
     _ensure_ignore_file(paths)
     _verify_git(repo_root)
     return paths
-
 
 
 def validate_models(config: MatrixMouseConfig) -> None:

@@ -31,6 +31,9 @@ services:
       # Agent config and runtime state
       # The .matrixmouse/ directory inside the workspace is used by the agent.
       # No separate mount needed — it lives inside /workspace.
+      #
+      # Credentials - read-only, outside workspace
+      - ${SECRETS_PATH:?SECRETS_PATH must be set}: /run/secrets:ro
 
     environment:
       # Tell the agent where to find its workspace
