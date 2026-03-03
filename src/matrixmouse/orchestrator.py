@@ -48,6 +48,7 @@ from matrixmouse.phases import Phase, PHASE_SEQUENCE, next_phase
 from matrixmouse.router import Router
 from matrixmouse.stuck import StuckDetector
 from matrixmouse.tools._safety import reconfigure_for_task
+from matrixmouse.utils.file_lock import locked_json, LockTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -265,30 +266,36 @@ class TaskQueue:
     # Persistence
     # ------------------------------------------------------------------
 
+
     def _load(self) -> None:
         """Load tasks from the queue file. Creates an empty queue if missing."""
         if not self.tasks_file.exists():
             logger.info(
                 "No task queue found at %s. Starting with empty queue.",
-                self.tasks_file
+                self.tasks_file,
             )
             return
-        with open(self.tasks_file) as f:
-            raw_list = json.load(f)
-        for raw in raw_list:
-            task = Task.from_dict(raw)
-            self._tasks[task.id] = task
-        logger.info("Loaded %d tasks from %s", len(self._tasks), self.tasks_file)
+        try:
+            with locked_json(self.tasks_file) as (raw_list, _):
+                for raw in raw_list:
+                    task = Task.from_dict(raw)
+                    self._tasks[task.id] = task
+            logger.info(
+                "Loaded %d tasks from %s", len(self._tasks), self.tasks_file
+            )
+        except LockTimeoutError as e:
+            logger.error("Failed to load tasks: %s", e)
+            raise
 
     def _save(self) -> None:
         """Persist current task list to the queue file."""
-        self.tasks_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.tasks_file, "w") as f:
-            json.dump(
-                [t.to_dict() for t in self._tasks.values()],
-                f,
-                indent=2,
-            )
+        try:
+            with locked_json(self.tasks_file) as (_, save):
+                save([t.to_dict() for t in self._tasks.values()])
+        except LockTimeoutError as e:
+            logger.error("Failed to save tasks: %s", e)
+            raise
+
 
     # ------------------------------------------------------------------
     # Reads

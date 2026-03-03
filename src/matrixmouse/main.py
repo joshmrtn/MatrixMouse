@@ -60,6 +60,7 @@ from matrixmouse import comms
 from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.server import start_server
 from matrixmouse.tools import _safety, code_tools, TOOLS, TOOL_REGISTRY  # noqa
+from matrixmouse.utils.file_lock import locked_json, LockTimeoutError
 
 
 # ---------------------------------------------------------------------------
@@ -574,10 +575,12 @@ def cmd_status(args):
 
 
 
+
 def _load_tasks_file() -> tuple["Path", list[dict]]:
     """
-    Load tasks.json from the workspace. Does not require the agent to
-    be running — reads the file directly.
+    Load tasks.json from the workspace with an exclusive file lock.
+    Does not require the agent to be running — reads the file directly.
+    Safe to call concurrently with a running agent.
 
     Returns:
         (tasks_file_path, list_of_raw_task_dicts)
@@ -588,15 +591,25 @@ def _load_tasks_file() -> tuple["Path", list[dict]]:
     if not tasks_file.exists():
         return tasks_file, []
 
-    with open(tasks_file) as f:
-        return tasks_file, json.load(f)
+    try:
+        with locked_json(tasks_file) as (tasks, _):
+            return tasks_file, list(tasks)
+    except LockTimeoutError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
 
 def _save_tasks_file(tasks_file: "Path", tasks: list[dict]) -> None:
-    """Write tasks back to tasks.json."""
-    tasks_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(tasks_file, "w") as f:
-        json.dump(tasks, f, indent=2)
+    """
+    Write tasks back to tasks.json with an exclusive file lock.
+    Safe to call concurrently with a running agent.
+    """
+    try:
+        with locked_json(tasks_file) as (_, save):
+            save(tasks)
+    except LockTimeoutError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
 
 def _find_task(tasks: list[dict], task_id: str) -> dict | None:
