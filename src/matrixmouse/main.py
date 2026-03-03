@@ -1,130 +1,41 @@
 """
 matrixmouse/main.py
 
-Entry point for MatrixMouse. Parses CLI arguments, initialises all
-subsystems in order, and hands control to the orchestrator.
+Entry point for MatrixMouse. Parses CLI arguments and dispatches to
+the appropriate command.
+
+All state-mutating commands communicate with the running MatrixMouse
+service via its HTTP API (localhost). Commands that do not require a
+running service (add-repo bootstrap, upgrade) are handled locally.
 
 Commands:
-    init        Initialise MatrixMouse in a repo directory.
-    run         Start the agent against the workspace.
     add-repo    Clone or register a repo into the workspace.
+    tasks       View and manage the task queue (list/show/add/edit/cancel).
+    interject   Send a message to the running agent.
+    answer      Answer a pending clarification request from the agent.
+    status      Show current agent status.
+    upgrade     Upgrade MatrixMouse and rebuild the test runner image.
+    config      Read or set configuration values.
 
-    # Future CLI commands (not yet implemented):
-    # interject   Send a message to the running agent.
-    # tasks       View and edit the task queue.
-    # status      Show current agent status.
-    # answer      Answer a pending clarification request.
-
-Startup sequence (cmd_run):
-    1.  Logging (safe defaults, before anything else)
-    2.  Workspace and repo paths resolved
-    3.  PID lockfile acquired
-    4.  Configuration loaded (workspace → repo cascade)
-    5.  Logging reconfigured with user preferences
-    6.  Safety module configured
-    7.  Model validation
-    8.  AST graph built
-    9.  Memory, comms modules configured
-    10. Web server started
-    11. Orchestrator started
-
-Handles top-level signals (SIGINT, SIGTERM) for clean shutdown.
+Service startup is handled by systemd, not by this CLI.
+The service is managed with:
+    sudo systemctl start|stop|restart|status matrixmouse
 """
 
+import argparse
+import json
 import logging
 import os
-import signal
 import sys
 from pathlib import Path
 
 from matrixmouse.utils.logging_utils import setup_logging
 
 # ---------------------------------------------------------------------------
-# Logging — must come before any other matrixmouse imports
+# Logging — minimal setup for CLI use. The service has its own logging config.
 # ---------------------------------------------------------------------------
-setup_logging(log_level="INFO", log_to_file=False, repo_root=Path.cwd())
+setup_logging(log_level="WARNING", log_to_file=False, repo_root=Path.cwd())
 logger = logging.getLogger(__name__)
-logger.info("MatrixMouse starting up...")
-
-# ---------------------------------------------------------------------------
-# Remaining imports — after logging is initialised
-# ---------------------------------------------------------------------------
-import argparse
-import json
-
-from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, load_config
-from matrixmouse.init import setup_repo, validate_models
-from matrixmouse.graph import ProjectAnalyzer, analyze_project
-from matrixmouse import memory
-from matrixmouse import comms
-from matrixmouse.orchestrator import Orchestrator
-from matrixmouse.server import start_server
-from matrixmouse.tools import _safety, code_tools, TOOLS, TOOL_REGISTRY  # noqa
-from matrixmouse.utils.file_lock import locked_json, LockTimeoutError
-
-
-# ---------------------------------------------------------------------------
-# Signal handling
-# ---------------------------------------------------------------------------
-
-def _handle_shutdown(signum, frame):
-    logger.info("Shutdown signal received. Exiting cleanly...")
-    _release_pidlock()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, _handle_shutdown)
-signal.signal(signal.SIGTERM, _handle_shutdown)
-
-
-# ---------------------------------------------------------------------------
-# PID lockfile — prevents multiple instances per workspace
-# ---------------------------------------------------------------------------
-
-_pidlock_path: Path | None = None
-
-
-def _acquire_pidlock(workspace_root: Path) -> None:
-    """
-    Write a PID lockfile at <workspace>/.matrixmouse/agent.pid.
-    Raises SystemExit if another instance is already running.
-    """
-    global _pidlock_path
-    lock_dir = workspace_root / ".matrixmouse"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    _pidlock_path = lock_dir / "agent.pid"
-
-    if _pidlock_path.exists():
-        try:
-            existing_pid = int(_pidlock_path.read_text().strip())
-            # Check if the PID is still alive
-            os.kill(existing_pid, 0)
-            # If we get here, the process is alive
-            print(
-                f"ERROR: Another MatrixMouse instance is already running "
-                f"(PID {existing_pid}) in this workspace.\n"
-                f"If this is wrong, delete: {_pidlock_path}"
-            )
-            sys.exit(1)
-        except (ValueError, ProcessLookupError, PermissionError):
-            # Stale lockfile — process is dead
-            logger.warning(
-                "Stale PID lockfile found at %s. Overwriting.",
-                _pidlock_path
-            )
-
-    _pidlock_path.write_text(str(os.getpid()))
-    logger.debug("PID lockfile acquired at %s (PID %d)", _pidlock_path, os.getpid())
-
-
-def _release_pidlock() -> None:
-    """Remove the PID lockfile on clean exit."""
-    global _pidlock_path
-    if _pidlock_path and _pidlock_path.exists():
-        try:
-            _pidlock_path.unlink()
-            logger.debug("PID lockfile released.")
-        except Exception as e:
-            logger.warning("Failed to release PID lockfile: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -132,180 +43,243 @@ def _release_pidlock() -> None:
 # ---------------------------------------------------------------------------
 
 def _resolve_workspace() -> Path:
-    """
-    Resolve the workspace root from environment or default.
-    """
     env = os.environ.get("WORKSPACE_PATH")
     if env:
         return Path(env).resolve()
     default = Path.home() / "matrixmouse-workspace"
     if default.exists():
         return default
-    # Fall back to parent of cwd — useful in development
     return Path.cwd().parent
 
 
-def _resolve_repo(args, workspace_root: Path) -> Path | None:
-    """
-    Resolve the repo directory from --repo argument or cwd.
-
-    If --repo is an absolute path or starts with ./ or ../, use it
-    directly. Otherwise treat it as a subdirectory of the workspace.
-    Falls back to cwd if no --repo argument given.
-    """
-    repo_arg = getattr(args, "repo", None)
-
-    if not repo_arg:
-        # No --repo flag — use cwd if it looks like a repo
-        cwd = Path.cwd()
-        mm_dir = cwd / ".matrixmouse"
-        if mm_dir.exists() or (cwd.parent == workspace_root):
-            return cwd
-        return None
-
-    repo_path = Path(repo_arg)
-    if repo_path.is_absolute() or repo_arg.startswith(("./", "../")):
-        return repo_path.resolve()
-    return (workspace_root / repo_arg).resolve()
+def _resolve_port() -> int:
+    return int(os.environ.get("MM_SERVER_PORT", "8080"))
 
 
 # ---------------------------------------------------------------------------
-# CLI commands
+# HTTP helpers — all CLI state commands go through the API
 # ---------------------------------------------------------------------------
 
-def cmd_init(args):
+def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
     """
-    Initialise MatrixMouse in a repo directory.
-
-    Creates .matrixmouse/ with starter config and AGENT_NOTES.md.
-    Safe to run repeatedly — never overwrites existing files.
+    POST to the running agent's HTTP API.
+    Exits with a clear error if the service is not reachable.
     """
-    workspace_root = _resolve_workspace()
-    repo_root = _resolve_repo(args, workspace_root)
+    import urllib.request
+    import urllib.error
 
-    if repo_root is None:
-        repo_root = Path.cwd()
-        logger.info("No --repo specified. Initialising in current directory.")
-
-    if not repo_root.exists():
-        print(f"ERROR: Repo directory does not exist: {repo_root}")
-        sys.exit(1)
-
-    paths = setup_repo(repo_root, workspace_root)
-    print(f"Initialized MatrixMouse in {repo_root}")
-    print(f"  Config:      {paths.config_dir / 'config.toml'}")
-    print(f"  Agent notes: {paths.agent_notes}")
-    print(f"  Design docs: {paths.design_docs}")
-    print(f"\nNext: add tasks to {workspace_root / '.matrixmouse' / 'tasks.json'}")
-
-
-def cmd_run(args):
-    """
-    Start the agent against the workspace.
-
-    Loads config, builds the AST graph, starts the web server,
-    and hands control to the orchestrator.
-    """
-    workspace_root = _resolve_workspace()
-    repo_root = _resolve_repo(args, workspace_root)
-
-    if repo_root is None:
-        print(
-            "ERROR: Could not determine repo to run against.\n"
-            "Either run from inside a repo directory, or pass --repo <name>."
-        )
-        sys.exit(1)
-
-    # --- PID lockfile ---
-    _acquire_pidlock(workspace_root)
-
+    url = f"http://localhost:{port}{endpoint}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        # --- Setup ---
-        paths = setup_repo(repo_root, workspace_root)
-        config = load_config(repo_root, workspace_root)
-        import matrixmouse.config as _cfg
-        _cfg._loaded_config = config
-
-        # --- Reconfigure logging ---
-        setup_logging(
-            log_level=config.log_level,
-            log_to_file=config.log_to_file,
-            repo_root=repo_root,
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.URLError as e:
+        print(
+            f"ERROR: Could not reach the MatrixMouse service at {url}\n"
+            f"Is the service running?  sudo systemctl status matrixmouse\n"
+            f"Details: {e.reason}"
         )
-        logger.info("Workspace: %s", workspace_root)
-        logger.info("Repo:      %s", repo_root)
+        sys.exit(1)
 
-        # --- Safety module ---
-        _safety.configure(repo_root=paths.repo_root)
 
-        # --- Model validation ---
-        validate_models(config)
+def _agent_get(endpoint: str, port: int) -> dict:
+    """GET from the running agent's HTTP API."""
+    import urllib.request
+    import urllib.error
 
-        # --- AST graph ---
-        logger.info("Building AST graph for %s...", repo_root)
-        graph = analyze_project(str(repo_root))
-        logger.info(
-            "AST graph complete. %d functions, %d classes indexed.",
-            len(graph.functions), len(graph.classes),
+    url = f"http://localhost:{port}{endpoint}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.URLError as e:
+        print(
+            f"ERROR: Could not reach the MatrixMouse service at {url}\n"
+            f"Is the service running?  sudo systemctl status matrixmouse\n"
+            f"Details: {e.reason}"
         )
-        code_tools.configure(graph)
+        sys.exit(1)
 
-        # --- Memory and comms ---
-        memory.configure(paths.agent_notes)
-        comms.configure(config)
 
-        # --- Web server ---
-        start_server(config, paths)
+def _agent_patch(endpoint: str, payload: dict, port: int) -> dict:
+    """PATCH to the running agent's HTTP API."""
+    import urllib.request
+    import urllib.error
 
-        # --- Orchestrator ---
-        logger.info("Handing control to orchestrator...")
-        orchestrator = Orchestrator(config=config, paths=paths, graph=graph)
-        orchestrator.run()
+    url = f"http://localhost:{port}{endpoint}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.URLError as e:
+        print(
+            f"ERROR: Could not reach the MatrixMouse service at {url}\n"
+            f"Details: {e.reason}"
+        )
+        sys.exit(1)
 
-    finally:
-        _release_pidlock()
 
+def _agent_delete(endpoint: str, port: int) -> dict:
+    """DELETE via the running agent's HTTP API."""
+    import urllib.request
+    import urllib.error
+
+    url = f"http://localhost:{port}{endpoint}"
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.URLError as e:
+        print(
+            f"ERROR: Could not reach the MatrixMouse service at {url}\n"
+            f"Details: {e.reason}"
+        )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# cmd_add_repo
+# ---------------------------------------------------------------------------
 
 def cmd_add_repo(args):
     """
-    Clone a remote repo into the workspace and register it.
+    Clone or register a repo into the workspace.
 
-    Accepts a git remote URL or a local path.
-    Writes an entry to <workspace>/.matrixmouse/repos.json.
+    If the service is running, delegates to POST /repos so the agent
+    is aware of the new repo immediately.
 
-    Examples:
-        matrixmouse add-repo git@github.com:joshmrtn/MatrixMouse.git
-        matrixmouse add-repo https://github.com/joshmrtn/MatrixMouse
-        matrixmouse add-repo /path/to/existing/local/repo
+    If the service is not running (bootstrap case — first repo before
+    the service has ever started), clones directly and registers in
+    repos.json. This allows a user to set up the workspace before
+    starting the service for the first time.
     """
+    port = _resolve_port()
+
+    # Try the API first
+    try:
+        result = _agent_post(
+            "/repos",
+            {"remote": args.remote, "name": getattr(args, "name", None)},
+            port,
+        )
+        if result.get("ok"):
+            repo = result["repo"]
+            print(f"Repo '{repo['name']}' added to workspace.")
+            _post_add_instructions(repo["name"], Path(repo["local_path"]))
+        else:
+            print(f"ERROR: {result.get('detail', 'unknown error')}")
+            sys.exit(1)
+        return
+    except SystemExit:
+        # Service not running — fall through to bootstrap path
+        pass
+
+    # Bootstrap path: service not running, do it directly
+    print("Service not running — cloning directly (bootstrap mode).")
+    _add_repo_direct(args)
+
+
+def _add_repo_direct(args) -> None:
+    """
+    Clone and register a repo without a running service.
+    Used for bootstrap (first install) only.
+    """
+    import subprocess
+
     workspace_root = _resolve_workspace()
     remote = args.remote
-
-    # Determine if this is a local path or a remote URL
     local_path = Path(remote)
     is_local = local_path.exists() and local_path.is_dir()
 
-    if is_local:
-        _add_local_repo(local_path, workspace_root, args)
-    else:
-        _add_remote_repo(remote, workspace_root, args)
+    name = getattr(args, "name", None)
+    if not name:
+        name = local_path.name if is_local else _infer_repo_name(remote)
+
+    dest = workspace_root / name
+    workspace_root.mkdir(parents=True, exist_ok=True)
+
+    if dest.exists():
+        print(f"Directory '{dest}' already exists.")
+        answer = input(
+            "(u)pdate with git pull, (s)kip clone + register, or (a)bort? [u/s/a]: "
+        ).strip().lower()
+        if answer == "a":
+            sys.exit(0)
+        elif answer == "s":
+            _register_repo(workspace_root, name, dest, remote)
+            print(f"Registered '{name}'.")
+            _post_add_instructions(name, dest)
+            return
+        elif answer == "u":
+            result = subprocess.run(
+                ["git", "pull"], cwd=dest, capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                print(f"ERROR: git pull failed:\n{result.stderr}")
+                sys.exit(1)
+            print(result.stdout.strip())
+            _register_repo(workspace_root, name, dest, remote)
+            _post_add_instructions(name, dest)
+            return
+        else:
+            print("Unrecognised option. Aborted.")
+            sys.exit(1)
+
+    # Build SSH env if key is configured
+    env = os.environ.copy()
+    key_file = os.environ.get("MATRIXMOUSE_AGENT_GH_KEY_FILE")
+    secrets_path = os.environ.get("SECRETS_PATH", str(Path.home() / ".matrixmouse-secrets"))
+    if key_file:
+        key_path = Path(secrets_path) / key_file
+        if key_path.exists():
+            env["GIT_SSH_COMMAND"] = (
+                f"ssh -i {key_path} -o IdentitiesOnly=yes "
+                f"-o StrictHostKeyChecking=accept-new"
+            )
+
+    src = str(local_path.resolve()) if is_local else remote
+    print(f"Cloning '{src}' into '{dest}'...")
+    result = subprocess.run(
+        ["git", "clone", src, str(dest)],
+        env=env, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: git clone failed:\n{result.stderr.strip()}")
+        sys.exit(1)
+
+    print("Cloned successfully.")
+
+    # Auto-init
+    try:
+        from matrixmouse.init import setup_repo
+        setup_repo(dest, workspace_root)
+        print(f"Initialised .matrixmouse/ in {dest}")
+    except Exception as e:
+        print(f"Warning: auto-init failed ({e}). Run manually if needed.")
+
+    _register_repo(workspace_root, name, dest, remote)
+    _post_add_instructions(name, dest)
 
 
 def _infer_repo_name(remote: str) -> str:
-    """Infer a directory name from a remote URL."""
     name = remote.rstrip("/").rsplit("/", 1)[-1]
-    if name.endswith(".git"):
-        name = name[:-4]
-    return name
+    return name[:-4] if name.endswith(".git") else name
 
 
 def _register_repo(
-    workspace_root: Path,
-    name: str,
-    local_path: Path,
-    remote: str,
+    workspace_root: Path, name: str, local_path: Path, remote: str
 ) -> None:
-    """Write an entry to repos.json."""
+    from datetime import datetime, timezone
+
     repos_file = workspace_root / ".matrixmouse" / "repos.json"
     repos_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -314,367 +288,32 @@ def _register_repo(
         with open(repos_file) as f:
             repos = json.load(f)
 
-    # Check if already registered
-    for repo in repos:
-        if repo.get("name") == name:
-            logger.info("Repo '%s' already registered.", name)
-            return
+    if any(r.get("name") == name for r in repos):
+        return  # already registered
 
-    from datetime import datetime, timezone
     repos.append({
         "name": name,
         "remote": remote,
         "local_path": str(local_path),
         "added": datetime.now(timezone.utc).date().isoformat(),
     })
-
     with open(repos_file, "w") as f:
         json.dump(repos, f, indent=2)
 
-    logger.info("Registered repo '%s' in %s", name, repos_file)
 
-
-def _add_remote_repo(remote: str, workspace_root: Path, args) -> None:
-    """Clone a remote URL into the workspace."""
-    import subprocess
-
-    name = getattr(args, "name", None) or _infer_repo_name(remote)
-    dest = workspace_root / name
-
-    if dest.exists():
-        print(f"Directory '{dest}' already exists.")
-        answer = input("(u)pdate with git pull, (s)kip registration, or (a)bort? [u/s/a]: ").strip().lower()
-        if answer == "a":
-            print("Aborted.")
-            sys.exit(0)
-        elif answer == "s":
-            _register_repo(workspace_root, name, dest, remote)
-            print(f"Registered existing directory '{dest}' as '{name}'.")
-            _post_add_instructions(name, dest, workspace_root)
-            return
-        elif answer == "u":
-            print(f"Pulling latest changes in '{dest}'...")
-            result = subprocess.run(
-                ["git", "pull"],
-                cwd=dest,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                print(f"ERROR: git pull failed:\n{result.stderr}")
-                sys.exit(1)
-            print(result.stdout.strip())
-            _register_repo(workspace_root, name, dest, remote)
-            _post_add_instructions(name, dest, workspace_root)
-            return
-        else:
-            print("Unrecognised option. Aborted.")
-            sys.exit(1)
-
-    # Build git clone command with agent SSH key if configured
-    key_file = os.environ.get("MATRIXMOUSE_AGENT_GH_KEY_FILE")
-    env = os.environ.copy()
-    if key_file:
-        key_path = f"/run/secrets/{key_file}"
-        if Path(key_path).exists():
-            env["GIT_SSH_COMMAND"] = (
-                f"ssh -i {key_path} -o IdentitiesOnly=yes "
-                f"-o StrictHostKeyChecking=accept-new"
-            )
-
-    workspace_root.mkdir(parents=True, exist_ok=True)
-    print(f"Cloning '{remote}' into '{dest}'...")
-
-    result = subprocess.run(
-        ["git", "clone", remote, str(dest)],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        print(f"ERROR: git clone failed:\n{result.stderr.strip()}")
-        sys.exit(1)
-
-    print(f"Cloned successfully.")
-    _register_repo(workspace_root, name, dest, remote)
-    _post_add_instructions(name, dest, workspace_root)
-
-
-def _add_local_repo(local_path: Path, workspace_root: Path, args) -> None:
-    """Register a local repo that already exists on disk."""
-    import subprocess
-
-    name = getattr(args, "name", None) or local_path.name
-    dest = workspace_root / name
-
-    if dest.exists() and dest != local_path.resolve():
-        print(f"ERROR: '{dest}' already exists in the workspace.")
-        print(f"Pass --name to use a different name.")
-        sys.exit(1)
-
-    if not dest.exists():
-        # Copy the repo into the workspace
-        print(f"Copying '{local_path}' into workspace as '{name}'...")
-        result = subprocess.run(
-            ["git", "clone", str(local_path.resolve()), str(dest)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            print(f"ERROR: Failed to copy repo:\n{result.stderr.strip()}")
-            sys.exit(1)
-
-    _register_repo(workspace_root, name, dest, str(local_path.resolve()))
-    _post_add_instructions(name, dest, workspace_root)
-
-
-def _post_add_instructions(name: str, dest: Path, workspace_root: Path) -> None:
-    """Print next-step instructions after a repo is added."""
+def _post_add_instructions(name: str, dest: Path) -> None:
     print(f"\nRepo '{name}' is ready at {dest}")
     print(f"\nNext steps:")
-    print(f"  1. Initialise MatrixMouse in the repo:")
-    print(f"       matrixmouse init --repo {name}")
-    print(f"  2. Add tasks to:")
-    print(f"       {workspace_root / '.matrixmouse' / 'tasks.json'}")
-    print(f"  3. Run the agent:")
-    print(f"       matrixmouse run --repo {name}")
-
+    print(f"  Add a task:   matrixmouse tasks add")
+    print(f"  Check status: matrixmouse status")
+    print(f"  Web UI:       http://localhost:{_resolve_port()}/")
 
 
 # ---------------------------------------------------------------------------
-# Shared HTTP helper
-# ---------------------------------------------------------------------------
-
-def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
-    """
-    POST to the running agent's web server.
-
-    Args:
-        endpoint: Path including leading slash, e.g. '/interject'
-        payload:  JSON-serialisable dict to send as request body.
-        port:     Server port from config or env.
-
-    Returns:
-        Parsed JSON response dict.
-
-    Raises:
-        SystemExit on connection failure or non-200 response.
-    """
-    import json
-    import urllib.request
-    import urllib.error
-
-    url = f"http://localhost:{port}{endpoint}"
-    data = json.dumps(payload).encode()
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read())
-    except urllib.error.URLError as e:
-        print(
-            f"ERROR: Could not reach the agent at {url}\n"
-            f"Is MatrixMouse running? (matrixmouse run)\n"
-            f"Details: {e.reason}"
-        )
-        sys.exit(1)
-
-
-def _agent_get(endpoint: str, port: int) -> dict:
-    """GET from the running agent's web server."""
-    import json
-    import urllib.request
-    import urllib.error
-
-    url = f"http://localhost:{port}{endpoint}"
-    try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            return json.loads(resp.read())
-    except urllib.error.URLError as e:
-        print(
-            f"ERROR: Could not reach the agent at {url}\n"
-            f"Is MatrixMouse running? (matrixmouse run)\n"
-            f"Details: {e.reason}"
-        )
-        sys.exit(1)
-
-
-def _resolve_port() -> int:
-    """Read the server port from environment or fall back to default."""
-    return int(os.environ.get("MM_SERVER_PORT", "8080"))
-
-
-# ---------------------------------------------------------------------------
-# cmd_interject
-# ---------------------------------------------------------------------------
-
-def cmd_interject(args):
-    """
-    Send a message to the running agent.
-
-    The message is injected into the agent loop at the next iteration
-    boundary. If --repo is given, the message is scoped to that repo's
-    context. Without --repo, the message goes to the workspace-level queue.
-
-    The agent will see the message as a user interjection and can
-    respond to it before continuing its current task.
-    """
-    port = _resolve_port()
-    message = args.message
-    repo = getattr(args, "repo", None)
-
-    payload = {"message": message}
-    if repo:
-        payload["repo"] = repo
-
-    result = _agent_post("/interject", payload, port)
-
-    if result.get("ok"):
-        scope = f"repo '{repo}'" if repo else "workspace"
-        print(f"Message sent to agent ({scope}).")
-    else:
-        print(f"ERROR: Agent rejected the message: {result.get('error', 'unknown error')}")
-        sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# cmd_status
-# ---------------------------------------------------------------------------
-
-def cmd_status(args):
-    """
-    Show the current agent status — task, phase, model, and blocked tasks.
-    """
-    port = _resolve_port()
-    status = _agent_get("/status", port)
-
-    if "error" in status:
-        print(f"ERROR: {status['error']}")
-        sys.exit(1)
-
-    task    = status.get("task")    or "—"
-    phase   = status.get("phase")   or "—"
-    model   = status.get("model")   or "—"
-    turns   = status.get("turns")
-    blocked = status.get("blocked", False)
-
-    print(f"Task:    {task}")
-    print(f"Phase:   {phase}")
-    print(f"Model:   {model}")
-    if turns is not None:
-        print(f"Turns:   {turns}")
-    print(f"Blocked: {'yes' if blocked else 'no'}")
-
-
-
-
-
-def _load_tasks_file() -> tuple["Path", list[dict]]:
-    """
-    Load tasks.json from the workspace with an exclusive file lock.
-    Does not require the agent to be running — reads the file directly.
-    Safe to call concurrently with a running agent.
-
-    Returns:
-        (tasks_file_path, list_of_raw_task_dicts)
-    """
-    workspace_root = _resolve_workspace()
-    tasks_file = workspace_root / ".matrixmouse" / "tasks.json"
-
-    if not tasks_file.exists():
-        return tasks_file, []
-
-    try:
-        with locked_json(tasks_file) as (tasks, _):
-            return tasks_file, list(tasks)
-    except LockTimeoutError as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
-
-
-def _save_tasks_file(tasks_file: "Path", tasks: list[dict]) -> None:
-    """
-    Write tasks back to tasks.json with an exclusive file lock.
-    Safe to call concurrently with a running agent.
-    """
-    try:
-        with locked_json(tasks_file) as (_, save):
-            save(tasks)
-    except LockTimeoutError as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
-
-
-def _find_task(tasks: list[dict], task_id: str) -> dict | None:
-    """Find a task by ID prefix match (allows short IDs like 'a1b2')."""
-    exact = next((t for t in tasks if t.get("id") == task_id), None)
-    if exact:
-        return exact
-    # Prefix match
-    matches = [t for t in tasks if t.get("id", "").startswith(task_id)]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        ids = ", ".join(t["id"] for t in matches)
-        print(f"Ambiguous ID '{task_id}' matches: {ids}")
-        return None
-    return None
-
-
-def _fmt_task_row(t: dict) -> str:
-    """Format a task as a single-line summary row."""
-    status  = t.get("status", "pending")
-    title   = t.get("title", "(no title)")
-    tid     = t.get("id", "?")
-    repo    = ", ".join(t.get("repo", [])) or "—"
-    imp     = t.get("importance", 0.5)
-    urg     = t.get("urgency", 0.5)
-    blocked = " [BLOCKED]" if "blocked" in status else ""
-    return f"[{tid}] {title}{blocked}  repo={repo}  i={imp} u={urg}  ({status})"
-
-
-def _fmt_task_detail(t: dict) -> str:
-    """Format a task as a full detail block."""
-    lines = [
-        f"ID:           {t.get('id', '?')}",
-        f"Title:        {t.get('title', '')}",
-        f"Status:       {t.get('status', 'pending')}",
-        f"Phase:        {t.get('phase', '?')}",
-        f"Repo:         {', '.join(t.get('repo', [])) or '—'}",
-        f"Importance:   {t.get('importance', 0.5)}",
-        f"Urgency:      {t.get('urgency', 0.5)}",
-        f"Created:      {t.get('created_at', '?')}",
-    ]
-    if t.get("target_files"):
-        lines.append(f"Target files: {', '.join(t['target_files'])}")
-    if t.get("blocked_by"):
-        lines.append(f"Blocked by:   {', '.join(t['blocked_by'])}")
-    if t.get("blocking"):
-        lines.append(f"Blocking:     {', '.join(t['blocking'])}")
-    if t.get("parent_task"):
-        lines.append(f"Parent:       {t['parent_task']}")
-    if t.get("subtasks"):
-        lines.append(f"Subtasks:     {', '.join(t['subtasks'])}")
-    if t.get("notes"):
-        lines.append(f"\nNotes:\n{t['notes']}")
-    if t.get("description"):
-        lines.append(f"\nDescription:\n{t['description']}")
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# cmd_tasks dispatcher
+# cmd_tasks
 # ---------------------------------------------------------------------------
 
 def cmd_tasks(args):
-    """Route to the appropriate tasks subcommand."""
     subcmd = getattr(args, "tasks_subcmd", None)
     dispatch = {
         "list":   cmd_tasks_list,
@@ -690,88 +329,57 @@ def cmd_tasks(args):
 
 
 def cmd_tasks_list(args):
-    """
-    List tasks in the queue.
+    """List tasks via GET /tasks."""
+    port = _resolve_port()
 
-    Filters:
-        --status:  pending, active, blocked_by_task, blocked_by_human,
-                   complete, cancelled. Default: all non-terminal.
-        --repo:    Filter by repo name.
-        --all:     Include terminal (complete/cancelled) tasks.
-    """
-    _, tasks = _load_tasks_file()
+    params = []
+    if getattr(args, "status", None):
+        params.append(f"status={args.status}")
+    if getattr(args, "repo", None):
+        params.append(f"repo={args.repo}")
+    if getattr(args, "all", False):
+        params.append("all=true")
 
+    qs = ("?" + "&".join(params)) if params else ""
+    result = _agent_get(f"/tasks{qs}", port)
+
+    tasks = result.get("tasks", [])
     if not tasks:
         print("No tasks found. Add one with: matrixmouse tasks add")
         return
 
-    status_filter = getattr(args, "status", None)
-    repo_filter   = getattr(args, "repo", None)
-    show_all      = getattr(args, "all", False)
-
-    terminal = {"complete", "cancelled"}
-    filtered = tasks
-
-    if not show_all and not status_filter:
-        filtered = [t for t in filtered if t.get("status", "pending") not in terminal]
-
-    if status_filter:
-        filtered = [t for t in filtered if t.get("status") == status_filter]
-
-    if repo_filter:
-        filtered = [t for t in filtered if repo_filter in t.get("repo", [])]
-
-    if not filtered:
-        print("No tasks match the filter.")
-        return
-
-    # Sort by priority score approximation (importance * 0.6 + urgency * 0.4)
-    filtered.sort(
-        key=lambda t: t.get("importance", 0.5) * 0.6 + t.get("urgency", 0.5) * 0.4,
-        reverse=True,
-    )
-
-    for t in filtered:
+    for t in tasks:
         print(_fmt_task_row(t))
 
-    print(f"\n{len(filtered)} task(s) shown.")
+    print(f"\n{result.get('count', len(tasks))} task(s) shown.")
 
 
 def cmd_tasks_show(args):
-    """Show full details of a single task."""
-    _, tasks = _load_tasks_file()
-
-    task = _find_task(tasks, args.id)
-    if task is None:
-        print(f"ERROR: Task '{args.id}' not found.")
-        sys.exit(1)
-
-    print(_fmt_task_detail(task))
+    """Show task details via GET /tasks/{id}."""
+    port = _resolve_port()
+    result = _agent_get(f"/tasks/{args.id}", port)
+    print(_fmt_task_detail(result))
 
 
 def cmd_tasks_add(args):
     """
-    Interactively create a new task and append it to tasks.json.
-    Prompts for essential fields only — dependency links can be set
-    later with 'matrixmouse tasks edit'.
+    Create a task interactively, then POST to /tasks.
+    Prompts for essential fields. The agent picks it up immediately
+    via the condition variable notification in the API handler.
     """
-    import uuid
-    from datetime import datetime, timezone
+    port = _resolve_port()
 
-    workspace_root = _resolve_workspace()
-    tasks_file, tasks = _load_tasks_file()
+    # Show known repos as a hint
+    try:
+        repos_result = _agent_get("/repos", port)
+        known_repos = [r.get("name", "") for r in repos_result.get("repos", [])]
+    except SystemExit:
+        known_repos = []
+    repo_hint = f" (known: {', '.join(known_repos)})" if known_repos else ""
 
     print("Adding a new task. Press Ctrl+C to cancel.\n")
 
-    # Discover registered repos for the prompt hint
-    repos_file = workspace_root / ".matrixmouse" / "repos.json"
-    known_repos = []
-    if repos_file.exists():
-        with open(repos_file) as f:
-            known_repos = [r.get("name", "") for r in json.load(f)]
-    repo_hint = f" (known: {', '.join(known_repos)})" if known_repos else ""
-
-    title = input(f"Title: ").strip()
+    title = input("Title: ").strip()
     if not title:
         print("Aborted — title is required.")
         sys.exit(1)
@@ -803,62 +411,39 @@ def cmd_tasks_add(args):
     except ValueError:
         urgency = 0.5
 
-    task = {
-        "id": str(uuid.uuid4())[:8],
+    payload = {
         "title": title,
         "description": description,
         "repo": repo,
-        "phase": "DESIGN",
-        "status": "pending",
         "target_files": target_files,
-        "notes": "",
-        "blocked_by": [],
-        "blocking": [],
-        "parent_task": None,
-        "subtasks": [],
         "importance": importance,
         "urgency": urgency,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "started_at": None,
-        "completed_at": None,
-        "source": "local",
     }
 
-    tasks.append(task)
-    _save_tasks_file(tasks_file, tasks)
-
-    print(f"\nTask created: [{task['id']}] {title}")
-    print(f"Saved to: {tasks_file}")
+    result = _agent_post("/tasks", payload, port)
+    print(f"\nTask created: [{result['id']}] {result['title']}")
+    print("The agent will pick it up shortly.")
 
 
 def cmd_tasks_edit(args):
-    """
-    Edit mutable fields of an existing task.
+    """Edit a task interactively, then PATCH /tasks/{id}."""
+    port = _resolve_port()
 
-    Editable fields: title, description, importance, urgency,
-    target_files, repo, notes.
-
-    Non-editable via this command: status, phase, dependency links
-    (managed by the agent or orchestrator).
-    """
-    tasks_file, tasks = _load_tasks_file()
-
-    task = _find_task(tasks, args.id)
-    if task is None:
-        print(f"ERROR: Task '{args.id}' not found.")
-        sys.exit(1)
+    # Fetch current values to show as defaults
+    task = _agent_get(f"/tasks/{args.id}", port)
 
     print(f"Editing task [{task['id']}]: {task.get('title', '')}")
     print("Press Enter to keep current value. Press Ctrl+C to cancel.\n")
 
-    EDITABLE = [
-        ("title",        "Title",        str),
-        ("description",  "Description",  str),
-        ("importance",   "Importance",   float),
-        ("urgency",      "Urgency",      float),
-        ("notes",        "Notes",        str),
-    ]
+    updates = {}
 
+    EDITABLE = [
+        ("title",       "Title",       str),
+        ("description", "Description", str),
+        ("importance",  "Importance",  float),
+        ("urgency",     "Urgency",     float),
+        ("notes",       "Notes",       str),
+    ]
     for field, label, ftype in EDITABLE:
         current = task.get(field, "")
         display = str(current)[:60] + ("..." if len(str(current)) > 60 else "")
@@ -866,58 +451,109 @@ def cmd_tasks_edit(args):
         if not new_val:
             continue
         try:
-            if ftype == float:
-                task[field] = max(0.0, min(1.0, float(new_val)))
-            else:
-                task[field] = new_val
+            updates[field] = max(0.0, min(1.0, float(new_val))) if ftype == float else new_val
         except ValueError:
             print(f"  Invalid value for {label}, keeping current.")
 
-    # Repo edit
     current_repo = ", ".join(task.get("repo", []))
     new_repo = input(f"Repo [{current_repo}]: ").strip()
     if new_repo:
-        task["repo"] = [r.strip() for r in new_repo.split(",") if r.strip()]
+        updates["repo"] = [r.strip() for r in new_repo.split(",") if r.strip()]
 
-    # Target files edit
     current_files = ", ".join(task.get("target_files", []))
     new_files = input(f"Target files [{current_files}]: ").strip()
     if new_files:
-        task["target_files"] = [f.strip() for f in new_files.split(",") if f.strip()]
+        updates["target_files"] = [f.strip() for f in new_files.split(",") if f.strip()]
 
-    _save_tasks_file(tasks_file, tasks)
-    print(f"\nTask [{task['id']}] updated.")
+    if not updates:
+        print("No changes made.")
+        return
+
+    result = _agent_patch(f"/tasks/{args.id}", updates, port)
+    print(f"\nTask [{result['id']}] updated.")
 
 
 def cmd_tasks_cancel(args):
-    """Cancel a task, setting its status to 'cancelled'."""
-    from datetime import datetime, timezone
+    """Cancel a task via DELETE /tasks/{id}."""
+    port = _resolve_port()
 
-    tasks_file, tasks = _load_tasks_file()
-
-    task = _find_task(tasks, args.id)
-    if task is None:
-        print(f"ERROR: Task '{args.id}' not found.")
-        sys.exit(1)
-
-    current_status = task.get("status", "pending")
-    if current_status in ("complete", "cancelled"):
-        print(f"Task [{task['id']}] is already {current_status}.")
-        return
+    # Fetch title for the confirmation prompt
+    task = _agent_get(f"/tasks/{args.id}", port)
+    title = task.get("title", "")
 
     confirm = input(
-        f"Cancel task [{task['id']}] '{task.get('title', '')}'? [y/N]: "
+        f"Cancel task [{task['id']}] '{title}'? [y/N]: "
     ).strip().lower()
-
     if confirm != "y":
         print("Aborted.")
         return
 
-    task["status"] = "cancelled"
-    task["completed_at"] = datetime.now(timezone.utc).isoformat()
+    result = _agent_delete(f"/tasks/{args.id}", port)
+    if result.get("ok"):
+        print(f"Task [{args.id}] cancelled.")
+    else:
+        print(f"ERROR: {result.get('detail', 'unknown error')}")
+        sys.exit(1)
 
-    _save_tasks_file(tasks_file, tasks)
-    print(f"Task [{task['id']}] cancelled.")
+
+def _fmt_task_row(t: dict) -> str:
+    status  = t.get("status", "pending")
+    title   = t.get("title", "(no title)")
+    tid     = t.get("id", "?")
+    repo    = ", ".join(t.get("repo", [])) or "—"
+    imp     = t.get("importance", 0.5)
+    urg     = t.get("urgency", 0.5)
+    blocked = " [BLOCKED]" if "blocked" in status else ""
+    return f"[{tid}] {title}{blocked}  repo={repo}  i={imp:.1f} u={urg:.1f}  ({status})"
+
+
+def _fmt_task_detail(t: dict) -> str:
+    lines = [
+        f"ID:           {t.get('id', '?')}",
+        f"Title:        {t.get('title', '')}",
+        f"Status:       {t.get('status', 'pending')}",
+        f"Phase:        {t.get('phase', '?')}",
+        f"Repo:         {', '.join(t.get('repo', [])) or '—'}",
+        f"Importance:   {t.get('importance', 0.5)}",
+        f"Urgency:      {t.get('urgency', 0.5)}",
+        f"Created:      {t.get('created_at', '?')}",
+    ]
+    if t.get("target_files"):
+        lines.append(f"Target files: {', '.join(t['target_files'])}")
+    if t.get("blocked_by"):
+        lines.append(f"Blocked by:   {', '.join(t['blocked_by'])}")
+    if t.get("blocking"):
+        lines.append(f"Blocking:     {', '.join(t['blocking'])}")
+    if t.get("parent_task"):
+        lines.append(f"Parent:       {t['parent_task']}")
+    if t.get("subtasks"):
+        lines.append(f"Subtasks:     {', '.join(t['subtasks'])}")
+    if t.get("notes"):
+        lines.append(f"\nNotes:\n{t['notes']}")
+    if t.get("description"):
+        lines.append(f"\nDescription:\n{t['description']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# cmd_interject
+# ---------------------------------------------------------------------------
+
+def cmd_interject(args):
+    """Send a message to the running agent."""
+    port = _resolve_port()
+    payload = {"message": args.message}
+    repo = getattr(args, "repo", None)
+    if repo:
+        payload["repo"] = repo
+
+    result = _agent_post("/interject", payload, port)
+    if result.get("ok"):
+        scope = f"repo '{repo}'" if repo else "workspace"
+        print(f"Message sent to agent ({scope}).")
+    else:
+        print(f"ERROR: {result.get('detail', 'unknown error')}")
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -925,16 +561,9 @@ def cmd_tasks_cancel(args):
 # ---------------------------------------------------------------------------
 
 def cmd_answer(args):
-    """
-    Answer a pending clarification request from the agent.
-
-    First fetches the pending question from the running agent so you
-    know what you're replying to, then sends your reply as an interjection
-    routed to the blocking wait in request_clarification().
-    """
+    """Answer a pending clarification request from the agent."""
     port = _resolve_port()
 
-    # Fetch the pending question
     pending = _agent_get("/pending", port)
     question = pending.get("pending")
 
@@ -955,17 +584,165 @@ def cmd_answer(args):
         print("Aborted — reply cannot be empty.")
         return
 
-    # Send as a workspace-wide interjection — clarification replies
-    # are always workspace-wide since the agent is blocked waiting for them
     result = _agent_post("/interject", {"message": reply, "repo": None}, port)
-
     if result.get("ok"):
         print("Reply sent to agent.")
     else:
-        print(f"ERROR: {result.get('error', 'unknown error')}")
+        print(f"ERROR: {result.get('detail', 'unknown error')}")
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# cmd_status
+# ---------------------------------------------------------------------------
+
+def cmd_status(args):
+    """Show current agent status."""
+    port = _resolve_port()
+    status = _agent_get("/status", port)
+
+    task    = status.get("task")  or "—"
+    phase   = status.get("phase") or "—"
+    model   = status.get("model") or "—"
+    turns   = status.get("turns")
+    blocked = status.get("blocked", False)
+    idle    = status.get("idle", True)
+
+    print(f"Status:  {'blocked' if blocked else 'idle' if idle else 'running'}")
+    print(f"Task:    {task}")
+    print(f"Phase:   {phase}")
+    print(f"Model:   {model}")
+    if turns is not None:
+        print(f"Turns:   {turns}")
+
+
+# ---------------------------------------------------------------------------
+# cmd_upgrade
+# ---------------------------------------------------------------------------
+
+def cmd_upgrade(args):
+    """
+    Upgrade MatrixMouse to the latest version.
+
+    Sends POST /upgrade to the running service, which handles the
+    uv tool upgrade and Docker image rebuild. Then restarts the
+    systemd service so the new version takes effect.
+    """
+    port = _resolve_port()
+
+    print("Upgrading MatrixMouse...")
+    result = _agent_post("/upgrade", {}, port)
+
+    pkg = result.get("results", {}).get("package", {})
+    tr  = result.get("results", {}).get("test_runner", {})
+
+    print(f"\nPackage upgrade: {'ok' if pkg.get('ok') else 'FAILED'}")
+    if pkg.get("output"):
+        print(f"  {pkg['output']}")
+
+    print(f"Test runner:     {'rebuilt' if tr.get('rebuilt') else tr.get('reason', 'unchanged')}")
+    if tr.get("output"):
+        print(f"  {tr['output']}")
+
+    if not result.get("ok"):
+        print("\nUpgrade encountered errors. Check output above.")
+        sys.exit(1)
+
+    # Restart the service so the new version loads
+    print("\nRestarting service...")
+    import subprocess
+    restart = subprocess.run(
+        ["sudo", "systemctl", "restart", "matrixmouse"],
+        capture_output=True, text=True,
+    )
+    if restart.returncode == 0:
+        print("Service restarted. MatrixMouse is now running the latest version.")
+    else:
+        print(
+            "WARNING: Could not restart the service automatically.\n"
+            "Restart manually with: sudo systemctl restart matrixmouse\n"
+            f"Details: {restart.stderr.strip()}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# cmd_config
+# ---------------------------------------------------------------------------
+
+def cmd_config(args):
+    subcmd = getattr(args, "config_subcmd", None)
+    if subcmd == "get":
+        cmd_config_get(args)
+    elif subcmd == "set":
+        cmd_config_set(args)
+    else:
+        print("Usage: matrixmouse config <get|set>")
+        sys.exit(1)
+
+
+def cmd_config_get(args):
+    """Print current config values."""
+    port = _resolve_port()
+    repo = getattr(args, "repo", None)
+
+    if repo:
+        result = _agent_get(f"/config/repos/{repo}", port)
+        print(f"Config for repo '{repo}':")
+    else:
+        result = _agent_get("/config", port)
+        print("Workspace config:")
+
+    if not result:
+        print("  (empty — using defaults)")
+        return
+
+    key_filter = getattr(args, "key", None)
+    for k, v in sorted(result.items()):
+        if key_filter and k != key_filter:
+            continue
+        print(f"  {k} = {v!r}")
+
+
+def cmd_config_set(args):
+    """
+    Set a config value via PATCH /config.
+
+    Usage:
+        matrixmouse config set coder qwen2.5-coder:14b
+        matrixmouse config set --repo myrepo coder qwen2.5-coder:7b
+    """
+    port = _resolve_port()
+    repo = getattr(args, "repo", None)
+
+    # Coerce the value to the most sensible type
+    raw = args.value
+    value: str | int | float | bool
+    if raw.lower() == "true":
+        value = True
+    elif raw.lower() == "false":
+        value = False
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            try:
+                value = float(raw)
+            except ValueError:
+                value = raw
+
+    payload = {"values": {args.key: value}}
+
+    if repo:
+        result = _agent_patch(f"/config/repos/{repo}", payload, port)
+    else:
+        result = _agent_patch("/config", payload, port)
+
+    if result.get("ok"):
+        print(f"Set {args.key} = {value!r}")
+        print(result.get("note", ""))
+    else:
+        print(f"ERROR: {result.get('detail', 'unknown error')}")
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -975,33 +752,14 @@ def cmd_answer(args):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="matrixmouse",
-        description="Autonomous coding agent.",
+        description=(
+            "Autonomous coding agent.\n\n"
+            "The MatrixMouse service is managed by systemd:\n"
+            "  sudo systemctl start|stop|restart|status matrixmouse"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # --- init ---
-    init_parser = subparsers.add_parser(
-        "init",
-        help="Initialise MatrixMouse in a repo directory.",
-    )
-    init_parser.add_argument(
-        "--repo",
-        metavar="NAME_OR_PATH",
-        help="Repo subdirectory name or path. Defaults to current directory.",
-    )
-    init_parser.set_defaults(func=cmd_init)
-
-    # --- run ---
-    run_parser = subparsers.add_parser(
-        "run",
-        help="Start the agent.",
-    )
-    run_parser.add_argument(
-        "--repo",
-        metavar="NAME_OR_PATH",
-        help="Repo to run against. Defaults to current directory.",
-    )
-    run_parser.set_defaults(func=cmd_run)
 
     # --- add-repo ---
     add_parser = subparsers.add_parser(
@@ -1011,54 +769,51 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument(
         "remote",
         metavar="URL_OR_PATH",
-        help=(
-            "Remote URL or local path. Examples:\n"
-            "  git@github.com:you/repo.git\n"
-            "  https://github.com/you/repo\n"
-            "  /path/to/local/repo"
-        ),
+        help="Git remote URL or local path.",
     )
     add_parser.add_argument(
         "--name",
         metavar="NAME",
-        help="Override the directory name in the workspace. Defaults to repo name.",
+        help="Override directory name in workspace. Defaults to repo name.",
     )
     add_parser.set_defaults(func=cmd_add_repo)
-
-    
 
     # --- tasks ---
     tasks_parser = subparsers.add_parser(
         "tasks",
         help="View and manage the task queue.",
     )
-    tasks_subparsers = tasks_parser.add_subparsers(
-        dest="tasks_subcmd",
-        required=True,
-    )
+    tasks_sub = tasks_parser.add_subparsers(dest="tasks_subcmd", required=True)
     tasks_parser.set_defaults(func=cmd_tasks)
 
-    # tasks list
-    tlist = tasks_subparsers.add_parser("list", help="List tasks.")
+    tlist = tasks_sub.add_parser("list", help="List tasks.")
     tlist.add_argument("--status", help="Filter by status.")
     tlist.add_argument("--repo",   help="Filter by repo name.")
-    tlist.add_argument("--all",    action="store_true",
+    tlist.add_argument("--all", action="store_true",
                        help="Include completed and cancelled tasks.")
 
-    # tasks show
-    tshow = tasks_subparsers.add_parser("show", help="Show task details.")
-    tshow.add_argument("id", metavar="ID", help="Task ID (or prefix).")
+    tshow = tasks_sub.add_parser("show", help="Show task details.")
+    tshow.add_argument("id", metavar="ID", help="Task ID or prefix.")
 
-    # tasks add
-    tasks_subparsers.add_parser("add", help="Create a new task interactively.")
+    tasks_sub.add_parser("add", help="Create a new task interactively.")
 
-    # tasks edit
-    tedit = tasks_subparsers.add_parser("edit", help="Edit a task.")
-    tedit.add_argument("id", metavar="ID", help="Task ID (or prefix).")
+    tedit = tasks_sub.add_parser("edit", help="Edit a task.")
+    tedit.add_argument("id", metavar="ID", help="Task ID or prefix.")
 
-    # tasks cancel
-    tcancel = tasks_subparsers.add_parser("cancel", help="Cancel a task.")
-    tcancel.add_argument("id", metavar="ID", help="Task ID (or prefix).")
+    tcancel = tasks_sub.add_parser("cancel", help="Cancel a task.")
+    tcancel.add_argument("id", metavar="ID", help="Task ID or prefix.")
+
+    # --- interject ---
+    inj = subparsers.add_parser(
+        "interject",
+        help="Send an unsolicited message to the running agent.",
+    )
+    inj.add_argument("message", metavar="MESSAGE")
+    inj.add_argument(
+        "--repo", metavar="NAME",
+        help="Scope to a specific repo. Default: workspace-wide.",
+    )
+    inj.set_defaults(func=cmd_interject)
 
     # --- answer ---
     subparsers.add_parser(
@@ -1066,31 +821,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Answer a pending clarification request from the agent.",
     ).set_defaults(func=cmd_answer)
 
-
-
-    # --- interject ---
-    interject_parser = subparsers.add_parser(
-        "interject",
-        help="Send a message to the running agent.",
-    )
-    interject_parser.add_argument(
-        "message",
-        metavar="MESSAGE",
-        help="Message to send to the agent.",
-    )
-    interject_parser.add_argument(
-        "--repo",
-        metavar="NAME",
-        help="Scope the message to a specific repo. Defaults to workspace-wide.",
-    )
-    interject_parser.set_defaults(func=cmd_interject)
-
     # --- status ---
-    status_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "status",
         help="Show current agent status.",
+    ).set_defaults(func=cmd_status)
+
+    # --- upgrade ---
+    subparsers.add_parser(
+        "upgrade",
+        help="Upgrade MatrixMouse and restart the service.",
+    ).set_defaults(func=cmd_upgrade)
+
+    # --- config ---
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Read or set configuration values.",
     )
-    status_parser.set_defaults(func=cmd_status)
+    config_sub = config_parser.add_subparsers(dest="config_subcmd", required=True)
+    config_parser.set_defaults(func=cmd_config)
+
+    cget = config_sub.add_parser("get", help="Print config values.")
+    cget.add_argument("key", metavar="KEY", nargs="?",
+                      help="Specific key to read. Omit to show all.")
+    cget.add_argument("--repo", metavar="NAME",
+                      help="Read repo-level config instead of workspace.")
+
+    cset = config_sub.add_parser("set", help="Set a config value.")
+    cset.add_argument("key",   metavar="KEY",   help="Config key to set.")
+    cset.add_argument("value", metavar="VALUE", help="New value.")
+    cset.add_argument("--repo", metavar="NAME",
+                      help="Set in repo-level config instead of workspace.")
 
     return parser
 
