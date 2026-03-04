@@ -866,6 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
         "so it can be version controlled. "
         "Default writes to the workspace state dir (untracked)."
         )
+        )
 
     return parser
 
