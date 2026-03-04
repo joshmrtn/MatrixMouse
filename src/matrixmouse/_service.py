@@ -219,10 +219,17 @@ def main() -> None:
 
         # --- Safety module (workspace-wide baseline) ---
         # Reconfigured per-task in orchestrator._run_task via reconfigure_for_task()
-        _safety.configure(
-            allowed_roots=_load_registered_repos(workspace_root),
-            workspace_root=workspace_root,
-        )
+        registered = _load_registered_repos(workspace_root)
+        if registered:
+            _safety.configure(
+                allowed_roots=registered,
+                workspace_root=workspace_root,
+            )
+        else:
+            logger.info(
+                "No repos registered yet — skipping safety module baseline configure. "
+                "Will be configured per-task via reconfigure_for_task()."
+            )
 
         # --- Model validation ---
         validate_models(config)
