@@ -86,6 +86,11 @@ INVOKING_USER="$USER"
 
 header "Step 1 — Prerequisites"
 
+# python3 must be installed
+SYSTEM_PYTHON="$(command -v python3)"
+[ -n "$SYSTEM_PYTHON" ] || fatal "python3 not found. Install with: sudo apt install python3"
+success "python3 found at $SYSTEM_PYTHON"
+
 # uv — install as current user, never root
 if command -v uv &>/dev/null; then
     success "uv found ($(uv --version))"
@@ -160,14 +165,16 @@ if [ -f "/usr/local/bin/matrixmouse-service" ]; then
     success "matrixmouse already installed at /usr/local/bin"
     if confirm "Upgrade to latest version now?"; then
         sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
-            uv tool install "$INSTALL_DIR" --force
+            uv tool install "$INSTALL_DIR" --force \
+	    --python "$SYSTEM_PYTHON"
 	sudo chmod -R a+rX /usr/local/share/uv/tools/matrixmouse/
         success "matrixmouse upgraded"
     fi
 else
     info "Installing matrixmouse system-wide..."
     sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
-        uv tool install "$INSTALL_DIR"
+        uv tool install "$INSTALL_DIR" \
+	--python "$SYSTEM_PYTHON"
     sudo chmod -R a+rX /usr/local/share/uv/tools/matrixmouse/
     # Symlink binaries into /usr/local/bin so they're on PATH for all users
     sudo ln -sf /usr/local/share/uv/tools/matrixmouse/bin/matrixmouse \

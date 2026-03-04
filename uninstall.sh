@@ -107,7 +107,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3 — Docker image and FIFO pipes
+# Step 3 — Docker image 
 # ---------------------------------------------------------------------------
 
 header "Step 3 — Docker test runner"
@@ -119,14 +119,6 @@ if docker image inspect matrixmouse-test-runner &>/dev/null 2>&1; then
     fi
 else
     info "matrixmouse-test-runner image not found — skipping"
-fi
-
-FIFO_DIR="/tmp/matrixmouse-pipes"
-if [ -d "$FIFO_DIR" ]; then
-    if confirm "Remove FIFO pipes at $FIFO_DIR?"; then
-        sudo rm -rf "$FIFO_DIR"
-        success "FIFO directory removed"
-    fi
 fi
 
 # ---------------------------------------------------------------------------
