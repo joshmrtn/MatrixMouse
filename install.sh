@@ -86,10 +86,10 @@ INVOKING_USER="$USER"
 
 header "Step 1 — Prerequisites"
 
-# python3 must be installed
-SYSTEM_PYTHON="$(command -v python3)"
-[ -n "$SYSTEM_PYTHON" ] || fatal "python3 not found. Install with: sudo apt install python3"
-success "python3 found at $SYSTEM_PYTHON"
+# python3.11 must be installed
+SYSTEM_PYTHON="$(command -v python3.11)"
+[ -n "$SYSTEM_PYTHON" ] || fatal "python3.11 not found. Install with: sudo apt install python3.11"
+success "python3.11 found at $SYSTEM_PYTHON"
 
 # uv — install as current user, never root
 if command -v uv &>/dev/null; then
@@ -305,7 +305,7 @@ else
     fi
 fi
 
-prompt_required AGENT_GIT_NAME  "Agent git commit name"  "MatrixMouse Bot"
+prompt_required AGENT_GIT_NAME  "Agent git commit name"  "MatrixMouse Agent"
 prompt_required AGENT_GIT_EMAIL "Agent git commit email" "matrixmouse-bot@users.noreply.github.com"
 
 # ---------------------------------------------------------------------------
