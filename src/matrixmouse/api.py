@@ -17,6 +17,19 @@ Endpoints:
     Config:  GET/PATCH /config, GET/PATCH /config/repos/{name}
     System:  GET /health, POST /upgrade, WS /ws (registered by server.py)
 
+Config layer reference:
+    Layer 1  /etc/matrixmouse/config.toml                       global
+    Layer 2  <workspace>/.matrixmouse/config.toml               workspace-wide
+    Layer 3  <workspace>/.matrixmouse/<repo>/config.toml        repo-local, untracked
+    Layer 4  <workspace>/<repo>/.matrixmouse/config.toml        repo-local, tracked
+
+    PATCH /config                           → layer 2
+    PATCH /config/repos/{name}              → layer 3 (default, untracked)
+    PATCH /config/repos/{name}?commit=true  → layer 4 (tracked, in git tree)
+
+    GET /config/repos/{name} returns the merged view of layers 3 + 4,
+    with layer 3 values annotated as local and layer 4 as committed.
+
 Threading model:
     The API server runs in a background thread (uvicorn).
     The orchestrator runs in the main thread.
@@ -36,7 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -49,7 +62,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="MatrixMouse", docs_url=None, redoc_url=None)
 
 # ---------------------------------------------------------------------------
-# Condition variable — notified when a new task is created
+# Condition variable — notified when a new task is created.
 # Orchestrator waits on this when the queue is empty.
 # ---------------------------------------------------------------------------
 
@@ -57,10 +70,7 @@ _task_condition = threading.Condition()
 
 
 def notify_task_available() -> None:
-    """
-    Signal the orchestrator that a new task is available.
-    Called by POST /tasks after a task is successfully created.
-    """
+    """Signal the orchestrator that a new task is available."""
     with _task_condition:
         _task_condition.notify_all()
 
@@ -136,11 +146,12 @@ class InterjectionRequest(BaseModel):
     repo: str | None = None
 
 class RepoAddRequest(BaseModel):
-    remote: str          # URL or local path
-    name: str | None = None  # override directory name
+    remote: str
+    name: str | None = None
 
 class ConfigPatchRequest(BaseModel):
-    values: dict[str, Any]  # field_name -> new_value
+    values: dict[str, Any]
+
 
 # ---------------------------------------------------------------------------
 # Health
@@ -197,12 +208,9 @@ async def get_task(task_id: str):
     """Get full details of a single task."""
     queue = _require_queue()
 
-    # Support prefix matching
     task = queue.get(task_id)
     if task is None:
-        # Try prefix
-        matches = [t for t in queue.all_tasks()
-                   if t.id.startswith(task_id)]
+        matches = [t for t in queue.all_tasks() if t.id.startswith(task_id)]
         if len(matches) == 1:
             task = matches[0]
         elif len(matches) > 1:
@@ -330,10 +338,8 @@ async def list_repos():
 async def add_repo(body: RepoAddRequest):
     """
     Clone or register a repo into the workspace.
-
-    Accepts a git remote URL or an absolute local path.
     Runs synchronously — blocks until the clone completes.
-    Runs init (scaffold .matrixmouse/) on the cloned repo automatically.
+    Auto-inits the repo (workspace state dir only — repo tree untouched).
     """
     import json
     from matrixmouse.init import setup_repo
@@ -344,7 +350,6 @@ async def add_repo(body: RepoAddRequest):
     if not remote:
         raise HTTPException(status_code=400, detail="Remote URL or path is required.")
 
-    # Infer name
     name = body.name or _infer_repo_name(remote)
     if not name:
         raise HTTPException(
@@ -359,54 +364,41 @@ async def add_repo(body: RepoAddRequest):
         )
 
     dest = workspace / name
-
-    # Build git environment with agent SSH key
     env = _git_env()
 
     if dest.exists():
         raise HTTPException(
             status_code=409,
-            detail=f"Directory '{dest}' already exists in workspace. "
+            detail=f"Directory '{dest}' already exists. "
                    f"Remove it first or choose a different name."
         )
 
-    # Determine if local path or remote URL
     local = Path(remote)
     is_local = local.exists() and local.is_dir()
-
     workspace.mkdir(parents=True, exist_ok=True)
 
-    if is_local:
-        result = subprocess.run(
-            ["git", "clone", str(local.resolve()), str(dest)],
-            env=env, capture_output=True, text=True,
-        )
-    else:
-        result = subprocess.run(
-            ["git", "clone", remote, str(dest)],
-            env=env, capture_output=True, text=True,
-        )
-
+    result = subprocess.run(
+        ["git", "clone", str(local.resolve()) if is_local else remote, str(dest)],
+        env=env, capture_output=True, text=True,
+    )
     if result.returncode != 0:
         raise HTTPException(
             status_code=500,
             detail=f"git clone failed: {result.stderr.strip()}"
         )
 
-    # Auto-init the repo
     try:
-        setup_repo(dest, workspace)
+        setup_repo(dest, workspace, config=_config)
         logger.info("Repo initialised at %s", dest)
     except Exception as e:
         logger.warning("setup_repo failed for %s: %s", dest, e)
-        # Non-fatal — repo is cloned, init can be retried
 
-    # Register in repos.json
     repos_file = workspace / ".matrixmouse" / "repos.json"
     repos = []
     if repos_file.exists():
+        import json as _json
         with open(repos_file) as f:
-            repos = json.load(f)
+            repos = _json.load(f)
 
     entry = {
         "name": name,
@@ -416,7 +408,8 @@ async def add_repo(body: RepoAddRequest):
     }
     repos.append(entry)
     with open(repos_file, "w") as f:
-        json.dump(repos, f, indent=2)
+        import json as _json
+        _json.dump(repos, f, indent=2)
 
     logger.info("Repo registered: %s -> %s", name, dest)
     return {"ok": True, "repo": entry}
@@ -479,8 +472,6 @@ async def get_pending():
 async def interject(body: InterjectionRequest):
     """
     Inject a human message into the agent loop.
-
-    The message is picked up at the next loop iteration boundary.
     If repo is set, the message is scoped to that repo's context.
     Without repo, the message is workspace-wide.
     """
@@ -523,11 +514,8 @@ async def get_config():
 async def patch_config(body: ConfigPatchRequest):
     """
     Set one or more workspace-level config values.
-
-    Writes to <workspace>/.matrixmouse/config.toml.
-    Changes take effect after the service is restarted.
-    Secrets (keys ending in _token, _key, _file) are rejected —
-    those belong in the .env file.
+    Writes to <workspace>/.matrixmouse/config.toml (layer 2).
+    Changes take effect after service restart.
     """
     workspace = _require_workspace()
     return _patch_config_file(
@@ -538,22 +526,87 @@ async def patch_config(body: ConfigPatchRequest):
 
 @app.get("/config/repos/{repo_name}")
 async def get_repo_config(repo_name: str):
-    """Return the repo-level config for a named repo."""
+    """
+    Return repo-level config, showing both tracked and untracked layers.
+
+    Response shape:
+        {
+            "local":     { ... }   # layer 3: workspace state dir (untracked)
+            "committed": { ... }   # layer 4: repo tree (tracked)
+            "merged":    { ... }   # layer 3 over layer 4 (effective values)
+        }
+    """
     workspace = _require_workspace()
-    config_path = workspace / repo_name / ".matrixmouse" / "config.toml"
 
-    if not config_path.exists():
-        return {}
+    # Layer 3 — untracked, machine-local
+    local_path = workspace / ".matrixmouse" / repo_name / "config.toml"
+    local: dict = {}
+    if local_path.exists():
+        with open(local_path, "rb") as f:
+            local = tomllib.load(f)
 
-    with open(config_path, "rb") as f:
-        return tomllib.load(f)
+    # Layer 4 — tracked, in git tree
+    committed_path = workspace / repo_name / ".matrixmouse" / "config.toml"
+    committed: dict = {}
+    if committed_path.exists():
+        with open(committed_path, "rb") as f:
+            committed = tomllib.load(f)
+
+    merged = {**committed, **local}  # layer 3 wins over layer 4
+
+    return {
+        "local": local,
+        "committed": committed,
+        "merged": merged,
+    }
 
 
 @app.patch("/config/repos/{repo_name}")
-async def patch_repo_config(repo_name: str, body: ConfigPatchRequest):
-    """Set one or more repo-level config values."""
+async def patch_repo_config(
+    repo_name: str,
+    body: ConfigPatchRequest,
+    commit: bool = Query(
+        default=False,
+        description=(
+            "Write to the repo tree (<repo>/.matrixmouse/config.toml) "
+            "for version control. Default writes to the workspace state "
+            "dir (untracked, machine-local)."
+        ),
+    ),
+):
+    """
+    Set one or more repo-level config values.
+
+    Without ?commit=true (default):
+        Writes to <workspace>/.matrixmouse/<repo>/config.toml
+        Layer 3 — untracked, local machine only.
+
+    With ?commit=true:
+        Writes to <workspace>/<repo>/.matrixmouse/config.toml
+        Layer 4 — tracked, in the git tree.
+        Creates <repo>/.matrixmouse/ if it doesn't exist.
+
+    CLI equivalent:
+        matrixmouse config set <key> <value> --repo <name>           # layer 3
+        matrixmouse config set <key> <value> --repo <name> --commit  # layer 4
+    """
     workspace = _require_workspace()
-    config_path = workspace / repo_name / ".matrixmouse" / "config.toml"
+
+    if commit:
+        # Layer 4 — tracked, inside the git repo
+        config_path = workspace / repo_name / ".matrixmouse" / "config.toml"
+        logger.info(
+            "Writing committed repo config for '%s': %s",
+            repo_name, list(body.values.keys()),
+        )
+    else:
+        # Layer 3 — untracked, workspace state dir
+        config_path = workspace / ".matrixmouse" / repo_name / "config.toml"
+        logger.info(
+            "Writing local repo config for '%s': %s",
+            repo_name, list(body.values.keys()),
+        )
+
     return _patch_config_file(config_path, body.values)
 
 
@@ -574,7 +627,6 @@ async def upgrade():
     """
     results = {}
 
-    # Step 1 — upgrade the Python package
     try:
         result = subprocess.run(
             ["uv", "tool", "upgrade", "matrixmouse"],
@@ -589,7 +641,6 @@ async def upgrade():
     except FileNotFoundError:
         results["package"] = {"ok": False, "output": "uv not found in PATH."}
 
-    # Step 2 — rebuild test runner image if Dockerfile changed
     dockerfile_path = _find_testrunner_dockerfile()
     if dockerfile_path:
         rebuild, reason = _should_rebuild_testrunner(dockerfile_path)
@@ -614,14 +665,11 @@ async def upgrade():
                     "output": "Docker build timed out after 300s.",
                 }
         else:
-            results["test_runner"] = {
-                "ok": True, "rebuilt": False,
-                "reason": reason,
-            }
+            results["test_runner"] = {"ok": True, "rebuilt": False, "reason": reason}
     else:
         results["test_runner"] = {
             "ok": True, "rebuilt": False,
-            "reason": "Dockerfile.testrunner not found — skipping image rebuild.",
+            "reason": "Dockerfile.testrunner not found — skipping.",
         }
 
     overall_ok = all(v.get("ok", False) for v in results.values())
@@ -638,7 +686,6 @@ async def upgrade():
 # ---------------------------------------------------------------------------
 
 def _infer_repo_name(remote: str) -> str:
-    """Infer a directory name from a remote URL or local path."""
     name = remote.rstrip("/").rsplit("/", 1)[-1]
     if name.endswith(".git"):
         name = name[:-4]
@@ -646,7 +693,6 @@ def _infer_repo_name(remote: str) -> str:
 
 
 def _git_env() -> dict:
-    """Build subprocess environment with agent SSH key injected."""
     env = os.environ.copy()
     key_file = os.environ.get("MATRIXMOUSE_AGENT_GH_KEY_FILE")
     secrets_path = os.environ.get("SECRETS_PATH", "/run/secrets")
@@ -663,7 +709,7 @@ def _git_env() -> dict:
 def _patch_config_file(config_path: Path, values: dict) -> dict:
     """
     Write key-value pairs into a TOML config file.
-    Rejects secret-looking keys. Creates the file if it doesn't exist.
+    Rejects secret-looking keys. Creates parent directories if needed.
     """
     SECRET_SUFFIXES = ("_token", "_key", "_file", "_secret", "_password")
     rejected = [k for k in values if any(k.endswith(s) for s in SECRET_SUFFIXES)]
@@ -674,7 +720,6 @@ def _patch_config_file(config_path: Path, values: dict) -> dict:
                    f"Edit the .env file directly."
         )
 
-    # Load existing config
     existing = {}
     if config_path.exists():
         with open(config_path, "rb") as f:
@@ -689,13 +734,13 @@ def _patch_config_file(config_path: Path, values: dict) -> dict:
     return {
         "ok": True,
         "updated": list(values.keys()),
+        "path": str(config_path),
         "note": "Restart the service for changes to take effect: "
                 "sudo systemctl restart matrixmouse",
     }
 
 
 def _find_testrunner_dockerfile() -> Path | None:
-    """Locate Dockerfile.testrunner relative to the installed package."""
     import matrixmouse
     package_dir = Path(matrixmouse.__file__).parent
     candidates = [
@@ -708,27 +753,33 @@ def _find_testrunner_dockerfile() -> Path | None:
     return None
 
 
-def _testrunner_hash_file() -> Path:
-    return Path.home() / ".config" / "matrixmouse" / "testrunner.image.sha256"
-
-
-def _should_rebuild_testrunner(dockerfile: Path) -> tuple[bool, str]:
-    """Return (should_rebuild, reason)."""
+def _sha256(path: Path) -> str:
     import hashlib
-    current_hash = hashlib.sha256(dockerfile.read_bytes()).hexdigest()
-    hash_file = _testrunner_hash_file()
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _should_rebuild_testrunner(dockerfile_path: Path) -> tuple[bool, str]:
+    if _workspace_root is None:
+        return True, "No workspace root configured — rebuilding to be safe."
+    hash_file = _workspace_root / ".matrixmouse" / "testrunner.image.sha256"
+    current_hash = _sha256(dockerfile_path)
     if not hash_file.exists():
-        return True, "No previous build hash found."
-    stored_hash = hash_file.read_text().strip()
-    if current_hash != stored_hash:
+        return True, "No recorded hash found — first build."
+    try:
+        recorded_hash = hash_file.read_text().strip()
+    except OSError:
+        return True, "Could not read recorded hash — rebuilding to be safe."
+    if current_hash != recorded_hash:
         return True, "Dockerfile.testrunner has changed since last build."
     return False, "Dockerfile.testrunner unchanged."
 
 
-def _record_testrunner_hash(dockerfile: Path) -> None:
-    """Save the current Dockerfile hash after a successful build."""
-    import hashlib
-    current_hash = hashlib.sha256(dockerfile.read_bytes()).hexdigest()
-    hash_file = _testrunner_hash_file()
-    hash_file.parent.mkdir(parents=True, exist_ok=True)
-    hash_file.write_text(current_hash)
+def _record_testrunner_hash(dockerfile_path: Path) -> None:
+    if _workspace_root is None:
+        logger.warning("No workspace root — cannot record testrunner hash.")
+        return
+    hash_file = _workspace_root / ".matrixmouse" / "testrunner.image.sha256"
+    try:
+        hash_file.write_text(_sha256(dockerfile_path))
+    except OSError as e:
+        logger.warning("Failed to record testrunner hash: %s", e)

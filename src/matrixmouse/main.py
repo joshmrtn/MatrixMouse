@@ -710,9 +710,11 @@ def cmd_config_set(args):
     Usage:
         matrixmouse config set coder qwen2.5-coder:14b
         matrixmouse config set --repo myrepo coder qwen2.5-coder:7b
+        matrixmouse config set --repo myrepo --commit create_design_docs true
     """
     port = _resolve_port()
     repo = getattr(args, "repo", None)
+    commit = getattr(args, "commit", False)
 
     # Coerce the value to the most sensible type
     raw = args.value
@@ -733,12 +735,19 @@ def cmd_config_set(args):
     payload = {"values": {args.key: value}}
 
     if repo:
-        result = _agent_patch(f"/config/repos/{repo}", payload, port)
+        endpoint = f"/config/repos/{repo}"
+        if commit:
+            endpoint += "?commit=true"
+        result = _agent_patch(endpoint, payload, port)
+        scope = f"repo '{repo}'" + (" (committed)" if commit else " (local)")
     else:
         result = _agent_patch("/config", payload, port)
+        scope = "workspace"
 
     if result.get("ok"):
-        print(f"Set {args.key} = {value!r}")
+        print(f"Set {args.key} = {value!r} in {scope} config.")
+        if "path" in result:
+            print(f"  Written to: {result['path']}")
         print(result.get("note", ""))
     else:
         print(f"ERROR: {result.get('detail', 'unknown error')}")
@@ -852,6 +861,11 @@ def build_parser() -> argparse.ArgumentParser:
     cset.add_argument("value", metavar="VALUE", help="New value.")
     cset.add_argument("--repo", metavar="NAME",
                       help="Set in repo-level config instead of workspace.")
+    cset.add_argument("--commit", action="store_true", default=False, help=(
+        "write to the repo tree (<repo>/.matrixmouse/config.toml) "
+        "so it can be version controlled. "
+        "Default writes to the workspace state dir (untracked)."
+        )
 
     return parser
 
