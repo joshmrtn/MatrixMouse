@@ -161,12 +161,14 @@ if [ -f "/usr/local/bin/matrixmouse-service" ]; then
     if confirm "Upgrade to latest version now?"; then
         sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
             uv tool install "$INSTALL_DIR" --force
+	sudo chmod -R a+rX /usr/local/share/uv/tools/matrixmouse/
         success "matrixmouse upgraded"
     fi
 else
     info "Installing matrixmouse system-wide..."
     sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
         uv tool install "$INSTALL_DIR"
+    sudo chmod -R a+rX /usr/local/share/uv/tools/matrixmouse/
     # Symlink binaries into /usr/local/bin so they're on PATH for all users
     sudo ln -sf /usr/local/share/uv/tools/matrixmouse/bin/matrixmouse \
         /usr/local/bin/matrixmouse
@@ -432,28 +434,12 @@ EOF
     success "Written $CONFIG_FILE"
 fi
 
-# ---------------------------------------------------------------------------
-# Step 10 — FIFO pipes
-# ---------------------------------------------------------------------------
-
-header "Step 10 — Test runner FIFO pipes"
-
-FIFO_DIR="/tmp/matrixmouse-pipes"
-sudo mkdir -p "$FIFO_DIR"
-sudo chown "$MM_USER:$MM_USER" "$FIFO_DIR"
-sudo chmod 750 "$FIFO_DIR"
-
-sudo test -p "$FIFO_DIR/request.fifo" || sudo -u "$MM_USER" mkfifo "$FIFO_DIR/request.fifo"
-sudo test -p "$FIFO_DIR/result.fifo"  || sudo -u "$MM_USER" mkfifo "$FIFO_DIR/result.fifo"
-sudo chmod 660 "$FIFO_DIR/request.fifo" "$FIFO_DIR/result.fifo"
-
-success "FIFO pipes ready at $FIFO_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 11 — Build test runner Docker image
+# Step 10 — Build test runner Docker image
 # ---------------------------------------------------------------------------
 
-header "Step 11 — Test runner Docker image"
+header "Step 10 — Test runner Docker image"
 
 DOCKERFILE_TR="$INSTALL_DIR/Dockerfile.testrunner"
 [ -f "$DOCKERFILE_TR" ] || fatal "Dockerfile.testrunner not found at $INSTALL_DIR"
@@ -478,16 +464,17 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 12 — systemd services
+# Step 11 — systemd services
 # ---------------------------------------------------------------------------
 
-header "Step 12 — systemd services"
+header "Step 11 — systemd services"
 
 MM_SERVICE_BIN="$(command -v matrixmouse-service)"
 MM_TEST_RUNNER="$INSTALL_DIR/test_runner.sh"
 chmod +x "$MM_TEST_RUNNER"
 
 if $HAS_SYSTEMD; then
+
 
     MM_SVC="/etc/systemd/system/matrixmouse.service"
     if [ -f "$MM_SVC" ]; then
@@ -515,13 +502,18 @@ Environment=WORKSPACE_PATH=$WORKSPACE_PATH
 EnvironmentFile=-$ENV_FILE
 
 # Security hardening
-# Workspace is under /var/lib so ProtectHome=read-only is safe —
-# no service files live under any user's home directory.
+# Workspace is under /var/lib and binaries under /usr/local —
+# nothing service-related lives under any user's home directory.
 NoNewPrivileges=true
-PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=$WORKSPACE_PATH $SECRETS_DIR /tmp/matrixmouse-pipes $ETC_DIR
+ReadWritePaths=$WORKSPACE_PATH $SECRETS_DIR $ETC_DIR /run/matrixmouse-pipes
+
+# systemd creates /run/matrixmouse-pipes before the service starts,
+# owned by the service user. Replaces PrivateTmp (which caused NAMESPACE
+# failures by trying to bind-mount paths that don't exist yet).
+RuntimeDirectory=matrixmouse-pipes
+RuntimeDirectoryMode=0750
 
 StandardOutput=journal
 StandardError=journal
@@ -535,6 +527,8 @@ EOF
         sudo systemctl start matrixmouse
         success "matrixmouse.service installed and started"
     fi
+
+
 
     TR_SVC="/etc/systemd/system/matrixmouse-test-runner.service"
     if [ -f "$TR_SVC" ]; then
@@ -555,7 +549,7 @@ ExecStart=$MM_TEST_RUNNER
 Restart=always
 RestartSec=5
 
-Environment=FIFO_DIR=$FIFO_DIR
+Environment=/run/matrixmouse-pipes
 Environment=WORKSPACE=$WORKSPACE_PATH
 Environment=TEST_IMAGE=matrixmouse-test-runner
 
@@ -572,17 +566,19 @@ EOF
         success "matrixmouse-test-runner.service installed and started"
     fi
 
+
+
 else
     warn "systemd not available. Start manually:"
     warn "  $MM_SERVICE_BIN &"
-    warn "  FIFO_DIR=$FIFO_DIR WORKSPACE=$WORKSPACE_PATH $MM_TEST_RUNNER &"
+    warn "  FIFO_DIR=/run/matrixmouse-pipes WORKSPACE=$WORKSPACE_PATH $MM_TEST_RUNNER &"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 13 — Ollama configuration
+# Step 12 — Ollama configuration
 # ---------------------------------------------------------------------------
 
-header "Step 13 — Ollama configuration"
+header "Step 12 — Ollama configuration"
 
 OLLAMA_OVERRIDE="/etc/systemd/system/ollama.service.d/override.conf"
 if $HAS_SYSTEMD; then
@@ -606,10 +602,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 14 — Reverse proxy (optional)
+# Step 13 — Reverse proxy (optional)
 # ---------------------------------------------------------------------------
 
-header "Step 14 — Reverse proxy (optional)"
+header "Step 13 — Reverse proxy (optional)"
 
 echo "The web UI runs at http://localhost:8080 by default."
 echo "See docs/deployment/ for nginx, Caddy, and Traefik examples."
