@@ -37,7 +37,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.phases import Phase, next_phase
@@ -478,9 +478,7 @@ class Orchestrator:
         self.paths = paths
         self.graph = graph
 
-        self.queue = TaskQueue(
-            paths.workspace_root / ".matrixmouse" / "tasks.json"
-        )
+        self.queue = TaskQueue(paths.tasks_file)
         self._router = Router(config)
         self._scheduler = Scheduler(config)
 
@@ -669,6 +667,7 @@ class Orchestrator:
     ) -> PhaseResult:
         from matrixmouse.tools import task_tools
         from matrixmouse.comms import poll_interjection
+        from matrixmouse import memory
 
         task_tools.configure(self.queue, task.id)
 
@@ -677,10 +676,20 @@ class Orchestrator:
             poll_interjection, current_repo=current_repo
         )
 
+        # Build repo-scoped paths for this task.
+        # Falls back to workspace-level notes if no repo is specified
+        # (future: workspace-scoped tasks handled by Project Manager agent).
+        if current_repo:
+            repo_paths: RepoPaths = self.paths.repo_paths(current_repo)
+            memory.configure(repo_paths.agent_notes)
+        else:
+            memory.configure(self.paths.agent_notes)
+            repo_paths = None
+
         detector = StuckDetector(phase=phase)
         context_manager = ContextManager(
             config=self.config,
-            paths=self.paths,
+            paths=repo_paths or self.paths,
             coder_model=self._router.model_for_phase(phase),
         )
 
@@ -688,14 +697,13 @@ class Orchestrator:
             model=self._router.model_for_phase(phase),
             messages=messages,
             config=self.config,
-            paths=self.paths,
+            paths=repo_paths or self.paths,
             context_manager=context_manager,
             stuck_detector=detector,
             comms=scoped_comms,
             current_repo=current_repo,
         )
 
-        # Keep status turns counter live during the phase
         original_run = loop.run
 
         def _instrumented_run():
@@ -709,6 +717,7 @@ class Orchestrator:
             logger.warning("Stuck summary: %s", detector.summary)
 
         return PhaseResult(loop_result=result, detector=detector)
+
 
     def _build_initial_messages(self, task: Task, phase: Phase) -> list:
         return [

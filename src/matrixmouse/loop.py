@@ -27,7 +27,7 @@ from typing import Any
 
 import ollama
 
-from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.tools import TOOLS, TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ class AgentLoop:
         model: str,
         messages: list,
         config: MatrixMouseConfig,
-        paths: MatrixMousePaths,
+        paths: MatrixMousePaths | RepoPaths,
         # These are passed as callables so the loop stays decoupled from
         # the concrete implementations. Stubs can be injected for testing.
         context_manager=None,   # callable: (messages, config) -> messages

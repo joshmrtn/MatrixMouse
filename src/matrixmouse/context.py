@@ -28,7 +28,7 @@ from typing import Any
 
 import ollama
 
-from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class ContextManager:
     def __init__(
         self,
         config: MatrixMouseConfig,
-        paths: MatrixMousePaths,
+        paths: MatrixMousePaths | RepoPaths,
         coder_model: str,
     ):
         self.config = config
@@ -314,7 +314,7 @@ class ContextManager:
 def check_and_compress(
     messages: list,
     config: MatrixMouseConfig,
-    paths: MatrixMousePaths,
+    paths: MatrixMousePaths | RepoPaths,
     coder_model: str,
 ) -> list:
     """

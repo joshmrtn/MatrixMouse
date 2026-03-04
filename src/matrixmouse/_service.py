@@ -258,17 +258,14 @@ def main() -> None:
         if graphs:
             code_tools.configure(next(iter(graphs.values())))
 
-        # --- Memory and comms ---
-        agent_notes = workspace_root / ".matrixmouse" / "AGENT_NOTES.md"
-        memory.configure(agent_notes)
-        comms.configure(config)
 
-        # --- Build paths object for orchestrator ---
+        # --- Build paths object ---
         from matrixmouse.config import MatrixMousePaths
-        paths = MatrixMousePaths(
-            workspace_root=workspace_root,
-            tasks_file=workspace_root / ".matrixmouse" / "tasks.json",
-        )
+        paths = MatrixMousePaths(workspace_root=workspace_root)
+
+        # --- Memory and comms ---
+        memory.configure(paths.agent_notes)
+        comms.configure(config)
 
         # --- Orchestrator ---
         orchestrator = Orchestrator(config=config, paths=paths, graph=graphs)

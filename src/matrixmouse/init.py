@@ -8,23 +8,24 @@ It creates only what is missing and never overwrites existing content.
 
 Principle: MatrixMouse writes nothing to a repo without explicit opt-in.
 
-What setup_repo ALWAYS creates (workspace only, never touches the repo):
+What setup_repo ALWAYS creates (workspace state dir only, repo untouched):
     <workspace>/.matrixmouse/<repo_name>/AGENT_NOTES.md
     <workspace>/.matrixmouse/<repo_name>/ignore
 
-What setup_repo creates ONLY IF the user has opted in via config:
-    <repo>/.matrixmouse/config.toml     only if repo_config_file exists already
-                                         OR user ran `matrixmouse config set --repo`
+What setup_repo creates ONLY IF the user has opted in:
+    <repo>/.matrixmouse/config.toml     only if <repo>/.matrixmouse/ already exists
+                                         (created by `matrixmouse config set --repo`)
     <repo>/docs/design/                 only if create_design_docs = true
     <repo>/docs/adr/                    only if create_adr_docs = true
 
 The .matrixmouse/ directory in the repo is never created by setup_repo.
 It is created on demand when the user writes a repo-level config key via
-`matrixmouse config set <key> <value> --repo <name>`, which is handled
-by the API's PATCH /config/repos/{name} endpoint.
+`matrixmouse config set <key> <value> --repo <name>`, handled by the
+API's PATCH /config/repos/{name} endpoint.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ import ollama
 from matrixmouse.config import (
     MatrixMouseConfig,
     MatrixMousePaths,
+    RepoPaths,
     generate_starter_config,
 )
 
@@ -40,71 +42,20 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Path builder
+# Workspace-side setup (always runs, never touches the repo)
 # ---------------------------------------------------------------------------
 
-def _build_paths(
-    repo_root: Path,
-    workspace_root: Optional[Path] = None,
-) -> MatrixMousePaths:
-    """
-    Resolve all MatrixMouse paths for a given repo.
-
-    Per-repo runtime state sits inside the workspace under the repo's
-    directory name, keeping it out of the git tree while maintaining
-    clean per-repo separation.
-
-    Args:
-        repo_root:       Absolute path to the repo root.
-        workspace_root:  Absolute path to the workspace root.
-                         Falls back to WORKSPACE_PATH env var,
-                         then to repo_root's parent.
-    """
-    import os
-
-    resolved_repo = repo_root.resolve()
-    repo_name = resolved_repo.name
-
-    if workspace_root is None:
-        env_workspace = os.environ.get("WORKSPACE_PATH")
-        workspace_root = (
-            Path(env_workspace).resolve() if env_workspace
-            else resolved_repo.parent
-        )
-    else:
-        workspace_root = workspace_root.resolve()
-
-    ws_mm = workspace_root / ".matrixmouse"
-    repo_state_dir = ws_mm / repo_name
-
-    return MatrixMousePaths(
-        workspace_root=workspace_root,
-        repo_root=resolved_repo,
-        repo_name=repo_name,
-        config_dir=resolved_repo / ".matrixmouse",
-        repo_state_dir=repo_state_dir,
-        agent_notes=repo_state_dir / "AGENT_NOTES.md",
-        log_file=repo_state_dir / "agent.log",
-        design_docs=resolved_repo / "docs" / "design",
-        tasks_file=ws_mm / "tasks.json",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Workspace-side setup (always runs)
-# ---------------------------------------------------------------------------
-
-def _ensure_repo_state_dir(paths: MatrixMousePaths) -> None:
+def _ensure_repo_state_dir(paths: RepoPaths) -> None:
     """
     Create <workspace>/.matrixmouse/<repo_name>/ if it doesn't exist.
     This is the only directory setup_repo unconditionally creates.
     """
-    if not paths.repo_state_dir.exists():
-        paths.repo_state_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Created repo state dir at %s", paths.repo_state_dir)
+    if not paths.state_dir.exists():
+        paths.state_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Created repo state dir at %s", paths.state_dir)
 
 
-def _ensure_notes_file(paths: MatrixMousePaths) -> None:
+def _ensure_notes_file(paths: RepoPaths) -> None:
     """
     Create AGENT_NOTES.md in the workspace state dir if missing.
     Scoped to this repo — the agent only reads its own repo's notes.
@@ -125,15 +76,14 @@ def _ensure_notes_file(paths: MatrixMousePaths) -> None:
     logger.debug("Created %s", paths.agent_notes)
 
 
-def _ensure_workspace_ignore(paths: MatrixMousePaths) -> None:
+def _ensure_workspace_ignore(paths: RepoPaths) -> None:
     """
-    Create the per-repo ignore file in the workspace state dir if missing.
-    This is the local (untracked) counterpart to <repo>/.matrixmouse/ignore.
+    Create the per-repo local ignore file in the workspace state dir.
+    Untracked counterpart to <repo>/.matrixmouse/ignore.
     """
-    ignore_path = paths.repo_state_dir / "ignore"
-    if ignore_path.exists():
+    if paths.local_ignore.exists():
         return
-    ignore_path.write_text(
+    paths.local_ignore.write_text(
         "# MatrixMouse per-repo local ignore file\n"
         "# Patterns here are enforced for this repo on this machine only.\n"
         "# This file is NOT version controlled.\n"
@@ -142,25 +92,23 @@ def _ensure_workspace_ignore(paths: MatrixMousePaths) -> None:
         "#\n"
         "# Add local overrides below:\n"
     )
-    logger.debug("Created workspace ignore at %s", ignore_path)
+    logger.debug("Created local ignore at %s", paths.local_ignore)
 
 
 # ---------------------------------------------------------------------------
 # Repo-side setup (opt-in only)
 # ---------------------------------------------------------------------------
 
-def _ensure_repo_config(paths: MatrixMousePaths) -> None:
+def _ensure_repo_config(paths: RepoPaths) -> None:
     """
     Write a starter config.toml into <repo>/.matrixmouse/ IF that directory
-    already exists. Does not create the directory — that only happens via
-    `matrixmouse config set --repo`, handled by the API.
+    already exists. Does not create the directory.
 
-    This means: if a user has explicitly set a repo-level config key (which
-    creates the dir), we ensure the full starter template is there so they
-    can see all available options. If they haven't, we don't touch their repo.
+    If a user has set a repo-level config key (which creates the dir via the
+    API), we ensure the full commented starter template is present so they
+    can discover all available options.
     """
     if not paths.config_dir.exists():
-        # User hasn't opted into repo-level config — leave the repo alone.
         return
 
     config_path = paths.config_dir / "config.toml"
@@ -227,31 +175,22 @@ def _ensure_adr_template(adr_dir: Path) -> None:
     logger.debug("Created ADR template at %s", template_path)
 
 
-def _ensure_docs_structure(
-    paths: MatrixMousePaths,
-    config: MatrixMouseConfig,
-) -> None:
+def _ensure_docs_structure(paths: RepoPaths, config: MatrixMouseConfig) -> None:
     """
     Scaffold docs/ in the repo if the user has opted in.
-
-    Both flags default to False — nothing is created unless explicitly
-    enabled. Enable per-repo:
-        matrixmouse config set create_design_docs true --repo <name>
+    Both flags default to False — nothing created unless explicitly enabled.
     """
     if config.create_design_docs:
         _ensure_design_template(paths.design_docs)
         logger.info("Design docs ready at %s", paths.design_docs)
 
     if config.create_adr_docs:
-        _ensure_adr_template(paths.design_docs.parent / "adr")
-        logger.info("ADR docs ready at %s", paths.design_docs.parent / "adr")
+        _ensure_adr_template(paths.adr_docs)
+        logger.info("ADR docs ready at %s", paths.adr_docs)
 
 
 def _verify_git(repo_root: Path) -> None:
-    """
-    Confirm the repo root is a git repository.
-    Logs a warning if not — does not abort.
-    """
+    """Confirm repo_root is a git repository. Logs a warning if not."""
     import subprocess
     result = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"],
@@ -273,19 +212,19 @@ def setup_repo(
     repo_root: Path,
     workspace_root: Optional[Path] = None,
     config: Optional[MatrixMouseConfig] = None,
-) -> MatrixMousePaths:
+) -> RepoPaths:
     """
     Idempotent repo setup. Safe to call on every run and every add-repo.
     Creates only what is missing — never overwrites existing content.
 
-    ALWAYS creates (workspace only, repo untouched):
+    ALWAYS creates (workspace state dir only, repo untouched):
         <workspace>/.matrixmouse/<repo_name>/AGENT_NOTES.md
         <workspace>/.matrixmouse/<repo_name>/ignore
 
-    ONLY IF <repo>/.matrixmouse/ already exists (user opted in):
-        <repo>/.matrixmouse/config.toml     (starter, all fields commented)
+    ONLY IF <repo>/.matrixmouse/ already exists (user opted in via API):
+        <repo>/.matrixmouse/config.toml     starter config, all fields commented
 
-    ONLY IF config flag is True (default False, opt-in per-repo):
+    ONLY IF config flag is True (default False):
         <repo>/docs/design/                 create_design_docs = true
         <repo>/docs/adr/                    create_adr_docs    = true
 
@@ -293,16 +232,29 @@ def setup_repo(
         repo_root:       Root directory of the repo.
         workspace_root:  Root of the workspace. Falls back to WORKSPACE_PATH
                          env var or repo parent.
-        config:          Loaded config for flag checks. If None, uses field
-                         defaults (both doc flags False — nothing in repo).
+        config:          Loaded config for flag checks. Defaults to
+                         MatrixMouseConfig() (both doc flags False).
 
     Returns:
-        MatrixMousePaths with all resolved paths for this session.
+        RepoPaths with all resolved paths for this repo.
     """
     if config is None:
         config = MatrixMouseConfig()
 
-    paths = _build_paths(repo_root, workspace_root)
+    # Resolve workspace_root the same way MatrixMousePaths.repo_paths() would,
+    # so the paths are consistent whether called from the service or the CLI.
+    if workspace_root is None:
+        env_workspace = os.environ.get("WORKSPACE_PATH")
+        workspace_root = (
+            Path(env_workspace).resolve() if env_workspace
+            else Path(repo_root).resolve().parent
+        )
+    else:
+        workspace_root = Path(workspace_root).resolve()
+
+    ws_paths = MatrixMousePaths(workspace_root=workspace_root)
+    repo_name = Path(repo_root).resolve().name
+    paths = ws_paths.repo_paths(repo_name)
 
     # Workspace side — always safe, never touches the repo
     _ensure_repo_state_dir(paths)
@@ -325,7 +277,7 @@ def setup_repo(
 def validate_models(config: MatrixMouseConfig) -> None:
     """
     Verify all configured models are available and support tool calling.
-    Attempts to pull missing models automatically.
+    Pulls missing models automatically.
     Called once at service startup before the orchestrator starts.
     """
     models_to_check = {

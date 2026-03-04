@@ -3,11 +3,12 @@ matrixmouse/config.py
 
 Configuration loading for MatrixMouse using pydantic-settings.
 
-Config is loaded from four sources in order of increasing priority:
+Config is loaded from five sources in order of increasing priority:
     1. Field defaults defined in MatrixMouseConfig below
-    2. Global config      — /etc/matrixmouse/config.toml
-    3. Workspace config   — <workspace_root>/.matrixmouse/config.toml
-    4. Repo-local config  — <repo_root>/.matrixmouse/config.toml
+    2. Global config          — /etc/matrixmouse/config.toml
+    3. Workspace config       — <workspace_root>/.matrixmouse/config.toml
+    4. Repo-local, untracked  — <workspace_root>/.matrixmouse/<repo>/config.toml
+    5. Repo-local, tracked    — <repo_root>/.matrixmouse/config.toml
 
 Each source overwrites keys from the previous. Keys not present in a
 source are inherited unchanged.
@@ -163,7 +164,6 @@ class MatrixMouseConfig(BaseSettings):
 GLOBAL_CONFIG_PATH = Path("/etc/matrixmouse/config.toml")
 
 
-
 def load_config(
     repo_root: Optional[Path],
     workspace_root: Optional[Path] = None,
@@ -265,16 +265,20 @@ def generate_starter_config() -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Path dataclasses
+# ---------------------------------------------------------------------------
+
 @dataclass
 class MatrixMousePaths:
     """
-    Resolved filesystem paths for a MatrixMouse session.
+    Workspace-scoped paths. Constructed once at service startup.
 
-    Built once at startup from workspace_root and repo_root.
+    This is the top-level paths object. It does not represent any specific
+    repo — repo-scoped paths are built on demand via repo_paths(repo_name)
+    when a task begins execution.
 
     Layout:
-
-        /etc/matrixmouse/                   service config + secrets
 
         <workspace_root>/
             .matrixmouse/
@@ -284,25 +288,122 @@ class MatrixMousePaths:
                 agent.pid                   PID lockfile
                 testrunner.image.sha256     upgrade hash
                 ignore                      workspace-wide safety blacklist
+                AGENT_NOTES.md              workspace-level agent notes
+                                            (used by future workspace-scoped tasks
+                                            e.g. Project Manager agent)
                 <repo_name>/                per-repo runtime state (not in git)
-                    AGENT_NOTES.md          agent working memory
-                    agent.log               session log
-                    ignore                  per-repo local safety blacklist
+                    AGENT_NOTES.md          repo-scoped agent working memory
+                    agent.log               repo-scoped session log
+                    ignore                  repo-local safety blacklist (untracked)
+                    config.toml             repo-local config overrides (untracked)
 
         <repo_root>/                        the git repo — minimal footprint
             .matrixmouse/                   only exists if user opted in
-                config.toml                 repo-level config overrides
-                ignore                      team-shared safety blacklist
+                config.toml                 repo-level config overrides (tracked)
+                ignore                      team-shared safety blacklist (tracked)
             docs/
                 design/                     only if create_design_docs=true
                 adr/                        only if create_adr_docs=true
     """
     workspace_root: Path
+
+    @property
+    def mm_dir(self) -> Path:
+        """<workspace_root>/.matrixmouse/"""
+        return self.workspace_root / ".matrixmouse"
+
+    @property
+    def tasks_file(self) -> Path:
+        """<workspace_root>/.matrixmouse/tasks.json"""
+        return self.mm_dir / "tasks.json"
+
+    @property
+    def repos_file(self) -> Path:
+        """<workspace_root>/.matrixmouse/repos.json"""
+        return self.mm_dir / "repos.json"
+
+    @property
+    def pid_file(self) -> Path:
+        """<workspace_root>/.matrixmouse/agent.pid"""
+        return self.mm_dir / "agent.pid"
+
+    @property
+    def testrunner_hash_file(self) -> Path:
+        """<workspace_root>/.matrixmouse/testrunner.image.sha256"""
+        return self.mm_dir / "testrunner.image.sha256"
+
+    @property
+    def workspace_ignore(self) -> Path:
+        """<workspace_root>/.matrixmouse/ignore — workspace-wide safety blacklist"""
+        return self.mm_dir / "ignore"
+
+    @property
+    def agent_notes(self) -> Path:
+        """
+        Workspace-level agent notes.
+        Used by workspace-scoped tasks (e.g. Project Manager agent).
+        For repo-scoped notes, use repo_paths(repo_name).agent_notes.
+        """
+        return self.mm_dir / "AGENT_NOTES.md"
+
+    def repo_paths(self, repo_name: str) -> "RepoPaths":
+        """
+        Build a RepoPaths for the named repo.
+
+        Called by the orchestrator at task execution time, once the task's
+        target repo is known. repo_name must match the directory name under
+        workspace_root (i.e. the name registered in repos.json).
+
+        Args:
+            repo_name: Directory name of the repo under workspace_root.
+
+        Returns:
+            RepoPaths with all repo-scoped paths resolved.
+        """
+        repo_root = self.workspace_root / repo_name
+        state_dir = self.mm_dir / repo_name
+        return RepoPaths(
+            workspace_root=self.workspace_root,
+            repo_root=repo_root,
+            repo_name=repo_name,
+            state_dir=state_dir,
+            agent_notes=state_dir / "AGENT_NOTES.md",
+            log_file=state_dir / "agent.log",
+            config_dir=repo_root / ".matrixmouse",
+            design_docs=repo_root / "docs" / "design",
+        )
+
+
+@dataclass
+class RepoPaths:
+    """
+    Repo-scoped paths for a single task execution.
+
+    Built on demand by MatrixMousePaths.repo_paths(repo_name).
+    Passed to AgentLoop, ContextManager, and init.setup_repo.
+
+    Never constructed directly — always via MatrixMousePaths.repo_paths().
+    """
+    workspace_root: Path
     repo_root: Path
-    repo_name: str          # basename of repo_root; used for per-repo ws dir
-    config_dir: Path        # <repo_root>/.matrixmouse/
-    repo_state_dir: Path    # <workspace_root>/.matrixmouse/<repo_name>/
-    agent_notes: Path       # <repo_state_dir>/AGENT_NOTES.md
-    log_file: Path          # <repo_state_dir>/agent.log
-    design_docs: Path       # <repo_root>/docs/design/
-    tasks_file: Path        # <workspace_root>/.matrixmouse/tasks.json
+    repo_name: str
+    state_dir: Path     # <workspace>/.matrixmouse/<repo_name>/
+    agent_notes: Path   # <state_dir>/AGENT_NOTES.md
+    log_file: Path      # <state_dir>/agent.log
+    config_dir: Path    # <repo_root>/.matrixmouse/  (only if user opted in)
+    design_docs: Path   # <repo_root>/docs/design/   (only if create_design_docs)
+
+    @property
+    def adr_docs(self) -> Path:
+        """<repo_root>/docs/adr/"""
+        return self.design_docs.parent / "adr"
+
+    @property
+    def repo_ignore(self) -> Path:
+        """<repo_root>/.matrixmouse/ignore — team-shared, version controlled"""
+        return self.config_dir / "ignore"
+
+    @property
+    def local_ignore(self) -> Path:
+        """<state_dir>/ignore — machine-local, untracked"""
+        return self.state_dir / "ignore"
