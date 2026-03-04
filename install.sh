@@ -92,7 +92,6 @@ if command -v uv &>/dev/null; then
 else
     warn "uv not found. Installing for current user..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
     command -v uv &>/dev/null || fatal "uv installation failed. See: https://docs.astral.sh/uv/"
     success "uv installed"
 fi
@@ -154,22 +153,30 @@ fi
 
 header "Step 2 — Installing MatrixMouse"
 
-if uv tool list 2>/dev/null | grep -q "matrixmouse"; then
-    success "matrixmouse already installed via uv"
+# Install system-wide so the matrixmouse service user can execute the binaries.
+# uv tool installs to /usr/local/bin when run as root with CARGO_HOME/UV_TOOL_DIR set.
+
+if [ -f "/usr/local/bin/matrixmouse-service" ]; then
+    success "matrixmouse already installed at /usr/local/bin"
     if confirm "Upgrade to latest version now?"; then
-        uv tool upgrade matrixmouse
+        sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
+            uv tool install "$INSTALL_DIR" --force
         success "matrixmouse upgraded"
     fi
 else
-    info "Installing matrixmouse from $INSTALL_DIR ..."
-    # Once published to PyPI: uv tool install matrixmouse
-    uv tool install "$INSTALL_DIR"
-    success "matrixmouse installed"
+    info "Installing matrixmouse system-wide..."
+    sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
+        uv tool install "$INSTALL_DIR"
+    # Symlink binaries into /usr/local/bin so they're on PATH for all users
+    sudo ln -sf /usr/local/share/uv/tools/matrixmouse/bin/matrixmouse \
+        /usr/local/bin/matrixmouse
+    sudo ln -sf /usr/local/share/uv/tools/matrixmouse/bin/matrixmouse-service \
+        /usr/local/bin/matrixmouse-service
+    success "matrixmouse installed at /usr/local/bin"
 fi
 
-export PATH="$HOME/.local/bin:$PATH"
 command -v matrixmouse &>/dev/null \
-    || fatal "matrixmouse binary not found. Expected at $HOME/.local/bin/matrixmouse"
+    || fatal "matrixmouse binary not found at /usr/local/bin/matrixmouse"
 command -v matrixmouse-service &>/dev/null \
     || fatal "matrixmouse-service binary not found."
 
