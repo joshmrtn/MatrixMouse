@@ -105,8 +105,29 @@ if [ -d "$HOME/.cache/uv/archive-v0" ]; then
     success "uv cache cleared"
 fi
 
-command -v docker &>/dev/null || fatal "docker not installed. See: https://docs.docker.com/engine/install/"
-success "docker found"
+
+if command -v docker &>/dev/null; then
+    success "docker found"
+    if groups "$INVOKING_USER" | grep -qw "docker"; then
+        success "$INVOKING_USER is in the docker group"
+    else
+        warn "$INVOKING_USER is not in the docker group — docker requires sudo without it."
+        if confirm "Add $INVOKING_USER to the docker group now?"; then
+            sudo usermod -aG docker "$INVOKING_USER"
+            echo ""
+            echo "  Added $INVOKING_USER to the docker group."
+            echo "  You must log out and back in for this to take effect."
+            echo "  Re-run install.sh after logging back in."
+            echo ""
+            exit 0
+        else
+            fatal "Cannot continue: docker commands will fail without group membership."
+        fi
+    fi
+else
+    fatal "docker is not installed.\nInstall from: https://docs.docker.com/engine/install/"
+fi
+
 
 command -v git &>/dev/null || fatal "git not installed. Run: sudo apt install git"
 success "git found"
@@ -291,20 +312,10 @@ fi
 
 sudo mkdir -p "$WORKSPACE_PATH/.matrixmouse"
 sudo chown -R "$MM_USER:$MM_USER" "$WORKSPACE_PATH"
-sudo chmod -R u=rwX,g=rX,o=rX "$WORKSPACE_PATH"
-
-# Add invoking user to the matrixmouse group for workspace read access.
-# CLI read commands (tasks list, status) read the workspace directly when
-# the service is down. Writes always go through the API.
-if groups "$INVOKING_USER" | grep -qw "$MM_USER"; then
-    success "$INVOKING_USER is already in the '$MM_USER' group"
-else
-    sudo usermod -aG "$MM_USER" "$INVOKING_USER"
-    warn "Added $INVOKING_USER to group '$MM_USER'."
-    warn "Log out and back in for this to take effect."
-fi
+sudo chmod -R u=rwX,g=,o= "$WORKSPACE_PATH"
 
 success "Workspace: $WORKSPACE_PATH (owned by $MM_USER)"
+
 
 # ---------------------------------------------------------------------------
 # Step 7 — Model configuration
@@ -677,6 +688,4 @@ if $HAS_SYSTEMD; then
 echo "       sudo systemctl status matrixmouse"
 echo "       journalctl -u matrixmouse -f"
 fi
-echo ""
-echo -e "${YELLOW}Note:${RESET} Log out and back in for group membership to take effect."
 echo ""
