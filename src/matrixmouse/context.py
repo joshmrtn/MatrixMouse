@@ -293,7 +293,7 @@ class ContextManager:
             from matrixmouse import memory
             from datetime import datetime
     
-            if memory._manager is None:
+            if not memory.is_configured():
                 logger.debug("Memory not configured — skipping discovery save.")
                 return
     
