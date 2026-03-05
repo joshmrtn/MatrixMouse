@@ -376,7 +376,7 @@ if [ "$NEEDS_RELOGIN" = true ]; then
 fi
 
 # Create the mirrors root with setgid so subdirs inherit the group
-sudo install -d -m 2755 -g "$MIRRORS_GROUP" "$MIRRORS_DIR"
+sudo install -d -m 2775 -g "$MIRRORS_GROUP" "$MIRRORS_DIR"
 success "Mirror directory ready at $MIRRORS_DIR"
 
 
