@@ -162,26 +162,34 @@ def _register_routes(app, comms_module: Any) -> None:
             queue: asyncio.Queue = app.state.broadcast_queue
 
             async def _drain():
-                while True:
-                    payload = await queue.get()
-                    # Broadcast to all current connections
-                    with _connections_lock:
-                        live = list(_connections)
-                    dead = []
-                    for ws in live:
-                        try:
-                            await ws.send_text(payload)
-                        except Exception:
-                            dead.append(ws)
-                    with _connections_lock:
-                        for ws in dead:
-                            if ws in _connections:
-                                _connections.remove(ws)
+                try:
+                    while True:
+                        payload = await queue.get()
+                        # Broadcast to all current connections
+                        with _connections_lock:
+                            live = list(_connections)
+                        dead = []
+                        for ws in live:
+                            try:
+                                await ws.send_text(payload)
+                            except Exception:
+                                dead.append(ws)
+                        with _connections_lock:
+                            for ws in dead:
+                                if ws in _connections:
+                                    _connections.remove(ws)
+                except asyncio.CancelledError:
+                    pass # normal cancellation when _receive exits first
 
             async def _receive():
                 # Keep the connection alive; client sends nothing meaningful
-                while True:
-                    await websocket.receive_text()
+                try:
+                    while True:
+                        data = await websocket.receive_text()
+                        # For now, data is discarded
+                        # TODO: Handlie incoming messages/signals
+                except WebSocketDisconnect:
+                    pass # Normal disconnect - let asyncio.wait() clean up
 
             drain_task   = asyncio.create_task(_drain())
             receive_task = asyncio.create_task(_receive())
