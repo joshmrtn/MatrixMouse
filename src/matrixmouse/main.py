@@ -996,8 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
         "write to the repo tree (<repo>/.matrixmouse/config.toml) "
         "so it can be version controlled. "
         "Default writes to the workspace state dir (untracked)."
-        )
-        )
+        ))
 
     return parser
 
