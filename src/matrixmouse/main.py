@@ -244,6 +244,13 @@ def _setup_local_mirror(source: Path, name: str) -> Path:
     # Make mirror group-readable so the matrixmouse service can clone from it
     subprocess.run(["chmod", "-R", "g+rX", str(mirror_path)], check=True)
 
+    # Remove the origin remote from the mirror — the service doesn't need it
+    # and git will try to stat it during ownership checks, causing PermissionError.
+    subprocess.run(
+        ["git", "remote", "remove", "origin"],
+        cwd=mirror_path, capture_output=True, text=True,
+    )
+
     return mirror_path
 
 

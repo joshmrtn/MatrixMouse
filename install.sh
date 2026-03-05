@@ -206,12 +206,29 @@ else
     info "Creating system user '$MM_USER'..."
     sudo useradd \
         --system \
-        --no-create-home \
+        --create-home \
+        --home-dir /home/matrixmouse \
         --shell /usr/sbin/nologin \
         --comment "MatrixMouse agent service user" \
         "$MM_USER"
     success "System user '$MM_USER' created"
 fi
+
+# Ensure home directory exists (handles users created without --create-home)
+if [ ! -d "/home/matrixmouse" ]; then
+    sudo mkdir -p /home/matrixmouse
+    sudo chown matrixmouse:matrixmouse /home/matrixmouse
+    sudo chmod 700 /home/matrixmouse
+    success "Created home directory for $MM_USER"
+fi
+
+# Configure git for the service user — trust all mirror directories.
+# safe.directory '*' disables ownership checks for this user, which is
+# safe because matrixmouse has no shell access (nologin).
+cd /tmp
+sudo -u matrixmouse git config --global safe.directory '*'
+success "git safe.directory configured for $MM_USER"
+
 
 # ---------------------------------------------------------------------------
 # Step 4 — /etc/matrixmouse  (config + secrets)
@@ -379,6 +396,10 @@ fi
 sudo install -d -m 2775 -g "$MIRRORS_GROUP" "$MIRRORS_DIR"
 success "Mirror directory ready at $MIRRORS_DIR"
 
+# Allow the service user to clone from any mirror without ownership warnings
+sudo -u matrixmouse git config --global --add \
+    safe.directory '/var/lib/matrixmouse-mirrors/*'
+success "git safe.directory configured for matrixmouse user"
 
 
 # ---------------------------------------------------------------------------
