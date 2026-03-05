@@ -99,6 +99,16 @@ def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # Service is running but returned an error — surface it directly,
+        # do NOT fall through to bootstrap.
+        try:
+            body = json.loads(e.read())
+            detail = body.get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        print(f"ERROR: {detail}")
+        sys.exit(1)
     except urllib.error.URLError as e:
         print(
             f"ERROR: Could not reach the MatrixMouse service at {url}\n"
@@ -117,6 +127,16 @@ def _agent_get(endpoint: str, port: int) -> dict:
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # Service is running but returned an error — surface it directly,
+        # do NOT fall through to bootstrap.
+        try:
+            body = json.loads(e.read())
+            detail = body.get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        print(f"ERROR: {detail}")
+        sys.exit(1)
     except urllib.error.URLError as e:
         print(
             f"ERROR: Could not reach the MatrixMouse service at {url}\n"
@@ -200,9 +220,12 @@ def cmd_add_repo(args):
             print(f"ERROR: {result.get('detail', 'unknown error')}")
             sys.exit(1)
         return
-    except SystemExit:
-        # Service not running — fall through to bootstrap path
-        pass
+    except SystemExit as e:
+        if e.code != 0:
+            # Error from the service - don't fall through to bootstrap
+            raise
+        # Code 0 shouldn't happen here but handle gracefully
+        return
 
     # Bootstrap path: service not running, do it directly
     print("Service not running — cloning directly (bootstrap mode).")
