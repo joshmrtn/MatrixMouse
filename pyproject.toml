@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "matrixmouse"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
   { name="Josh Martin", email="" },
 ]
@@ -16,7 +16,9 @@ dependencies = [
     "ollama>=0.6.1",
     "pydantic-settings>=2.13.1",
     "requests>=2.32.5",
+    "tomli-w>=1.0",
     "uvicorn>=0.41.0",
+    "PyGithub>=2.0",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -31,6 +33,7 @@ classifiers = [
 
 [project.scripts]
 matrixmouse = "matrixmouse.main:main"
+matrixmouse-service = "matrixmouse._service:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

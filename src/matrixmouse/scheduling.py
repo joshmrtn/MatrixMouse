@@ -19,6 +19,11 @@ TODO (future):
     - Re-scoring based on external signals (new GitHub issue, human urgency bump)
 
 Do not add inference logic or tool dispatch here.
+
+Circular import note:
+    TaskStatus is imported inside methods rather than at module level.
+    orchestrator.py imports Scheduler at module level; a top-level import
+    of TaskStatus from orchestrator here would create a circular dependency.
 """
 
 import logging
@@ -52,21 +57,17 @@ class Scheduler:
     """
     Selects the next task to work on from the task queue.
 
-    Instantiated by the session orchestrator and called at the start
-    of each scheduling cycle.
+    Instantiated by the orchestrator and called at the start of each
+    scheduling cycle.
 
     Usage:
         scheduler = Scheduler(config)
         decision = scheduler.next(queue)
         if decision.task:
-            orchestrator.run_task(decision.task)
+            orchestrator._run_task(decision.task)
     """
 
     def __init__(self, config: "MatrixMouseConfig"):
-        """
-        Args:
-            config: Active config. Used for priority weights and aging rate.
-        """
         self.config = config
 
     def next(self, queue: "TaskQueue") -> SchedulingDecision:
@@ -74,22 +75,22 @@ class Scheduler:
         Select the highest-priority unblocked task from the queue.
 
         A task is eligible if:
-            - Its status is PENDING (not active, blocked, or terminal)
+            - Its status is PENDING
             - All tasks in its blocked_by list are complete
 
         Args:
             queue: The workspace-level TaskQueue.
 
         Returns:
-            SchedulingDecision with the chosen task (or None if nothing
-            is ready to work on).
+            SchedulingDecision with the chosen task, or task=None if
+            nothing is ready.
         """
+        # Deferred import — avoids circular dependency with orchestrator.py
         from matrixmouse.orchestrator import TaskStatus
 
         all_active = queue.active_tasks()
-        completed = queue.completed_ids()
+        completed  = queue.completed_ids()
 
-        # Filter to tasks that are actually ready to start
         candidates = [
             t for t in all_active
             if t.status == TaskStatus.PENDING and t.is_ready(completed)
@@ -97,7 +98,6 @@ class Scheduler:
 
         if not candidates:
             if all_active:
-                # Tasks exist but none are ready — all blocked
                 reason = (
                     f"{len(all_active)} active task(s) exist but none are "
                     f"ready to schedule. All are blocked or awaiting human input."
@@ -105,7 +105,7 @@ class Scheduler:
             else:
                 reason = "Task queue is empty."
 
-            logger.info("Scheduler: no task selected. %s", reason)
+            logger.debug("Scheduler: no task selected. %s", reason)
             return SchedulingDecision(
                 task=None,
                 reason=reason,
@@ -113,7 +113,6 @@ class Scheduler:
                 total_active=len(all_active),
             )
 
-        # Score and sort — highest priority first
         aging_rate = getattr(self.config, "priority_aging_rate", 0.01)
         max_aging  = getattr(self.config, "priority_max_aging_bonus", 0.3)
 
@@ -124,10 +123,10 @@ class Scheduler:
         )
 
         chosen = scored[0]
-        score = chosen.priority_score(aging_rate, max_aging)
+        score  = chosen.priority_score(aging_rate, max_aging)
 
         reason = (
-            f"Selected task {chosen.id} '{chosen.title}' "
+            f"Selected [{chosen.id}] '{chosen.title}' "
             f"(score: {score:.3f}, importance: {chosen.importance}, "
             f"urgency: {chosen.urgency}) "
             f"from {len(candidates)} candidate(s)."
@@ -143,21 +142,26 @@ class Scheduler:
 
     def report_blocked(self, queue: "TaskQueue") -> str:
         """
-        Return a human-readable summary of blocked tasks.
-        Useful for the web UI and CLI status commands.
+        Return a human-readable summary of all blocked tasks.
+        Used by the API's GET /status and the web UI.
 
         Args:
             queue: The workspace-level TaskQueue.
 
         Returns:
-            Formatted string describing all blocked tasks and why.
+            Formatted string describing blocked tasks, or "No blocked tasks."
         """
+        # Deferred import — avoids circular dependency with orchestrator.py
         from matrixmouse.orchestrator import TaskStatus
 
-        blocked_by_task  = [t for t in queue.active_tasks()
-                            if t.status == TaskStatus.BLOCKED_BY_TASK]
-        blocked_by_human = [t for t in queue.active_tasks()
-                            if t.status == TaskStatus.BLOCKED_BY_HUMAN]
+        blocked_by_task  = [
+            t for t in queue.active_tasks()
+            if t.status == TaskStatus.BLOCKED_BY_TASK
+        ]
+        blocked_by_human = [
+            t for t in queue.active_tasks()
+            if t.status == TaskStatus.BLOCKED_BY_HUMAN
+        ]
 
         if not blocked_by_task and not blocked_by_human:
             return "No blocked tasks."
@@ -169,6 +173,7 @@ class Scheduler:
             for t in blocked_by_human:
                 lines.append(f"  [{t.id}] {t.title}")
                 if t.notes:
+                    # Show only the most recent note line
                     lines.append(f"        {t.notes.splitlines()[-1]}")
 
         if blocked_by_task:

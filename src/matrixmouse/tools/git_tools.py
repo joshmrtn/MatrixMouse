@@ -19,6 +19,7 @@ Do not add file, navigation, or AST tools here.
 import os
 import logging
 import subprocess
+from pathlib import Path
 from matrixmouse.tools._safety import project_root
 
 logger = logging.getLogger(__name__)

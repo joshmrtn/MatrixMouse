@@ -2,8 +2,8 @@
 # install.sh
 # MatrixMouse installation script
 #
-# Run this once on the host machine to set up everything needed
-# to run MatrixMouse. Safe to re-run — skips steps already done.
+# Run as your normal user — NOT with sudo.
+# The script uses sudo internally only where root is required.
 #
 # Usage:
 #   chmod +x install.sh
@@ -12,7 +12,17 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Colours and output helpers
+# Guard: refuse to run as root
+# ---------------------------------------------------------------------------
+
+if [ "$EUID" -eq 0 ]; then
+    echo "ERROR: Do not run this script with sudo or as root."
+    echo "Run as your normal user — the script will sudo when needed."
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Output helpers
 # ---------------------------------------------------------------------------
 
 RED='\033[0;31m'
@@ -27,14 +37,27 @@ success() { echo -e "${GREEN}[ok]${RESET}    $*"; }
 warn()    { echo -e "${YELLOW}[warn]${RESET}  $*"; }
 error()   { echo -e "${RED}[error]${RESET} $*" >&2; }
 fatal()   { error "$*"; exit 1; }
-header()  { echo -e "\n${BOLD}$*${RESET}"; }
+header()  { echo -e "\n${BOLD}── $* ──${RESET}"; }
 
+# prompt <varname> <text> <default>
+# If default is non-empty, accepts Enter to use it.
+# If default is empty, the field is optional — blank input is allowed.
 prompt() {
-    # prompt <variable_name> <prompt_text> <default>
-    local varname="$1"
-    local text="$2"
-    local default="$3"
+    local varname="$1" text="$2" default="$3"
+    if [ -n "$default" ]; then
+        read -rp "$(echo -e "${CYAN}?${RESET} ${text} [${default}]: ")" value
+        value="${value:-$default}"
+    else
+        read -rp "$(echo -e "${CYAN}?${RESET} ${text} (optional, Enter to skip): ")" value
+    fi
+    eval "$varname=\"$value\""
+}
 
+# prompt_required <varname> <text> <default>
+# Always requires a non-empty value.
+prompt_required() {
+    local varname="$1" text="$2" default="$3"
+    local value=""
     if [ -n "$default" ]; then
         read -rp "$(echo -e "${CYAN}?${RESET} ${text} [${default}]: ")" value
         value="${value:-$default}"
@@ -45,366 +68,570 @@ prompt() {
             read -rp "$(echo -e "${CYAN}?${RESET} ${text}: ")" value
         done
     fi
-
     eval "$varname=\"$value\""
 }
 
 confirm() {
-    # confirm <prompt_text> — returns 0 for yes, 1 for no
-    local text="$1"
     local answer
-    read -rp "$(echo -e "${CYAN}?${RESET} ${text} [y/N]: ")" answer
+    read -rp "$(echo -e "${CYAN}?${RESET} $1 [y/N]: ")" answer
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INVOKING_USER="$USER"
 
 # ---------------------------------------------------------------------------
 # Step 1 — Prerequisites
 # ---------------------------------------------------------------------------
 
-header "Step 1 — Checking prerequisites"
+header "Step 1 — Prerequisites"
 
-check_cmd() {
-    local cmd="$1"
-    local install_hint="$2"
-    if command -v "$cmd" &>/dev/null; then
-        success "$cmd found"
-    else
-        fatal "$cmd is not installed. $install_hint"
-    fi
-}
+# python3.11 must be installed
+SYSTEM_PYTHON="$(command -v python3.11)"
+[ -n "$SYSTEM_PYTHON" ] || fatal "python3.11 not found. Install with: sudo apt install python3.11"
+success "python3.11 found at $SYSTEM_PYTHON"
 
-check_cmd docker    "Install from https://docs.docker.com/engine/install/"
-check_cmd git       "Install with: sudo apt install git"
-
-# Docker Compose v2 (plugin) or v1 (standalone)
-if docker compose version &>/dev/null 2>&1; then
-    success "docker compose found"
-elif command -v docker-compose &>/dev/null; then
-    success "docker-compose found (v1)"
+# uv — install as current user, never root
+if command -v uv &>/dev/null; then
+    success "uv found ($(uv --version))"
 else
-    fatal "Docker Compose not found. Install from https://docs.docker.com/compose/install/"
+    warn "uv not found. Installing for current user..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    command -v uv &>/dev/null || fatal "uv installation failed. See: https://docs.astral.sh/uv/"
+    success "uv installed"
 fi
 
-# Ollama
+# Clear stale uv archive cache — prevents "No such file or directory" errors
+# caused by partial downloads from previous failed installs.
+if [ -d "$HOME/.cache/uv/archive-v0" ]; then
+    info "Clearing stale uv archive cache..."
+    rm -rf "$HOME/.cache/uv/archive-v0"
+    success "uv cache cleared"
+fi
+
+
+if command -v docker &>/dev/null; then
+    success "docker found"
+    if groups "$INVOKING_USER" | grep -qw "docker"; then
+        success "$INVOKING_USER is in the docker group"
+    else
+        warn "$INVOKING_USER is not in the docker group — docker requires sudo without it."
+        if confirm "Add $INVOKING_USER to the docker group now?"; then
+            sudo usermod -aG docker "$INVOKING_USER"
+            echo ""
+            echo "  Added $INVOKING_USER to the docker group."
+            echo "  You must log out and back in for this to take effect."
+            echo "  Re-run install.sh after logging back in."
+            echo ""
+            exit 0
+        else
+            fatal "Cannot continue: docker commands will fail without group membership."
+        fi
+    fi
+else
+    fatal "docker is not installed.\nInstall from: https://docs.docker.com/engine/install/"
+fi
+
+
+command -v git &>/dev/null || fatal "git not installed. Run: sudo apt install git"
+success "git found"
+
 if command -v ollama &>/dev/null; then
     success "ollama found"
-    if ! ollama list &>/dev/null; then
-        warn "Ollama is installed but the service may not be running. Start it with: ollama serve"
-    fi
+    ollama list &>/dev/null 2>&1 || warn "Ollama may not be running. Start with: ollama serve"
 else
-    warn "ollama not found. Install from https://ollama.com — required for model inference."
-    warn "Continuing installation, but the agent will not work until Ollama is installed."
+    warn "ollama not found. Install from https://ollama.com"
+    warn "The agent will not work until Ollama is running with a model pulled."
 fi
 
-# systemd (for test_runner service)
 HAS_SYSTEMD=false
 if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
     HAS_SYSTEMD=true
     success "systemd found"
 else
-    warn "systemd not found — test_runner.sh will not be installed as a service."
-    warn "You will need to start it manually: ./test_runner.sh &"
+    warn "systemd not found. Services must be started manually."
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2 — Workspace directory
+# Step 2 — Install MatrixMouse (as current user, never root)
 # ---------------------------------------------------------------------------
 
-header "Step 2 — Workspace directory"
+header "Step 2 — Installing MatrixMouse"
 
-DEFAULT_WORKSPACE="$HOME/matrixmouse-workspace"
-prompt WORKSPACE_PATH "Workspace directory (where repos will be cloned)" "$DEFAULT_WORKSPACE"
-WORKSPACE_PATH="$(eval echo "$WORKSPACE_PATH")"  # expand ~ if present
+# Install system-wide so the matrixmouse service user can execute the binaries.
+# uv tool installs to /usr/local/bin when run as root with CARGO_HOME/UV_TOOL_DIR set.
 
-if [ -d "$WORKSPACE_PATH" ]; then
-    success "Workspace directory already exists: $WORKSPACE_PATH"
+if [ -f "/usr/local/bin/matrixmouse-service" ]; then
+    success "matrixmouse already installed at /usr/local/bin"
+    if confirm "Upgrade to latest version now?"; then
+        sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
+            uv tool install "$INSTALL_DIR" --force \
+	    --python "$SYSTEM_PYTHON"
+	sudo chmod -R a+rX /usr/local/share/uv/tools/matrixmouse/
+        success "matrixmouse upgraded"
+    fi
 else
-    mkdir -p "$WORKSPACE_PATH"
-    success "Created workspace directory: $WORKSPACE_PATH"
+    info "Installing matrixmouse system-wide..."
+    sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
+        uv tool install "$INSTALL_DIR" \
+	--python "$SYSTEM_PYTHON"
+    sudo chmod -R a+rX /usr/local/share/uv/tools/matrixmouse/
+    # Symlink binaries into /usr/local/bin so they're on PATH for all users
+    sudo ln -sf /usr/local/share/uv/tools/matrixmouse/bin/matrixmouse \
+        /usr/local/bin/matrixmouse
+    sudo ln -sf /usr/local/share/uv/tools/matrixmouse/bin/matrixmouse-service \
+        /usr/local/bin/matrixmouse-service
+    success "matrixmouse installed at /usr/local/bin"
 fi
 
-# Scaffold workspace-level .matrixmouse/
-WORKSPACE_MM_DIR="$WORKSPACE_PATH/.matrixmouse"
-mkdir -p "$WORKSPACE_MM_DIR"
-success "Workspace .matrixmouse/ directory ready"
+command -v matrixmouse &>/dev/null \
+    || fatal "matrixmouse binary not found at /usr/local/bin/matrixmouse"
+command -v matrixmouse-service &>/dev/null \
+    || fatal "matrixmouse-service binary not found."
+
+success "matrixmouse:         $(command -v matrixmouse)"
+success "matrixmouse-service: $(command -v matrixmouse-service)"
 
 # ---------------------------------------------------------------------------
-# Step 3 — Agent GitHub credentials
+# Step 3 — System user
 # ---------------------------------------------------------------------------
 
-header "Step 3 — Agent credentials"
+header "Step 3 — System user"
 
-echo "MatrixMouse uses a dedicated GitHub bot account for commits, pushes, and PRs."
-echo "Two separate credentials are needed:"
-echo "  1. An SSH key     — for git clone/push operations"
-echo "  2. A PAT file     — for opening pull requests via the GitHub API"
-echo ""
-echo "Both should be stored OUTSIDE the workspace directory."
-echo "Recommended location: $HOME/.matrixmouse-secrets/"
+MM_USER="matrixmouse"
+
+if id "$MM_USER" &>/dev/null; then
+    success "System user '$MM_USER' already exists"
+else
+    info "Creating system user '$MM_USER'..."
+    sudo useradd \
+        --system \
+        --create-home \
+        --home-dir /home/matrixmouse \
+        --shell /usr/sbin/nologin \
+        --comment "MatrixMouse agent service user" \
+        "$MM_USER"
+    success "System user '$MM_USER' created"
+fi
+
+# Ensure home directory exists (handles users created without --create-home)
+if [ ! -d "/home/matrixmouse" ]; then
+    sudo mkdir -p /home/matrixmouse
+    sudo chown matrixmouse:matrixmouse /home/matrixmouse
+    sudo chmod 700 /home/matrixmouse
+    success "Created home directory for $MM_USER"
+fi
+
+# Configure git for the service user — trust all mirror directories.
+# safe.directory '*' disables ownership checks for this user, which is
+# safe because matrixmouse has no shell access (nologin).
+cd /tmp
+sudo -u matrixmouse git config --global safe.directory '*'
+success "git safe.directory configured for $MM_USER"
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — /etc/matrixmouse  (config + secrets)
+# ---------------------------------------------------------------------------
+
+header "Step 4 — /etc/matrixmouse"
+
+# All service config and secrets live under /etc/matrixmouse, owned by the
+# matrixmouse user. The regular user never needs to read or write here —
+# all interaction is via the HTTP API or CLI commands.
+
+ETC_DIR="/etc/matrixmouse"
+SECRETS_DIR="$ETC_DIR/secrets"
+
+if [ -d "$ETC_DIR" ]; then
+    success "/etc/matrixmouse already exists — skipping directory creation"
+else
+    sudo mkdir -p "$ETC_DIR"
+    sudo chown "$MM_USER:$MM_USER" "$ETC_DIR"
+    sudo chmod 750 "$ETC_DIR"
+    success "Created $ETC_DIR"
+fi
+
+if [ -d "$SECRETS_DIR" ]; then
+    success "$SECRETS_DIR already exists — skipping directory creation"
+else
+    sudo mkdir -p "$SECRETS_DIR"
+    sudo chown "$MM_USER:$MM_USER" "$SECRETS_DIR"
+    sudo chmod 700 "$SECRETS_DIR"
+    success "Created $SECRETS_DIR"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5 — Agent credentials
+# ---------------------------------------------------------------------------
+
+header "Step 5 — Agent credentials"
+
+echo "MatrixMouse uses a dedicated bot account for git operations and PRs."
+echo "Credentials are stored in $SECRETS_DIR, owned by the matrixmouse user."
 echo ""
 
 # SSH key
-prompt AGENT_GH_KEY_PATH \
-    "Path to the agent's GitHub SSH private key" \
-    "$HOME/.matrixmouse-secrets/agent_ed25519"
-AGENT_GH_KEY_PATH="$(eval echo "$AGENT_GH_KEY_PATH")"
+AGENT_KEY_PATH="$SECRETS_DIR/agent_ed25519"
 
-if [ -f "$AGENT_GH_KEY_PATH" ]; then
-    success "SSH key found at $AGENT_GH_KEY_PATH"
+if sudo test -f "$AGENT_KEY_PATH"; then
+    success "SSH key already exists: $AGENT_KEY_PATH — skipping"
 else
-    warn "SSH key not found at $AGENT_GH_KEY_PATH"
-    if confirm "Generate a new SSH key now?"; then
-        mkdir -p "$(dirname "$AGENT_GH_KEY_PATH")"
-        chmod 700 "$(dirname "$AGENT_GH_KEY_PATH")"
-        ssh-keygen -t ed25519 -C "matrixmouse-bot" -f "$AGENT_GH_KEY_PATH" -N ""
-        success "SSH key generated at $AGENT_GH_KEY_PATH"
+    if confirm "Generate a new ed25519 SSH key now?"; then
+        # Generate as invoking user in a temp location, then move into place
+        TMP_KEY="$(mktemp)"
+        rm -f "$TMP_KEY"
+        ssh-keygen -t ed25519 -C "matrixmouse-bot" -f "$TMP_KEY" -N ""
+        sudo mv "$TMP_KEY"     "$AGENT_KEY_PATH"
+        sudo mv "${TMP_KEY}.pub" "${AGENT_KEY_PATH}.pub"
+        sudo chown "$MM_USER:$MM_USER" "$AGENT_KEY_PATH" "${AGENT_KEY_PATH}.pub"
+        sudo chmod 600 "$AGENT_KEY_PATH"
+        sudo chmod 644 "${AGENT_KEY_PATH}.pub"
+        success "SSH key generated: $AGENT_KEY_PATH"
         echo ""
-        echo "Add this public key to your GitHub bot account:"
+        echo -e "${BOLD}Add this public key to your GitHub bot account:${RESET}"
         echo "  https://github.com/settings/keys"
         echo ""
-        cat "${AGENT_GH_KEY_PATH}.pub"
+        sudo cat "${AGENT_KEY_PATH}.pub"
         echo ""
-        read -rp "Press Enter when you have added the key to GitHub..."
+        read -rp "Press Enter when the key has been added to GitHub..."
     else
-        warn "Skipping key generation. Create it manually before running the agent."
+        warn "Skipping SSH key. Required for cloning private repos."
+        warn "To add manually:"
+        warn "  sudo -u $MM_USER ssh-keygen -t ed25519 -f $AGENT_KEY_PATH -N ''"
     fi
 fi
 
-# GitHub PAT file
-echo ""
-echo "A GitHub Personal Access Token (PAT) is needed to open pull requests."
-echo "Create one at: https://github.com/settings/tokens"
-echo "Required scopes: repo (full)"
-echo ""
-prompt AGENT_GH_TOKEN_FILE \
-    "Path to the file containing the agent's GitHub PAT" \
-    "$HOME/.matrixmouse-secrets/github_token"
-AGENT_GH_TOKEN_FILE="$(eval echo "$AGENT_GH_TOKEN_FILE")"
+# GitHub PAT
+AGENT_TOKEN_PATH="$SECRETS_DIR/github_token"
 
-if [ -f "$AGENT_GH_TOKEN_FILE" ]; then
-    success "GitHub token file found at $AGENT_GH_TOKEN_FILE"
+if sudo test -f "$AGENT_TOKEN_PATH"; then
+    success "GitHub token already exists: $AGENT_TOKEN_PATH — skipping"
 else
-    warn "Token file not found at $AGENT_GH_TOKEN_FILE"
-    if confirm "Create the token file now? (you will be prompted to paste the token)"; then
-        mkdir -p "$(dirname "$AGENT_GH_TOKEN_FILE")"
-        chmod 700 "$(dirname "$AGENT_GH_TOKEN_FILE")"
-        read -rsp "Paste your GitHub PAT (input hidden): " GH_PAT
+    if confirm "Create GitHub PAT file now?"; then
+        read -rsp "$(echo -e "${CYAN}?${RESET} Paste your GitHub PAT (input hidden): ")" GH_PAT
         echo ""
-        echo -n "$GH_PAT" > "$AGENT_GH_TOKEN_FILE"
-        chmod 600 "$AGENT_GH_TOKEN_FILE"
+        echo -n "$GH_PAT" | sudo -u "$MM_USER" tee "$AGENT_TOKEN_PATH" > /dev/null
         unset GH_PAT
-        success "Token saved to $AGENT_GH_TOKEN_FILE"
+        sudo chmod 600 "$AGENT_TOKEN_PATH"
+        success "Token saved: $AGENT_TOKEN_PATH"
     else
-        warn "Skipping. Create $AGENT_GH_TOKEN_FILE manually before using PR tools."
+        warn "Skipping. Required for opening PRs."
+        warn "Required scopes: repo (full). Create at: https://github.com/settings/tokens"
+        warn "To add manually: echo -n 'TOKEN' | sudo -u $MM_USER tee $AGENT_TOKEN_PATH"
     fi
 fi
 
-prompt AGENT_GH_NAME  "Agent git commit name"  "MatrixMouse Bot"
-prompt AGENT_GH_EMAIL "Agent git commit email" "matrixmouse-bot@users.noreply.github.com"
+prompt_required AGENT_GIT_NAME  "Agent git commit name"  "MatrixMouse Agent"
+prompt_required AGENT_GIT_EMAIL "Agent git commit email" "matrixmouse-bot@users.noreply.github.com"
 
-# Secrets directory — the parent of both credential files
-SECRETS_DIR="$(dirname "$AGENT_GH_KEY_PATH")"
-TOKEN_SECRETS_DIR="$(dirname "$AGENT_GH_TOKEN_FILE")"
-if [ "$SECRETS_DIR" != "$TOKEN_SECRETS_DIR" ]; then
-    warn "SSH key and token are in different directories."
-    warn "Consider keeping them together for easier Docker mount management."
+# ---------------------------------------------------------------------------
+# Step 6 — Workspace directory
+# ---------------------------------------------------------------------------
+
+header "Step 6 — Workspace directory"
+
+prompt_required WORKSPACE_PATH \
+    "Workspace directory" \
+    "/var/lib/matrixmouse-workspace"
+WORKSPACE_PATH="$(eval echo "$WORKSPACE_PATH")"
+
+if [ -d "$WORKSPACE_PATH" ]; then
+    success "Workspace already exists: $WORKSPACE_PATH"
+else
+    sudo mkdir -p "$WORKSPACE_PATH"
+    success "Created workspace: $WORKSPACE_PATH"
 fi
 
+sudo mkdir -p "$WORKSPACE_PATH/.matrixmouse"
+sudo chown -R "$MM_USER:$MM_USER" "$WORKSPACE_PATH"
+sudo chmod -R u=rwX,g=,o= "$WORKSPACE_PATH"
+
+success "Workspace: $WORKSPACE_PATH (owned by $MM_USER)"
+
+
 # ---------------------------------------------------------------------------
-# Step 4 — Model configuration
+# Step 7 — matrixmouse-mirrors group and directory
 # ---------------------------------------------------------------------------
 
-header "Step 4 — Model configuration"
+header "Step 7 — Mirror directory"
 
-echo "MatrixMouse uses three model roles. Enter the Ollama model names to use."
-echo "Models must support tool calling (check with: ollama show <model>)."
+MIRRORS_DIR="/var/lib/matrixmouse-mirrors"
+MIRRORS_GROUP="matrixmouse-mirrors"
+
+# Create the shared group if it doesn't exist
+if ! getent group "$MIRRORS_GROUP" &>/dev/null; then
+    sudo groupadd --system "$MIRRORS_GROUP"
+    success "Created group: $MIRRORS_GROUP"
+else
+    success "Group $MIRRORS_GROUP already exists"
+fi
+
+
+# Add both users to the group
+sudo usermod -aG "$MIRRORS_GROUP" "$MM_USER"
+sudo usermod -aG "$MIRRORS_GROUP" "$INVOKING_USER"
+success "Added $MM_USER and $INVOKING_USER to $MIRRORS_GROUP"
+
+# Check group membership — requires re-login to take effect
+NEEDS_RELOGIN=false
+
+if ! groups "$INVOKING_USER" | grep -qw "$MIRRORS_GROUP"; then
+    warn "$INVOKING_USER was just added to $MIRRORS_GROUP."
+    NEEDS_RELOGIN=true
+fi
+
+if [ "$NEEDS_RELOGIN" = true ]; then
+    echo ""
+    echo "  ┌─────────────────────────────────────────────────────────┐"
+    echo "  │  ACTION REQUIRED: You must log out and back in for      │"
+    echo "  │  group membership to take effect, then re-run           │"
+    echo "  │  install.sh to complete the installation.               │"
+    echo "  └─────────────────────────────────────────────────────────┘"
+    echo ""
+    exit 0
+fi
+
+# Create the mirrors root with setgid so subdirs inherit the group
+sudo install -d -m 2775 -g "$MIRRORS_GROUP" "$MIRRORS_DIR"
+success "Mirror directory ready at $MIRRORS_DIR"
+
+# Allow the service user to clone from any mirror without ownership warnings
+sudo -u matrixmouse git config --global --add \
+    safe.directory '/var/lib/matrixmouse-mirrors/*'
+success "git safe.directory configured for matrixmouse user"
+
+
+# ---------------------------------------------------------------------------
+# Step 8 — Model configuration
+# ---------------------------------------------------------------------------
+
+header "Step 8 — Model configuration"
+
+echo "Enter Ollama model names for each role."
+echo "Models must support tool calling. Check available: ollama list"
 echo ""
 
-prompt CODER_MODEL     "Coder model (implementation)"   "qwen2.5-coder:14b"
-prompt PLANNER_MODEL   "Planner model (design/critique)" "qwen2.5:14b"
-prompt SUMMARIZER_MODEL "Summarizer model (context compression)" "qwen2.5:3b"
+prompt_required CODER_MODEL      "Coder model (implementation)"           "qwen3.5:4b"
+prompt_required PLANNER_MODEL    "Planner model (design/critique)"        "qwen3.5:9b"
+prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" "qwen3.5:4b"
 
 echo ""
-echo "Optional: configure a coder cascade for escalation (comma-separated, smallest to largest)"
-echo "Example: qwen2.5-coder:7b,qwen2.5-coder:14b,qwen2.5-coder:30b"
-echo "Leave empty to use only the coder model with no escalation."
-prompt CODER_CASCADE "Coder cascade" ""
+echo "Coder cascade: models to escalate through when stuck (comma-separated,"
+echo "smallest to largest). Defaults to just the coder model (no escalation)."
+prompt_required CODER_CASCADE "Coder cascade" "$CODER_MODEL"
 
 # ---------------------------------------------------------------------------
-# Step 5 — Notification configuration (optional)
+# Step 9 — Notifications (optional)
 # ---------------------------------------------------------------------------
 
-header "Step 5 — Notifications (optional)"
+header "Step 9 — Notifications (optional)"
 
-echo "MatrixMouse can send push notifications via ntfy when it needs your attention."
-echo "Leave blank to skip — you can configure this later in config.toml."
+echo "MatrixMouse can push notifications via ntfy when it needs attention."
+echo "Leave blank to skip — configure later in /etc/matrixmouse/config.toml"
 echo ""
 
-prompt NTFY_URL   "ntfy server URL (e.g. https://ntfy.sh or your self-hosted URL)" ""
-prompt NTFY_TOPIC "ntfy topic name" "matrixmouse"
+prompt NTFY_URL   "ntfy server URL (e.g. https://ntfy.sh)" ""
+prompt NTFY_TOPIC "ntfy topic"                              "matrixmouse"
 
 # ---------------------------------------------------------------------------
-# Step 6 — Write config files
+# Step 10 — Write configuration files
 # ---------------------------------------------------------------------------
 
-header "Step 6 — Writing configuration"
+header "Step 10 — Configuration files"
 
-# .env file next to docker-compose.yml
-ENV_FILE="$INSTALL_DIR/.env"
-cat > "$ENV_FILE" << EOF
-# MatrixMouse environment configuration
-# Generated by install.sh — edit as needed
+# .env secrets file — 600 matrixmouse:matrixmouse
+ENV_FILE="$ETC_DIR/matrixmouse.env"
 
-# Absolute path to the workspace directory on the host
+if sudo test -f "$ENV_FILE"; then
+    success "$ENV_FILE already exists — skipping"
+else
+    sudo -u "$MM_USER" tee "$ENV_FILE" > /dev/null << EOF
+# MatrixMouse environment / secrets file
+# Loaded by the service at startup via the env_file config setting.
+# Owned by matrixmouse:matrixmouse, mode 600.
+# Never commit this file.
+
 WORKSPACE_PATH=$WORKSPACE_PATH
-
-# Credentials directory — mounted read-only into the container
-# Contains SSH key and GitHub PAT file
-# Must be OUTSIDE the workspace directory
 SECRETS_PATH=$SECRETS_DIR
-
-# Filename of the SSH private key within SECRETS_PATH
-MATRIXMOUSE_AGENT_GH_KEY_FILE=$(basename "$AGENT_GH_KEY_PATH")
-
-# Filename of the GitHub PAT file within SECRETS_PATH
-MATRIXMOUSE_GITHUB_TOKEN_FILE=$(basename "$AGENT_GH_TOKEN_FILE")
-
-# Ollama configuration
-OLLAMA_HOST=http://host.docker.internal:11434
-OLLAMA_MAX_LOADED_MODELS=4
-
-# Test runner FIFO directory (must match FIFO_DIR in test_runner.sh)
-MM_FIFO_DIR=/run/matrixmouse-pipes
-
-# Test execution timeout in seconds
-MM_TEST_TIMEOUT=360
-
-# Web server port
+MATRIXMOUSE_AGENT_GH_KEY_FILE=$(basename "$AGENT_KEY_PATH")
+MATRIXMOUSE_GITHUB_TOKEN_FILE=$(basename "$AGENT_TOKEN_PATH")
 MM_SERVER_PORT=8080
 EOF
-success "Written $ENV_FILE"
+    sudo chmod 600 "$ENV_FILE"
+    success "Written $ENV_FILE"
+fi
 
-# Workspace-level config.toml
-CONFIG_FILE="$WORKSPACE_MM_DIR/config.toml"
-if [ -f "$CONFIG_FILE" ]; then
-    warn "config.toml already exists — skipping to avoid overwriting."
-    warn "To regenerate, delete $CONFIG_FILE and re-run install.sh"
+# workspace config.toml — 640 matrixmouse:matrixmouse
+CONFIG_FILE="$WORKSPACE_PATH/.matrixmouse/config.toml"
+
+if sudo test -f "$CONFIG_FILE"; then
+    success "$CONFIG_FILE already exists — skipping"
 else
-    # Build coder_cascade line
-    CASCADE_LINE=""
-    if [ -n "$CODER_CASCADE" ]; then
-        # Convert comma-separated to TOML array
-        IFS=',' read -ra CASCADE_MODELS <<< "$CODER_CASCADE"
-        TOML_ARRAY=""
-        for model in "${CASCADE_MODELS[@]}"; do
-            model="$(echo "$model" | xargs)"  # trim whitespace
-            TOML_ARRAY="${TOML_ARRAY}\"${model}\", "
-        done
-        TOML_ARRAY="[${TOML_ARRAY%, }]"
-        CASCADE_LINE="coder_cascade = $TOML_ARRAY"
-    else
-        CASCADE_LINE="# coder_cascade = [\"qwen2.5-coder:7b\", \"qwen2.5-coder:14b\", \"qwen2.5-coder:30b\"]"
-    fi
+    # Build coder_cascade TOML array
+    IFS=',' read -ra CASCADE_MODELS <<< "$CODER_CASCADE"
+    TOML_ARRAY=""
+    for m in "${CASCADE_MODELS[@]}"; do
+        m="$(echo "$m" | xargs)"
+        TOML_ARRAY="${TOML_ARRAY}\"${m}\", "
+    done
+    CASCADE_LINE="coder_cascade = [${TOML_ARRAY%, }]"
 
-    # Build ntfy lines
-    NTFY_LINES=""
     if [ -n "$NTFY_URL" ]; then
-        NTFY_LINES="ntfy_url = \"$NTFY_URL\"
-ntfy_topic = \"$NTFY_TOPIC\""
+        NTFY_LINES="ntfy_url   = \"$NTFY_URL\"\nntfy_topic = \"$NTFY_TOPIC\""
     else
-        NTFY_LINES="# ntfy_url = \"https://ntfy.sh\"
-# ntfy_topic = \"matrixmouse\""
+        NTFY_LINES="# ntfy_url   = \"https://ntfy.sh\"\n# ntfy_topic = \"matrixmouse\""
     fi
 
-    cat > "$CONFIG_FILE" << EOF
+    sudo -u "$MM_USER" tee "$CONFIG_FILE" > /dev/null << EOF
 # MatrixMouse workspace configuration
-# This file applies to all repos in this workspace.
-# Repo-specific overrides go in <repo>/.matrixmouse/config.toml
+# Repo-specific overrides: <repo>/.matrixmouse/config.toml
+# Secrets are in env_file — not here.
 
-# Models
-coder = "$CODER_MODEL"
-planner = "$PLANNER_MODEL"
+env_file = "$ENV_FILE"
+
+coder      = "$CODER_MODEL"
+planner    = "$PLANNER_MODEL"
 summarizer = "$SUMMARIZER_MODEL"
 $CASCADE_LINE
 
-# Agent git identity (used for all commits made by the agent)
-agent_git_name = "$AGENT_GH_NAME"
-agent_git_email = "$AGENT_GH_EMAIL"
+agent_git_name  = "$AGENT_GIT_NAME"
+agent_git_email = "$AGENT_GIT_EMAIL"
 
-# Web UI
 server_port = 8080
-
-# Logging
-log_level = "INFO"
+log_level   = "INFO"
 log_to_file = false
 
-# Notifications
-$NTFY_LINES
+$(echo -e "$NTFY_LINES")
+
+priority_aging_rate      = 0.01
+priority_max_aging_bonus = 0.3
 EOF
     success "Written $CONFIG_FILE"
 fi
 
-# ---------------------------------------------------------------------------
-# Step 7 — FIFO directory
-# ---------------------------------------------------------------------------
-
-header "Step 7 — FIFO pipes"
-
-FIFO_DIR="/tmp/matrixmouse-pipes"
-mkdir -p "$FIFO_DIR"
-chmod 700 "$FIFO_DIR"
-
-[ -p "$FIFO_DIR/request.fifo" ] || mkfifo "$FIFO_DIR/request.fifo"
-[ -p "$FIFO_DIR/result.fifo"  ] || mkfifo "$FIFO_DIR/result.fifo"
-success "FIFO pipes ready at $FIFO_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 8 — Build Docker images
+# Step 11 — Build test runner Docker image
 # ---------------------------------------------------------------------------
 
-header "Step 8 — Building Docker images"
+header "Step 11 — Test runner Docker image"
 
-info "Building matrixmouse image..."
-docker build -t matrixmouse "$INSTALL_DIR"
-success "matrixmouse image built"
+DOCKERFILE_TR="$INSTALL_DIR/Dockerfile.testrunner"
+[ -f "$DOCKERFILE_TR" ] || fatal "Dockerfile.testrunner not found at $INSTALL_DIR"
 
-info "Building matrixmouse-test-runner image..."
-docker build -f "$INSTALL_DIR/Dockerfile.testrunner" -t matrixmouse-test-runner "$INSTALL_DIR"
-success "matrixmouse-test-runner image built"
+# Hash stored in workspace so it's owned by the service user
+HASH_FILE="$WORKSPACE_PATH/.matrixmouse/testrunner.image.sha256"
+
+if docker image inspect matrixmouse-test-runner &>/dev/null 2>&1; then
+    success "matrixmouse-test-runner image already exists"
+    if confirm "Rebuild the test runner image?"; then
+        docker build -f "$DOCKERFILE_TR" -t matrixmouse-test-runner "$INSTALL_DIR"
+        sha256sum "$DOCKERFILE_TR" | awk '{print $1}' \
+            | sudo -u "$MM_USER" tee "$HASH_FILE" > /dev/null
+        success "matrixmouse-test-runner rebuilt"
+    fi
+else
+    info "Building matrixmouse-test-runner image..."
+    docker build -f "$DOCKERFILE_TR" -t matrixmouse-test-runner "$INSTALL_DIR"
+    sha256sum "$DOCKERFILE_TR" | awk '{print $1}' \
+        | sudo -u "$MM_USER" tee "$HASH_FILE" > /dev/null
+    success "matrixmouse-test-runner image built"
+fi
 
 # ---------------------------------------------------------------------------
-# Step 9 — test_runner.sh service
+# Step 12 — systemd services
 # ---------------------------------------------------------------------------
 
-header "Step 9 — Test runner"
+header "Step 12 — systemd services"
 
-# Make sure test_runner.sh is executable
-chmod +x "$INSTALL_DIR/test_runner.sh"
+MM_SERVICE_BIN="$(command -v matrixmouse-service)"
+MM_TEST_RUNNER="$INSTALL_DIR/test_runner.sh"
+chmod +x "$MM_TEST_RUNNER"
 
 if $HAS_SYSTEMD; then
-    SERVICE_FILE="/etc/systemd/system/matrixmouse-test-runner.service"
 
-    if [ -f "$SERVICE_FILE" ]; then
-        success "test_runner systemd service already exists — skipping"
+
+    MM_SVC="/etc/systemd/system/matrixmouse.service"
+    if [ -f "$MM_SVC" ]; then
+        success "matrixmouse.service already exists — skipping"
     else
-        info "Installing test_runner.sh as a systemd service..."
-        sudo tee "$SERVICE_FILE" > /dev/null << EOF
+        info "Installing matrixmouse.service..."
+        sudo tee "$MM_SVC" > /dev/null << EOF
 [Unit]
-Description=MatrixMouse test runner
-After=docker.service
+Description=MatrixMouse autonomous coding agent
+Documentation=https://github.com/joshmrtn/MatrixMouse
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=$MM_USER
+Group=$MM_USER
+WorkingDirectory=$WORKSPACE_PATH
+ExecStart=$MM_SERVICE_BIN
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+Environment=WORKSPACE_PATH=$WORKSPACE_PATH
+EnvironmentFile=-$ENV_FILE
+
+# Security hardening
+# Workspace is under /var/lib and binaries under /usr/local —
+# nothing service-related lives under any user's home directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$WORKSPACE_PATH $SECRETS_DIR $ETC_DIR /run/matrixmouse-pipes
+
+# systemd creates /run/matrixmouse-pipes before the service starts,
+# owned by the service user. Replaces PrivateTmp (which caused NAMESPACE
+# failures by trying to bind-mount paths that don't exist yet).
+RuntimeDirectory=matrixmouse-pipes
+RuntimeDirectoryMode=0750
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=matrixmouse
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable matrixmouse
+        sudo systemctl start matrixmouse
+        success "matrixmouse.service installed and started"
+    fi
+
+
+
+    TR_SVC="/etc/systemd/system/matrixmouse-test-runner.service"
+    if [ -f "$TR_SVC" ]; then
+        success "matrixmouse-test-runner.service already exists — skipping"
+    else
+        info "Installing matrixmouse-test-runner.service..."
+        sudo tee "$TR_SVC" > /dev/null << EOF
+[Unit]
+Description=MatrixMouse test runner (Docker sandbox)
+After=docker.service matrixmouse.service
 Requires=docker.service
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_DIR/test_runner.sh
+User=$MM_USER
+Group=$MM_USER
+ExecStart=$MM_TEST_RUNNER
 Restart=always
 RestartSec=5
-User=$USER
-Environment=FIFO_DIR=$FIFO_DIR
+
+Environment=/run/matrixmouse-pipes
 Environment=WORKSPACE=$WORKSPACE_PATH
 Environment=TEST_IMAGE=matrixmouse-test-runner
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=matrixmouse-test-runner
 
 [Install]
 WantedBy=multi-user.target
@@ -412,123 +639,90 @@ EOF
         sudo systemctl daemon-reload
         sudo systemctl enable matrixmouse-test-runner
         sudo systemctl start matrixmouse-test-runner
-        success "test_runner service installed and started"
+        success "matrixmouse-test-runner.service installed and started"
     fi
+
+
+
 else
-    warn "To start the test runner manually:"
-    warn "  FIFO_DIR=$FIFO_DIR WORKSPACE=$WORKSPACE_PATH $INSTALL_DIR/test_runner.sh &"
+    warn "systemd not available. Start manually:"
+    warn "  $MM_SERVICE_BIN &"
+    warn "  FIFO_DIR=/run/matrixmouse-pipes WORKSPACE=$WORKSPACE_PATH $MM_TEST_RUNNER &"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 10 — nginx template
+# Step 13 — Ollama configuration
 # ---------------------------------------------------------------------------
 
-header "Step 10 — nginx configuration"
+header "Step 13 — Ollama configuration"
 
-NGINX_DIR="$INSTALL_DIR/nginx"
-mkdir -p "$NGINX_DIR/certs"
-
-NGINX_CONF="$NGINX_DIR/nginx.conf"
-if [ -f "$NGINX_CONF" ]; then
-    success "nginx.conf already exists — skipping"
+OLLAMA_OVERRIDE="/etc/systemd/system/ollama.service.d/override.conf"
+if $HAS_SYSTEMD; then
+    if [ -f "$OLLAMA_OVERRIDE" ] || \
+       grep -q "OLLAMA_MAX_LOADED_MODELS" /etc/systemd/system/ollama.service 2>/dev/null; then
+        success "OLLAMA_MAX_LOADED_MODELS already configured"
+    else
+        if confirm "Set OLLAMA_MAX_LOADED_MODELS=4 in Ollama's systemd service?"; then
+            sudo mkdir -p "$(dirname "$OLLAMA_OVERRIDE")"
+            sudo tee "$OLLAMA_OVERRIDE" > /dev/null << 'EOF'
+[Service]
+Environment="OLLAMA_MAX_LOADED_MODELS=4"
+EOF
+            sudo systemctl daemon-reload
+            sudo systemctl restart ollama 2>/dev/null || true
+            success "OLLAMA_MAX_LOADED_MODELS=4 configured"
+        fi
+    fi
 else
-    prompt DOMAIN "Your domain name (for nginx config)" "matrixmouse.example.com"
+    warn "Set OLLAMA_MAX_LOADED_MODELS=4 in your Ollama environment manually."
+fi
 
-    cat > "$NGINX_CONF" << EOF
-# nginx.conf — MatrixMouse reverse proxy
-# Replace YOUR_DOMAIN with your actual domain.
-# Place your TLS certificate and key in nginx/certs/:
-#   nginx/certs/fullchain.pem
-#   nginx/certs/privkey.pem
-#
-# To use Authelia for authentication:
-#   1. Add Authelia to docker-compose.yml
-#   2. Uncomment the auth_request lines below
+# ---------------------------------------------------------------------------
+# Step 14 — Reverse proxy (optional)
+# ---------------------------------------------------------------------------
 
-events {
-    worker_connections 1024;
-}
+header "Step 14 — Reverse proxy (optional)"
+
+echo "The web UI runs at http://localhost:8080 by default."
+echo "See docs/deployment/ for nginx, Caddy, and Traefik examples."
+echo ""
+
+if confirm "Generate a basic nginx config template?"; then
+    NGINX_DIR="$INSTALL_DIR/nginx"
+    mkdir -p "$NGINX_DIR/certs"
+    prompt_required DOMAIN "Your domain name" "matrixmouse.example.com"
+    cat > "$NGINX_DIR/nginx.conf" << EOF
+# MatrixMouse nginx reverse proxy template
+# htpasswd -c nginx/certs/.htpasswd youruser
+
+events { worker_connections 1024; }
 
 http {
-    # Redirect HTTP to HTTPS
     server {
         listen 80;
         server_name $DOMAIN;
         return 301 https://\$host\$request_uri;
     }
-
     server {
         listen 443 ssl;
         server_name $DOMAIN;
-
         ssl_certificate     /etc/nginx/certs/fullchain.pem;
         ssl_certificate_key /etc/nginx/certs/privkey.pem;
         ssl_protocols       TLSv1.2 TLSv1.3;
-        ssl_ciphers         HIGH:!aNULL:!MD5;
-
-        # Basic auth — replace with Authelia when ready
         auth_basic           "MatrixMouse";
         auth_basic_user_file /etc/nginx/certs/.htpasswd;
-
-        # Authelia forward auth (uncomment to use instead of basic auth):
-        # auth_request /authelia;
-        # auth_request_set \$target_url https://\$http_host\$request_uri;
-        # error_page 401 =302 https://auth.$DOMAIN/?rd=\$target_url;
-
         location / {
-            proxy_pass         http://matrixmouse:8080;
+            proxy_pass         http://127.0.0.1:8080;
             proxy_http_version 1.1;
-
-            # Required for websocket support
             proxy_set_header   Upgrade \$http_upgrade;
             proxy_set_header   Connection "upgrade";
-
             proxy_set_header   Host \$host;
-            proxy_set_header   X-Real-IP \$remote_addr;
-            proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header   X-Forwarded-Proto \$scheme;
-
-            # Increase timeouts for long-running agent operations
             proxy_read_timeout 3600s;
-            proxy_send_timeout 3600s;
         }
     }
 }
 EOF
-    success "Written $NGINX_CONF"
-    info "To create a basic auth password file:"
-    info "  htpasswd -c nginx/certs/.htpasswd yourusername"
-    info "Place your TLS certs in nginx/certs/fullchain.pem and nginx/certs/privkey.pem"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 11 — Ollama OLLAMA_MAX_LOADED_MODELS
-# ---------------------------------------------------------------------------
-
-header "Step 11 — Ollama configuration"
-
-OLLAMA_SERVICE="/etc/systemd/system/ollama.service"
-OLLAMA_OVERRIDE="/etc/systemd/system/ollama.service.d/override.conf"
-
-if $HAS_SYSTEMD && [ -f "$OLLAMA_SERVICE" ]; then
-    if grep -q "OLLAMA_MAX_LOADED_MODELS" "$OLLAMA_SERVICE" 2>/dev/null || \
-       [ -f "$OLLAMA_OVERRIDE" ]; then
-        success "OLLAMA_MAX_LOADED_MODELS already configured"
-    else
-        if confirm "Set OLLAMA_MAX_LOADED_MODELS=4 in Ollama's systemd service?"; then
-            sudo mkdir -p "$(dirname "$OLLAMA_OVERRIDE")"
-            sudo tee "$OLLAMA_OVERRIDE" > /dev/null << EOF
-[Service]
-Environment="OLLAMA_MAX_LOADED_MODELS=4"
-EOF
-            sudo systemctl daemon-reload
-            sudo systemctl restart ollama
-            success "Ollama configured with OLLAMA_MAX_LOADED_MODELS=4"
-        fi
-    fi
-else
-    warn "Could not find Ollama systemd service."
-    warn "Set OLLAMA_MAX_LOADED_MODELS=4 in your Ollama environment manually."
+    success "nginx template written to $NGINX_DIR/nginx.conf"
 fi
 
 # ---------------------------------------------------------------------------
@@ -538,48 +732,39 @@ fi
 header "Installation complete"
 
 echo ""
-echo -e "${BOLD}What was set up:${RESET}"
-echo "  Workspace:        $WORKSPACE_PATH"
-echo "  Config:           $WORKSPACE_MM_DIR/config.toml"
-echo "  Environment:      $INSTALL_DIR/.env"
-echo "  FIFO pipes:       $FIFO_DIR"
-echo "  Docker images:    matrixmouse, matrixmouse-test-runner"
-echo "  nginx template:   $NGINX_CONF"
-echo "  Secrets directory: $SECRETS_DIR"
-echo "    SSH key:   $AGENT_GH_KEY_PATH"
-echo "    PAT file:  $AGENT_GH_TOKEN_FILE"
-if $HAS_SYSTEMD; then
-echo "  test_runner:      systemd service (matrixmouse-test-runner)"
-fi
+echo -e "${BOLD}Directory layout:${RESET}"
+echo "  /etc/matrixmouse/          config, secrets (.env, SSH key, PAT)"
+echo "  $WORKSPACE_PATH"
+echo "    .matrixmouse/            tasks, repos, workspace config.toml"
+echo "  /tmp/matrixmouse-pipes/    test runner FIFO pipes"
 echo ""
+echo -e "${BOLD}Binaries:${RESET}"
+echo "  matrixmouse:         $(command -v matrixmouse)"
+echo "  matrixmouse-service: $(command -v matrixmouse-service)"
+echo ""
+if $HAS_SYSTEMD; then
+echo -e "${BOLD}Services:${RESET}"
+echo "  matrixmouse               matrixmouse-test-runner"
+echo ""
+fi
 echo -e "${BOLD}Next steps:${RESET}"
 echo ""
-echo "  1. Add your TLS certs to nginx/certs/ and create a .htpasswd file:"
-echo "       htpasswd -c nginx/certs/.htpasswd yourusername"
-echo "  2. If your GitHub PAT file doesn't exist yet:"
-echo "       Visit https://github.com/settings/tokens/new"
-echo "       Required scopes: repo (full)"
-echo "       Save the token to: $AGENT_GH_TOKEN_FILE"
-echo "       chmod 600 $AGENT_GH_TOKEN_FILE"
+echo "  1. Pull your models:"
+echo "       ollama pull $CODER_MODEL"
+echo "       ollama pull $PLANNER_MODEL"
+echo "       ollama pull $SUMMARIZER_MODEL"
 echo ""
-echo "  3. If your agent SSH key doesn't exist yet, generate it:"
-echo "       ssh-keygen -t ed25519 -C 'matrixmouse-bot' -f $AGENT_GH_KEY_PATH"
-echo "     Then add the public key to your GitHub bot account's SSH keys."
+echo "  2. Add a repo:"
+echo "       matrixmouse add-repo git@github.com:you/repo.git"
 echo ""
-echo "  4. Clone a repo into the workspace and initialise it:"
-echo "       cd $WORKSPACE_PATH"
-echo "       git clone git@github.com:you/yourrepo.git"
-echo "       docker compose run --rm matrixmouse python -m matrixmouse init --repo yourrepo"
+echo "  3. Create a task:"
+echo "       matrixmouse tasks add"
 echo ""
-echo "  5. Add tasks to <repo>/.matrixmouse/tasks.json"
-echo ""
-echo "  6. Start MatrixMouse:"
-echo "       docker compose up -d"
-echo ""
-echo "  7. Open the web UI at https://$DOMAIN (or http://localhost:8080 for local access)"
-echo ""
-echo -e "${YELLOW}Remember:${RESET} test_runner.sh must be running on the host for isolated test execution."
+echo "  4. Check status:"
+echo "       matrixmouse status"
+echo "       curl http://localhost:8080/health"
 if $HAS_SYSTEMD; then
-echo "  Check its status with: sudo systemctl status matrixmouse-test-runner"
+echo "       sudo systemctl status matrixmouse"
+echo "       journalctl -u matrixmouse -f"
 fi
 echo ""

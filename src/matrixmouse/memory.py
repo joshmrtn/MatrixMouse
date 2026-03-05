@@ -306,6 +306,15 @@ def configure(notes_path: Path) -> None:
     logger.info("Memory manager configured. Notes: %s", notes_path)
 
 
+def is_configured() -> bool:
+    """
+    Return True if the memory module has been configured with a notes path.
+    Use this to guard memory operations in modules that may run before
+    memory.configure() has been called (e.g. context.py during compression).
+    """
+    return _manager is not None
+
+
 def _require_manager() -> MemoryManager | None:
     if _manager is None:
         logger.error(

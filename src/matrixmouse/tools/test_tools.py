@@ -3,12 +3,9 @@ matrixmouse/tools/test_tools.py
 
 Tools for running the project's test suite and interpreting results.
 
-In production (Docker deployment), test execution is delegated to a
-locked-down temporary container via a FIFO pipe pair. The agent has no
-knowledge of this — it calls run_tests() and gets a result string back.
-
-In development (no FIFO available), falls back to running pytest directly
-in the current process for convenience.
+Test execution is delegated to a locked-down temporary container via a 
+FIFO pipe pair. The agent has no knowledge of this — it calls run_tests() 
+and gets a result string back.
 
 The FIFO protocol:
     Request:  "<8-hex-token> <optional-test-path>\n"
@@ -61,7 +58,7 @@ def _fifo_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# FIFO-based execution (production path)
+# FIFO-based execution 
 # ---------------------------------------------------------------------------
 
 def _run_via_fifo(test_path: str) -> str:
@@ -171,42 +168,6 @@ def _read_result_fifo(timeout: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Direct execution (development fallback)
-# ---------------------------------------------------------------------------
-
-def _run_direct(cmd: list[str]) -> str:
-    """
-    Run a test command directly in the current process.
-    Used as a fallback when the FIFO is not available (development mode).
-
-    Args:
-        cmd: Full command list to execute.
-
-    Returns:
-        Test output with pass/fail summary appended.
-    """
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=project_root(),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += "\n--- stderr ---\n" + result.stderr
-        status = "PASSED" if result.returncode == 0 else "FAILED"
-        return f"{output.rstrip()}\n\n--- {status} (exit code {result.returncode}) ---"
-    except subprocess.TimeoutExpired:
-        return "ERROR: Test run timed out after 5 minutes."
-    except FileNotFoundError as e:
-        return f"ERROR: Could not find test runner — {e}"
-    except Exception as e:
-        return f"ERROR: Unexpected error running tests: {e}"
-
-
-# ---------------------------------------------------------------------------
 # Path validation
 # ---------------------------------------------------------------------------
 
@@ -247,19 +208,11 @@ def run_tests(path: str = "tests") -> str:
     if not valid:
         return f"ERROR: {reason}"
 
-    if _fifo_available():
-        logger.info("Using FIFO test runner (production mode).")
-        return _run_via_fifo(path)
-
-    logger.info("FIFO not available — running tests directly (development mode).")
-    cmd = [
-        sys.executable, "-m", "pytest",
-        path,
-        "--tb=short",
-        "--no-header",
-        "-v",
-    ]
-    return _run_direct(cmd)
+    if not _fifo_available():
+        return "ERROR: Test runner not available. Is matrixmouse-test-runner.service running?"
+        
+    logger.info("Using FIFO test runner.")
+    return _run_via_fifo(path)
 
 
 def run_single_test(test_id: str) -> str:
@@ -284,17 +237,9 @@ def run_single_test(test_id: str) -> str:
     if not valid:
         return f"ERROR: {reason}"
 
-    if _fifo_available():
-        logger.info("Using FIFO test runner (production mode).")
-        return _run_via_fifo(test_id)
-
-    logger.info("FIFO not available — running tests directly (development mode).")
-    cmd = [
-        sys.executable, "-m", "pytest",
-        test_id,
-        "--tb=long",
-        "--no-header",
-        "-v",
-    ]
-    return _run_direct(cmd)
+    if not _fifo_available():
+        return "ERROR: Test runner not available. Is matrixmouse-test-runner.service running?"
+        
+    logger.info("Using FIFO test runner.")
+    return _run_via_fifo(test_id)
 
