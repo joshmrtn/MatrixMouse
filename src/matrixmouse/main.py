@@ -846,7 +846,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.set_defaults(func=cmd_add_repo)
 
     # --- repos list ---
-    repos_p = sub.add_parser("repos", help="Manage registered repos.")
+    repos_p = subparsers.add_parser("repos", help="Manage registered repos.")
     repos_sub = repos_p.add_subparsers(dest="repos_command")
     repos_sub.add_parser("list", help="List registered repos.").set_defaults(
         func=cmd_repos_list
