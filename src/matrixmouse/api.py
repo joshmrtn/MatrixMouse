@@ -381,7 +381,7 @@ async def add_repo(body: RepoAddRequest):
     workspace.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(
-        ["git", "clone", str(local.resolve()) if is_local else remote, str(dest)],
+            ["git", "clone", f"file://{local.resolve()}" if is_local else remote, str(dest)],
         env=env, capture_output=True, text=True,
     )
     if result.returncode != 0:
