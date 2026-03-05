@@ -374,7 +374,10 @@ async def add_repo(body: RepoAddRequest):
         )
 
     local = Path(remote)
-    is_local = local.exists() and local.is_dir()
+    try:
+        is_local = local.exists() and local.is_dir()
+    except PermissionError:
+        is_local = False
     workspace.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(

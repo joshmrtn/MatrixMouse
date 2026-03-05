@@ -43,13 +43,34 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _resolve_workspace() -> Path:
+    # 1. Environment variable — set by systemd or the user's shell
     env = os.environ.get("WORKSPACE_PATH")
     if env:
         return Path(env).resolve()
-    default = Path.home() / "matrixmouse-workspace"
+
+    # 2. Global config — written by install.sh, always present on installed systems
+    try:
+        import tomllib
+        global_cfg = Path("/etc/matrixmouse/config.toml")
+        if global_cfg.exists():
+            with open(global_cfg, "rb") as f:
+                data = tomllib.load(f)
+            ws = data.get("workspace_path") or data.get("WORKSPACE_PATH")
+            if ws:
+                return Path(ws).resolve()
+    except Exception:
+        pass
+
+    # 3. Standard install default
+    default = Path("/var/lib/matrixmouse-workspace")
     if default.exists():
         return default
-    return Path.cwd().parent
+
+    print(
+        "ERROR: Could not resolve workspace path.\n"
+        "Set WORKSPACE_PATH in your environment or in /etc/matrixmouse/config.toml"
+    )
+    sys.exit(1)
 
 
 def _resolve_port() -> int:
@@ -198,7 +219,10 @@ def _add_repo_direct(args) -> None:
     workspace_root = _resolve_workspace()
     remote = args.remote
     local_path = Path(remote)
-    is_local = local_path.exists() and local_path.is_dir()
+    try:
+        is_local = local_path.is_absolute() and local_path.exists() and local_path.is_dir()
+    except PermissionError:
+        is_local = False
 
     name = getattr(args, "name", None)
     if not name:
@@ -246,7 +270,7 @@ def _add_repo_direct(args) -> None:
                 f"-o StrictHostKeyChecking=accept-new"
             )
 
-    src = str(local_path.resolve()) if is_local else remote
+    src = f"file://{local_path.resolve()}" if is_local else remote
     print(f"Cloning '{src}' into '{dest}'...")
     result = subprocess.run(
         ["git", "clone", src, str(dest)],
@@ -307,6 +331,40 @@ def _post_add_instructions(name: str, dest: Path) -> None:
     print(f"  Add a task:   matrixmouse tasks add")
     print(f"  Check status: matrixmouse status")
     print(f"  Web UI:       http://localhost:{_resolve_port()}/")
+
+
+# ---------------------------------------------------------------------------
+# cmd_repos_list
+# ---------------------------------------------------------------------------
+
+def cmd_repos_list(args):
+    """List repos registered in the workspace."""
+    port = _resolve_port()
+    try:
+        result = _agent_get("/repos", port)
+        repos = result.get("repos", [])
+        if not repos:
+            print("No repos registered.")
+            return
+        for r in repos:
+            print(f"  {r['name']:20s}  {r['local_path']}")
+            if r.get("remote"):
+                print(f"  {'':20s}  remote: {r['remote']}")
+    except SystemExit:
+        # Service not running — read repos.json directly
+        workspace = _resolve_workspace()
+        repos_file = workspace / ".matrixmouse" / "repos.json"
+        if not repos_file.exists():
+            print("No repos registered.")
+            return
+        import json
+        with open(repos_file) as f:
+            repos = json.load(f)
+        if not repos:
+            print("No repos registered.")
+            return
+        for r in repos:
+            print(f"  {r['name']:20s}  {r['local_path']}")
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +844,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override directory name in workspace. Defaults to repo name.",
     )
     add_parser.set_defaults(func=cmd_add_repo)
+
+    # --- repos list ---
+    repos_p = sub.add_parser("repos", help="Manage registered repos.")
+    repos_sub = repos_p.add_subparsers(dest="repos_command")
+    repos_sub.add_parser("list", help="List registered repos.").set_defaults(
+        func=cmd_repos_list
+    )
 
     # --- tasks ---
     tasks_parser = subparsers.add_parser(
