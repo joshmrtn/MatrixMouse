@@ -187,6 +187,95 @@ def _agent_delete(endpoint: str, port: int) -> dict:
         sys.exit(1)
 
 
+
+
+
+# ---------------------------------------------------------------------------
+# Mirror helpers
+# ---------------------------------------------------------------------------
+
+def _mirrors_base() -> Path:
+    """
+    Per-user mirror directory under /var/lib/matrixmouse-mirrors.
+    Created on first use, owned by the invoking user, group-readable
+    by matrixmouse via the matrixmouse-mirrors group.
+    """
+    import getpass
+    base = Path("/var/lib/matrixmouse-mirrors") / getpass.getuser()
+    if not base.exists():
+        base.mkdir(mode=0o750, parents=True)
+    return base
+
+
+def _setup_local_mirror(source: Path, name: str) -> Path:
+    """
+    Create a bare mirror of a local repo in the per-user mirrors directory.
+    Runs as the invoking user — can read the source, owns the mirror.
+
+    Args:
+        source: Absolute path to the user's working repo.
+        name:   Repo name (used as mirror directory name).
+
+    Returns:
+        Path to the bare mirror (e.g. /var/lib/matrixmouse-mirrors/ubuntu/name.git)
+    """
+    import subprocess
+
+    mirror_path = _mirrors_base() / f"{name}.git"
+
+    if mirror_path.exists():
+        # Mirror already exists — update it
+        result = subprocess.run(
+            ["git", "remote", "update"],
+            cwd=mirror_path, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"Warning: could not update existing mirror: {result.stderr.strip()}")
+        return mirror_path
+
+    result = subprocess.run(
+        ["git", "clone", "--bare", str(source), str(mirror_path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: Could not create mirror:\n{result.stderr.strip()}")
+        sys.exit(1)
+
+    # Make mirror group-readable so the matrixmouse service can clone from it
+    subprocess.run(["chmod", "-R", "g+rX", str(mirror_path)], check=True)
+
+    return mirror_path
+
+
+def _add_matrixmouse_remote(working_copy: Path, mirror_path: Path) -> None:
+    """
+    Add or update the 'matrixmouse' remote in the user's working copy
+    to point at the bare mirror.
+
+    After this, the user can:
+        git push matrixmouse          # share work with the agent
+        git fetch matrixmouse         # pull agent commits back
+    """
+    import subprocess
+
+    # Check if remote already exists
+    result = subprocess.run(
+        ["git", "remote", "get-url", "matrixmouse"],
+        cwd=working_copy, capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        # Remote exists — update URL in case mirror moved
+        subprocess.run(
+            ["git", "remote", "set-url", "matrixmouse", str(mirror_path)],
+            cwd=working_copy, check=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "remote", "add", "matrixmouse", str(mirror_path)],
+            cwd=working_copy, check=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # cmd_add_repo
 # ---------------------------------------------------------------------------
@@ -195,126 +284,80 @@ def cmd_add_repo(args):
     """
     Clone or register a repo into the workspace.
 
-    If the service is running, delegates to POST /repos so the agent
-    is aware of the new repo immediately.
+    For remote URLs (https://, git@, etc.):
+        Delegates to POST /repos — service clones directly.
 
-    If the service is not running (bootstrap case — first repo before
-    the service has ever started), clones directly and registers in
-    repos.json. This allows a user to set up the workspace before
-    starting the service for the first time.
+    For local paths:
+        1. CLI creates a bare mirror in /var/lib/matrixmouse-mirrors/<user>/
+        2. CLI calls POST /repos with the file:// mirror URL
+        3. Service clones from the mirror into the workspace
+        4. CLI adds 'matrixmouse' remote to the user's working copy
+
+    The 'matrixmouse' remote allows the user to share work with the agent:
+        git push matrixmouse    # agent sees your latest commits
+        git fetch matrixmouse   # you see the agent's commits
     """
-    port = _resolve_port()
+    import getpass
 
-    # Try the API first
+    port = _resolve_port()
+    remote = args.remote
+    name = getattr(args, "name", None)
+
+    # Detect local path
+    local_path = Path(remote)
+    is_local = remote.startswith("/") or remote.startswith("./") or remote.startswith("~/")
+    if is_local:
+        local_path = local_path.expanduser().resolve()
+        if not local_path.exists():
+            print(f"ERROR: Path does not exist: {local_path}")
+            sys.exit(1)
+        if not local_path.is_dir():
+            print(f"ERROR: Not a directory: {local_path}")
+            sys.exit(1)
+        if not name:
+            name = local_path.name
+
+        # Step 1 — create bare mirror as invoking user
+        print(f"Creating mirror of '{local_path}' ...")
+        mirror_path = _setup_local_mirror(local_path, name)
+        print(f"Mirror ready at {mirror_path}")
+
+        # Step 2 — ask service to clone from mirror
+        api_remote = f"file://{mirror_path}"
+    else:
+        api_remote = remote
+
+    # Call the API
     try:
         result = _agent_post(
             "/repos",
-            {"remote": args.remote, "name": getattr(args, "name", None)},
+            {"remote": api_remote, "name": name},
             port,
         )
         if result.get("ok"):
             repo = result["repo"]
             print(f"Repo '{repo['name']}' added to workspace.")
+
+            # Step 3 — add matrixmouse remote to working copy (local only)
+            if is_local:
+                try:
+                    _add_matrixmouse_remote(local_path, mirror_path)
+                    print(
+                        f"\nRemote 'matrixmouse' added to {local_path}\n"
+                        f"  git push matrixmouse    — share your work with the agent\n"
+                        f"  git fetch matrixmouse   — pull agent commits back"
+                    )
+                except Exception as e:
+                    print(f"Warning: could not add matrixmouse remote: {e}")
+                    print(f"Add it manually: git remote add matrixmouse {mirror_path}")
+
             _post_add_instructions(repo["name"], Path(repo["local_path"]))
         else:
             print(f"ERROR: {result.get('detail', 'unknown error')}")
             sys.exit(1)
-        return
     except SystemExit as e:
         if e.code != 0:
-            # Error from the service - don't fall through to bootstrap
             raise
-        # Code 0 shouldn't happen here but handle gracefully
-        return
-
-    # Bootstrap path: service not running, do it directly
-    print("Service not running — cloning directly (bootstrap mode).")
-    _add_repo_direct(args)
-
-
-def _add_repo_direct(args) -> None:
-    """
-    Clone and register a repo without a running service.
-    Used for bootstrap (first install) only.
-    """
-    import subprocess
-
-    workspace_root = _resolve_workspace()
-    remote = args.remote
-    local_path = Path(remote)
-    try:
-        is_local = local_path.is_absolute() and local_path.exists() and local_path.is_dir()
-    except PermissionError:
-        is_local = False
-
-    name = getattr(args, "name", None)
-    if not name:
-        name = local_path.name if is_local else _infer_repo_name(remote)
-
-    dest = workspace_root / name
-    workspace_root.mkdir(parents=True, exist_ok=True)
-
-    if dest.exists():
-        print(f"Directory '{dest}' already exists.")
-        answer = input(
-            "(u)pdate with git pull, (s)kip clone + register, or (a)bort? [u/s/a]: "
-        ).strip().lower()
-        if answer == "a":
-            sys.exit(0)
-        elif answer == "s":
-            _register_repo(workspace_root, name, dest, remote)
-            print(f"Registered '{name}'.")
-            _post_add_instructions(name, dest)
-            return
-        elif answer == "u":
-            result = subprocess.run(
-                ["git", "pull"], cwd=dest, capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                print(f"ERROR: git pull failed:\n{result.stderr}")
-                sys.exit(1)
-            print(result.stdout.strip())
-            _register_repo(workspace_root, name, dest, remote)
-            _post_add_instructions(name, dest)
-            return
-        else:
-            print("Unrecognised option. Aborted.")
-            sys.exit(1)
-
-    # Build SSH env if key is configured
-    env = os.environ.copy()
-    key_file = os.environ.get("MATRIXMOUSE_AGENT_GH_KEY_FILE")
-    secrets_path = os.environ.get("SECRETS_PATH", str(Path.home() / ".matrixmouse-secrets"))
-    if key_file:
-        key_path = Path(secrets_path) / key_file
-        if key_path.exists():
-            env["GIT_SSH_COMMAND"] = (
-                f"ssh -i {key_path} -o IdentitiesOnly=yes "
-                f"-o StrictHostKeyChecking=accept-new"
-            )
-
-    src = f"file://{local_path.resolve()}" if is_local else remote
-    print(f"Cloning '{src}' into '{dest}'...")
-    result = subprocess.run(
-        ["git", "clone", src, str(dest)],
-        env=env, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"ERROR: git clone failed:\n{result.stderr.strip()}")
-        sys.exit(1)
-
-    print("Cloned successfully.")
-
-    # Auto-init
-    try:
-        from matrixmouse.init import setup_repo
-        setup_repo(dest, workspace_root)
-        print(f"Initialised .matrixmouse/ in {dest}")
-    except Exception as e:
-        print(f"Warning: auto-init failed ({e}). Run manually if needed.")
-
-    _register_repo(workspace_root, name, dest, remote)
-    _post_add_instructions(name, dest)
 
 
 def _infer_repo_name(remote: str) -> str:

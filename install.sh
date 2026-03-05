@@ -334,10 +334,58 @@ success "Workspace: $WORKSPACE_PATH (owned by $MM_USER)"
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — Model configuration
+# Step 7 — matrixmouse-mirrors group and directory
 # ---------------------------------------------------------------------------
 
-header "Step 7 — Model configuration"
+header "Step 7 — Mirror directory"
+
+MIRRORS_DIR="/var/lib/matrixmouse-mirrors"
+MIRRORS_GROUP="matrixmouse-mirrors"
+
+# Create the shared group if it doesn't exist
+if ! getent group "$MIRRORS_GROUP" &>/dev/null; then
+    sudo groupadd --system "$MIRRORS_GROUP"
+    success "Created group: $MIRRORS_GROUP"
+else
+    success "Group $MIRRORS_GROUP already exists"
+fi
+
+
+# Add both users to the group
+sudo usermod -aG "$MIRRORS_GROUP" "$MM_USER"
+sudo usermod -aG "$MIRRORS_GROUP" "$INVOKING_USER"
+success "Added $MM_USER and $INVOKING_USER to $MIRRORS_GROUP"
+
+# Check group membership — requires re-login to take effect
+NEEDS_RELOGIN=false
+
+if ! groups "$INVOKING_USER" | grep -qw "$MIRRORS_GROUP"; then
+    warn "$INVOKING_USER was just added to $MIRRORS_GROUP."
+    NEEDS_RELOGIN=true
+fi
+
+if [ "$NEEDS_RELOGIN" = true ]; then
+    echo ""
+    echo "  ┌─────────────────────────────────────────────────────────┐"
+    echo "  │  ACTION REQUIRED: You must log out and back in for      │"
+    echo "  │  group membership to take effect, then re-run           │"
+    echo "  │  install.sh to complete the installation.               │"
+    echo "  └─────────────────────────────────────────────────────────┘"
+    echo ""
+    exit 0
+fi
+
+# Create the mirrors root with setgid so subdirs inherit the group
+sudo install -d -m 2755 -g "$MIRRORS_GROUP" "$MIRRORS_DIR"
+success "Mirror directory ready at $MIRRORS_DIR"
+
+
+
+# ---------------------------------------------------------------------------
+# Step 8 — Model configuration
+# ---------------------------------------------------------------------------
+
+header "Step 8 — Model configuration"
 
 echo "Enter Ollama model names for each role."
 echo "Models must support tool calling. Check available: ollama list"
@@ -353,10 +401,10 @@ echo "smallest to largest). Defaults to just the coder model (no escalation)."
 prompt_required CODER_CASCADE "Coder cascade" "$CODER_MODEL"
 
 # ---------------------------------------------------------------------------
-# Step 8 — Notifications (optional)
+# Step 9 — Notifications (optional)
 # ---------------------------------------------------------------------------
 
-header "Step 8 — Notifications (optional)"
+header "Step 9 — Notifications (optional)"
 
 echo "MatrixMouse can push notifications via ntfy when it needs attention."
 echo "Leave blank to skip — configure later in /etc/matrixmouse/config.toml"
@@ -366,10 +414,10 @@ prompt NTFY_URL   "ntfy server URL (e.g. https://ntfy.sh)" ""
 prompt NTFY_TOPIC "ntfy topic"                              "matrixmouse"
 
 # ---------------------------------------------------------------------------
-# Step 9 — Write configuration files
+# Step 10 — Write configuration files
 # ---------------------------------------------------------------------------
 
-header "Step 9 — Configuration files"
+header "Step 10 — Configuration files"
 
 # .env secrets file — 600 matrixmouse:matrixmouse
 ENV_FILE="$ETC_DIR/matrixmouse.env"
@@ -443,10 +491,10 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Step 10 — Build test runner Docker image
+# Step 11 — Build test runner Docker image
 # ---------------------------------------------------------------------------
 
-header "Step 10 — Test runner Docker image"
+header "Step 11 — Test runner Docker image"
 
 DOCKERFILE_TR="$INSTALL_DIR/Dockerfile.testrunner"
 [ -f "$DOCKERFILE_TR" ] || fatal "Dockerfile.testrunner not found at $INSTALL_DIR"
@@ -471,10 +519,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 11 — systemd services
+# Step 12 — systemd services
 # ---------------------------------------------------------------------------
 
-header "Step 11 — systemd services"
+header "Step 12 — systemd services"
 
 MM_SERVICE_BIN="$(command -v matrixmouse-service)"
 MM_TEST_RUNNER="$INSTALL_DIR/test_runner.sh"
@@ -582,10 +630,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 12 — Ollama configuration
+# Step 13 — Ollama configuration
 # ---------------------------------------------------------------------------
 
-header "Step 12 — Ollama configuration"
+header "Step 13 — Ollama configuration"
 
 OLLAMA_OVERRIDE="/etc/systemd/system/ollama.service.d/override.conf"
 if $HAS_SYSTEMD; then
@@ -609,10 +657,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 13 — Reverse proxy (optional)
+# Step 14 — Reverse proxy (optional)
 # ---------------------------------------------------------------------------
 
-header "Step 13 — Reverse proxy (optional)"
+header "Step 14 — Reverse proxy (optional)"
 
 echo "The web UI runs at http://localhost:8080 by default."
 echo "See docs/deployment/ for nginx, Caddy, and Traefik examples."

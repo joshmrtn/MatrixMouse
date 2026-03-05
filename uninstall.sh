@@ -160,11 +160,28 @@ if groups "$USER" 2>/dev/null | grep -qw "$MM_USER"; then
     fi
 fi
 
+
 # ---------------------------------------------------------------------------
-# Step 6 — /etc/matrixmouse (config + secrets) — DANGEROUS
+# Step 6 — Mirrors group
 # ---------------------------------------------------------------------------
 
-header "Step 6 — /etc/matrixmouse"
+
+header "Step 6 — Mirrors group"
+
+if getent group matrixmouse-mirrors &>/dev/null; then
+    if confirm "Remove matrixmouse-mirrors group?"; then
+        sudo groupdel matrixmouse-mirrors
+        success "Group removed"
+	info "Kept mirror directory — user owned repos"
+    fi
+fi
+
+
+# ---------------------------------------------------------------------------
+# Step 7 — /etc/matrixmouse (config + secrets) — DANGEROUS
+# ---------------------------------------------------------------------------
+
+header "Step 7 — /etc/matrixmouse"
 
 if [ -d "$ETC_DIR" ]; then
     echo ""
@@ -184,10 +201,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 7 — Workspace — DANGEROUS
+# Step 8 — Workspace — DANGEROUS
 # ---------------------------------------------------------------------------
 
-header "Step 7 — Workspace"
+header "Step 8 — Workspace"
 
 # Find workspace — try the default, fall back to env var
 WORKSPACE_PATH="${WORKSPACE_PATH:-$DEFAULT_WORKSPACE}"
@@ -218,5 +235,6 @@ echo ""
 echo "Intentionally preserved (if you declined above):"
 echo "  $ETC_DIR   — credentials, ready for reinstall"
 echo "  $WORKSPACE_PATH  — repos and task history"
+echo "  /var/lib/matrixmouse-mirrors/  — not touched"
 echo "  ollama, docker   — not touched"
 echo ""
