@@ -270,6 +270,7 @@ html, body {
 /* Tab panels */
 .tab-panel { display: none; flex-direction: column; flex: 1; overflow: hidden; }
 .tab-panel.active { display: flex; }
+#settings-panel.active { flex-direction: row; }
 
 /* ─── Chat View ──────────────────────────────────────────────── */
 #chat-scope-label {
@@ -390,7 +391,6 @@ html, body {
 /* ─── Tasks Tab ──────────────────────────────────────────────── */
 #tasks-panel {
   overflow: hidden;
-  display: flex;
   flex-direction: column;
 }
 
@@ -561,7 +561,6 @@ html, body {
 
 /* ─── Settings Tab ───────────────────────────────────────────── */
 #settings-panel {
-  display: flex;
   overflow: hidden;
 }
 
