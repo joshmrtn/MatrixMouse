@@ -373,17 +373,16 @@ async def add_repo(body: RepoAddRequest):
                    f"Remove it first or choose a different name."
         )
 
-    local = Path(remote)
-    try:
-        is_local = local.exists() and local.is_dir()
-    except PermissionError:
-        is_local = False
-    workspace.mkdir(parents=True, exist_ok=True)
+    src = remote
+    # If it looks like an absolute path, use file:// so git treats it as local
+    if remote.startswith("/"):
+        src = f"file://{remote}"
 
     result = subprocess.run(
-            ["git", "clone", f"file://{local.resolve()}" if is_local else remote, str(dest)],
+        ["git", "clone", src, str(dest)],
         env=env, capture_output=True, text=True,
     )
+
     if result.returncode != 0:
         raise HTTPException(
             status_code=500,
