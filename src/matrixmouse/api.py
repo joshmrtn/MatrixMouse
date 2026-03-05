@@ -14,6 +14,7 @@ Endpoints:
     Tasks:   GET/POST /tasks, GET/PATCH/DELETE /tasks/{id}
     Repos:   GET/POST /repos, DELETE /repos/{name}
     Agent:   GET /status, GET /pending, POST /interject
+    Control: POST /stop, POST /kill, GET /estop, POST /estop/reset
     Config:  GET/PATCH /config, GET/PATCH /config/repos/{name}
     System:  GET /health, POST /upgrade, WS /ws (registered by server.py)
 
@@ -30,17 +31,36 @@ Config layer reference:
     GET /config/repos/{name} returns the merged view of layers 3 + 4,
     with layer 3 values annotated as local and layer 4 as committed.
 
+Control endpoints:
+    POST /stop          Soft stop — sets a flag the orchestrator checks at
+                        the next loop boundary. Current tool call completes
+                        first to avoid leaving filesystem in inconsistent state.
+                        Flag is cleared automatically when the next task starts.
+
+    POST /kill          E-STOP — writes ESTOP lockfile then sends SIGTERM.
+                        systemd will NOT restart because the process exits
+                        with code 0 (Restart=on-failure in the unit file).
+                        Requires human intervention to reset via POST /estop/reset
+                        or CLI `matrixmouse estop reset`.
+
+    GET  /estop         Returns current ESTOP state.
+    POST /estop/reset   Removes the ESTOP lockfile. Service must be manually
+                        restarted after reset: `sudo systemctl start matrixmouse`.
+
 Threading model:
     The API server runs in a background thread (uvicorn).
     The orchestrator runs in the main thread.
     _task_condition bridges them — the API notifies it when a new task
     is created so the orchestrator wakes immediately rather than polling.
+    _stop_requested is a threading.Event checked by the orchestrator at
+    each loop boundary.
 
 Do not add agent logic, inference calls, or tool dispatch here.
 """
 
 import logging
 import os
+import signal
 import subprocess
 import threading
 import tomllib
@@ -81,6 +101,24 @@ def get_task_condition() -> threading.Condition:
 
 
 # ---------------------------------------------------------------------------
+# Soft stop flag — checked by orchestrator at each loop boundary.
+# Set by POST /stop. Cleared by the orchestrator when next task starts.
+# ---------------------------------------------------------------------------
+
+_stop_requested = threading.Event()
+
+
+def is_stop_requested() -> bool:
+    """Return True if a soft stop has been requested."""
+    return _stop_requested.is_set()
+
+
+def clear_stop_requested() -> None:
+    """Clear the stop flag. Called by the orchestrator when starting a new task."""
+    _stop_requested.clear()
+
+
+# ---------------------------------------------------------------------------
 # Module-level state — injected at startup by the orchestrator
 # ---------------------------------------------------------------------------
 
@@ -118,6 +156,13 @@ def _require_workspace() -> Path:
     if _workspace_root is None:
         raise HTTPException(status_code=503, detail="Workspace not configured.")
     return _workspace_root
+
+
+def _estop_path() -> Path | None:
+    """Return the ESTOP lockfile path, or None if workspace is not configured."""
+    if _workspace_root is None:
+        return None
+    return _workspace_root / ".matrixmouse" / "ESTOP"
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +537,130 @@ async def interject(body: InterjectionRequest):
     return {"ok": True}
 
 
+@app.post("/stop")
+async def soft_stop():
+    """
+    Soft stop — request the orchestrator to stop after the current tool call
+    completes. Does not interrupt mid-tool to avoid inconsistent filesystem state.
+
+    The flag is cleared automatically when the next task starts.
+    Use this for day-to-day interruption of runaway or misdirected agent loops.
+
+    For emergencies requiring immediate shutdown, use POST /kill instead.
+    """
+    _stop_requested.set()
+    logger.info("Soft stop requested via API.")
+    return {
+        "ok": True,
+        "message": "Stop requested. Agent will halt after the current tool call completes.",
+    }
+
+
+@app.post("/kill")
+async def estop():
+    """
+    E-STOP — emergency stop.
+
+    Writes an ESTOP lockfile to the workspace then sends SIGTERM to the
+    service process. Because the service exits with code 0, systemd will
+    NOT restart it (Restart=on-failure in the unit file).
+
+    The service will remain stopped until a human operator resets the ESTOP
+    via POST /estop/reset (or CLI: matrixmouse estop reset) and manually
+    restarts the service with: sudo systemctl start matrixmouse
+
+    Use this only when the agent is doing something dangerous and must be
+    stopped immediately. Normal operational interruptions should use POST /stop.
+    """
+    estop_file = _estop_path()
+    if estop_file is None:
+        raise HTTPException(status_code=503, detail="Workspace not configured.")
+
+    try:
+        estop_file.parent.mkdir(parents=True, exist_ok=True)
+        estop_file.write_text(
+            f"ESTOP engaged at {datetime.now(timezone.utc).isoformat()}\n"
+            f"Remove this file and restart the service to resume:\n"
+            f"  sudo systemctl start matrixmouse\n"
+        )
+        logger.critical("E-STOP engaged via API. Writing lockfile and shutting down.")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to write ESTOP lockfile: {e}"
+        )
+
+    # Send SIGTERM to ourselves — triggers the clean shutdown handler in
+    # _service.py, which releases the PID lock and exits with code 0.
+    # systemd will not restart because Restart=on-failure and exit code is 0.
+    os.kill(os.getpid(), signal.SIGTERM)
+
+    # This response may or may not reach the client depending on timing,
+    # but we return it anyway for CLI usage where the connection may survive.
+    return {
+        "ok": True,
+        "message": "E-STOP engaged. Service is shutting down and will not restart.",
+    }
+
+
+@app.get("/estop")
+async def estop_status():
+    """
+    Return current E-STOP state.
+
+    Response:
+        { "engaged": bool, "message": str | null }
+    """
+    estop_file = _estop_path()
+    if estop_file is None:
+        return {"engaged": False, "message": None}
+
+    if estop_file.exists():
+        try:
+            message = estop_file.read_text()
+        except Exception:
+            message = "ESTOP engaged."
+        return {"engaged": True, "message": message}
+
+    return {"engaged": False, "message": None}
+
+
+@app.post("/estop/reset")
+async def estop_reset():
+    """
+    Reset the E-STOP — remove the lockfile so the service can start again.
+
+    After resetting, the service must be manually restarted:
+        sudo systemctl start matrixmouse
+
+    The web UI will be unreachable until the service restarts, so this
+    endpoint is primarily for CLI use: matrixmouse estop reset
+    """
+    estop_file = _estop_path()
+    if estop_file is None:
+        raise HTTPException(status_code=503, detail="Workspace not configured.")
+
+    if not estop_file.exists():
+        return {"ok": True, "message": "E-STOP was not engaged."}
+
+    try:
+        estop_file.unlink()
+        logger.info("E-STOP reset via API.")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to remove ESTOP lockfile: {e}"
+        )
+
+    return {
+        "ok": True,
+        "message": (
+            "E-STOP reset. Start the service manually to resume: "
+            "sudo systemctl start matrixmouse"
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -595,14 +764,12 @@ async def patch_repo_config(
     workspace = _require_workspace()
 
     if commit:
-        # Layer 4 — tracked, inside the git repo
         config_path = workspace / repo_name / ".matrixmouse" / "config.toml"
         logger.info(
             "Writing committed repo config for '%s': %s",
             repo_name, list(body.values.keys()),
         )
     else:
-        # Layer 3 — untracked, workspace state dir
         config_path = workspace / ".matrixmouse" / repo_name / "config.toml"
         logger.info(
             "Writing local repo config for '%s': %s",

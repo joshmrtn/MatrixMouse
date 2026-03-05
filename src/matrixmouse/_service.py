@@ -173,6 +173,40 @@ def _load_registered_repos(workspace_root: Path) -> list[Path]:
     return paths
 
 
+
+# ---------------------------------------------------------------------------
+# ESTOP helper
+# ---------------------------------------------------------------------------
+
+
+def _check_estop(workspace_root: Path) -> None:
+    """
+    Check for an ESTOP lockfile. If found, log and exit with code 0.
+
+    Exit code 0 prevents systemd from restarting the service
+    (Restart=on-failure only restarts on non-zero exit codes).
+
+    To resume after an ESTOP:
+        1. Delete the lockfile:  matrixmouse estop reset
+           (or manually: rm <workspace>/.matrixmouse/ESTOP)
+        2. Start the service:    sudo systemctl start matrixmouse
+    """
+    estop_path = workspace_root / ".matrixmouse" / "ESTOP"
+    if estop_path.exists():
+        try:
+            message = estop_path.read_text().strip()
+        except Exception:
+            message = "(could not read lockfile)"
+        logger.critical(
+            "E-STOP is engaged. Service will not start.\n"
+            "Lockfile: %s\n"
+            "%s\n"
+            "To reset: matrixmouse estop reset && sudo systemctl start matrixmouse",
+            estop_path, message,
+        )
+        sys.exit(0)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -183,6 +217,9 @@ def main() -> None:
     # --- Workspace ---
     workspace_root = _resolve_workspace()
     logger.info("Workspace: %s", workspace_root)
+
+    # --- ESTOP check ---
+    _check_estop(workspace_root)
 
     # --- PID lock ---
     _acquire_pidlock(workspace_root)
