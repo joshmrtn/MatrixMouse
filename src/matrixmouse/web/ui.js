@@ -360,11 +360,12 @@ async function loadContext(scope) {
       const label = isSummary ? 'summary' : role;
 
       const div = document.createElement('div');
+      const snippet = content.slice(0, 400) + (content.length > 400 ? '…' : '');
       div.className = `ev ${type} historical`;
       div.innerHTML =
         `<span class="ev-ts">ctx</span>` +
         `<span class="ev-lbl">${esc(label)}</span>` +
-        `<span class="ev-txt">${escLines(content.slice(0, 400))}${content.length > 400 ? '…' : ''}</span>`;
+        `<span class="ev-txt">${isSummary ? escLines(snippet) : renderMarkdown(snippet)}</span>`
       log.appendChild(div);
     });
 
