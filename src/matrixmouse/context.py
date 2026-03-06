@@ -9,7 +9,7 @@ Responsibilities:
       (default: 60% of model context length, capped at ~32k tokens regardless
       of model maximum)
     - Performing summarisation using a small, fast model (separate from the
-      working model) via config.summarizer
+      working model) via config.summarizer_model
     - Preserving: system prompt, original task instruction, last N turns
       (default: 6)
     - Replacing middle history with a compressed summary message marked
@@ -266,7 +266,7 @@ class ContextManager:
 
         try:
             response = ollama.chat(
-                model=self.config.summarizer,
+                model=self.config.summarizer_model,
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
                 keep_alive="30m",
