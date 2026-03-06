@@ -82,6 +82,10 @@ def _resolve_port() -> int:
 # ---------------------------------------------------------------------------
 
 def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
+    """
+    POST to the running agent's HTTP API.
+    Exits with clear error if service not reachable.
+    """
     import urllib.request
     import urllib.error
 
@@ -113,6 +117,7 @@ def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
 
 
 def _agent_get(endpoint: str, port: int) -> dict:
+    """GET from the running agent's HTTP API."""
     import urllib.request
     import urllib.error
 
@@ -138,6 +143,7 @@ def _agent_get(endpoint: str, port: int) -> dict:
 
 
 def _agent_patch(endpoint: str, payload: dict, port: int) -> dict:
+    """PATCH to the running agent's HTTP API."""
     import urllib.request
     import urllib.error
 
@@ -160,6 +166,7 @@ def _agent_patch(endpoint: str, payload: dict, port: int) -> dict:
 
 
 def _agent_delete(endpoint: str, port: int) -> dict:
+    """DELETE via the running agent's HTTP API."""
     import urllib.request
     import urllib.error
 
@@ -181,6 +188,11 @@ def _agent_delete(endpoint: str, port: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def _mirrors_base() -> Path:
+    """
+    Per-user mirror directory under /var/lib/matrixmouse-mirrors.
+    Created on first use, owned by the invoking user, group-readable
+    by matrixmouse via the matrixmouse-mirrors group.
+    """
     import getpass
     base = Path("/var/lib/matrixmouse-mirrors") / getpass.getuser()
     if not base.exists():
@@ -189,6 +201,17 @@ def _mirrors_base() -> Path:
 
 
 def _setup_local_mirror(source: Path, name: str) -> Path:
+    """
+    Create a bare mirror of a local repo in the per-user mirrors directory.
+    Runs as the invoking user — can read the source, owns the mirror.
+
+    Args:
+        source: Absolute path to the user's working repo.
+        name:   Repo name (used as mirror directory name).
+
+    Returns:
+        Path to the bare mirror (e.g. /var/lib/matrixmouse-mirrors/ubuntu/name.git)
+    """
     import subprocess
 
     mirror_path = _mirrors_base() / f"{name}.git"
@@ -221,6 +244,14 @@ def _setup_local_mirror(source: Path, name: str) -> Path:
 
 
 def _add_matrixmouse_remote(working_copy: Path, mirror_path: Path) -> None:
+    """
+    Add or update the 'matrixmouse' remote in the user's working copy
+    to point at the bare mirror.
+
+    After this, the user can:
+        git push matrixmouse          # share work with the agent
+        git fetch matrixmouse         # pull agent commits back
+    """
     import subprocess
 
     result = subprocess.run(
@@ -244,6 +275,22 @@ def _add_matrixmouse_remote(working_copy: Path, mirror_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_add_repo(args):
+    """
+    Clone or register a repo into the workspace.
+
+    For remote URLs (https://, git@, etc.):
+        Delegates to POST /repos — service clones directly.
+
+    For local paths:
+        1. CLI creates a bare mirror in /var/lib/matrixmouse-mirrors/<user>/
+        2. CLI calls POST /repos with the file:// mirror URL
+        3. Service clones from the mirror into the workspace
+        4. CLI adds 'matrixmouse' remote to the user's working copy
+
+    The 'matrixmouse' remote allows the user to share work with the agent:
+        git push matrixmouse    # agent sees your latest commits
+        git fetch matrixmouse   # you see the agent's commits
+    """
     port = _resolve_port()
     remote = args.remote
     name = getattr(args, "name", None)
@@ -336,6 +383,7 @@ def _post_add_instructions(name: str, dest: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_repos_list(args):
+    """List repos registered in the workspace."""
     port = _resolve_port()
     try:
         result = _agent_get("/repos", port)
@@ -382,6 +430,7 @@ def cmd_tasks(args):
 
 
 def cmd_tasks_list(args):
+    """List tasks via GET /tasks."""
     port = _resolve_port()
 
     params = []
@@ -406,12 +455,18 @@ def cmd_tasks_list(args):
 
 
 def cmd_tasks_show(args):
+    """Show task details via GET /tasks/{id}."""
     port = _resolve_port()
     result = _agent_get(f"/tasks/{args.id}", port)
     print(_fmt_task_detail(result))
 
 
 def cmd_tasks_add(args):
+    """
+    Create a task interactively, then POST to /tasks.
+    Prompts for essential fields. The agent picks it up immediately
+    via the condition variable notification in the API handler.
+    """
     port = _resolve_port()
 
     try:
@@ -464,6 +519,7 @@ def cmd_tasks_add(args):
 
 
 def cmd_tasks_edit(args):
+    """Edit a task interactively, then PATCH /tasks/{id}."""
     port = _resolve_port()
     task = _agent_get(f"/tasks/{args.id}", port)
 
@@ -508,6 +564,7 @@ def cmd_tasks_edit(args):
 
 
 def cmd_tasks_cancel(args):
+    """Cancel a task via DELETE /tasks/{id}."""
     port = _resolve_port()
     task = _agent_get(f"/tasks/{args.id}", port)
     title = task.get("title", "")
@@ -569,6 +626,7 @@ def _fmt_task_detail(t: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_interject(args):
+    """Send a message to the running agent."""
     port = _resolve_port()
     payload = {"message": args.message}
     repo = getattr(args, "repo", None)
@@ -589,6 +647,7 @@ def cmd_interject(args):
 # ---------------------------------------------------------------------------
 
 def cmd_answer(args):
+    """Answer a pending clarification request from the agent."""
     port = _resolve_port()
 
     pending = _agent_get("/pending", port)
@@ -624,6 +683,7 @@ def cmd_answer(args):
 # ---------------------------------------------------------------------------
 
 def cmd_status(args):
+    """Show current agent status."""
     port = _resolve_port()
     result = _agent_get("/orchestrator/status", port)
     status  = result.get("status", {})
@@ -794,6 +854,10 @@ def cmd_resume(args):
 # ---------------------------------------------------------------------------
 
 def cmd_upgrade(args):
+    """
+    Upgrade MatrixMouse to the latest version.
+    Sends POST /upgrade to the running service.
+    """
     port = _resolve_port()
 
     print("Upgrading MatrixMouse...")
@@ -846,6 +910,7 @@ def cmd_config(args):
 
 
 def cmd_config_get(args):
+    """Print current config values."""
     port = _resolve_port()
     repo = getattr(args, "repo", None)
 
@@ -868,6 +933,14 @@ def cmd_config_get(args):
 
 
 def cmd_config_set(args):
+    """
+    Set a config value via PATCH /config.
+
+    Usage:
+        matrixmouse config set coder qwen2.5-coder:14b
+        matrixmouse config set --repo myrepo coder qwen2.5-coder:7b
+        matrixmouse config set --repo myrepo --commit create_design_docs true
+    """
     port   = _resolve_port()
     repo   = getattr(args, "repo", None)
     commit = getattr(args, "commit", False)
@@ -948,12 +1021,12 @@ def build_parser() -> argparse.ArgumentParser:
     tlist.add_argument("--all", action="store_true", help="Include completed/cancelled.")
 
     tshow = tasks_sub.add_parser("show", help="Show task details.")
-    tshow.add_argument("id", metavar="ID")
+    tshow.add_argument("id", metavar="ID", help="Task ID or prefix.")
 
     tasks_sub.add_parser("add", help="Create a new task interactively.")
 
     tedit = tasks_sub.add_parser("edit", help="Edit a task.")
-    tedit.add_argument("id", metavar="ID")
+    tedit.add_argument("id", metavar="ID", help="Task ID or prefix.")
 
     tcancel = tasks_sub.add_parser("cancel", help="Cancel a task.")
     tcancel.add_argument("id", metavar="ID")
@@ -961,7 +1034,7 @@ def build_parser() -> argparse.ArgumentParser:
     # --- interject ---
     inj = subparsers.add_parser("interject", help="Send a message to the running agent.")
     inj.add_argument("message", metavar="MESSAGE")
-    inj.add_argument("--repo", metavar="NAME")
+    inj.add_argument("--repo", metavar="NAME", help="Scope to a specific repo. Default: workspace-wide.")
     inj.set_defaults(func=cmd_interject)
 
     # --- answer ---
@@ -1016,14 +1089,14 @@ def build_parser() -> argparse.ArgumentParser:
     config_parser.set_defaults(func=cmd_config)
 
     cget = config_sub.add_parser("get", help="Print config values.")
-    cget.add_argument("key", metavar="KEY", nargs="?")
-    cget.add_argument("--repo", metavar="NAME")
+    cget.add_argument("key", metavar="KEY", nargs="?", help="Specific key to read. Omit to show all.")
+    cget.add_argument("--repo", metavar="NAME", help="Read repo-level config instead of workspace.")
 
     cset = config_sub.add_parser("set", help="Set a config value.")
-    cset.add_argument("key",   metavar="KEY")
-    cset.add_argument("value", metavar="VALUE")
-    cset.add_argument("--repo",   metavar="NAME")
-    cset.add_argument("--commit", action="store_true", default=False)
+    cset.add_argument("key",   metavar="KEY", help="Config key to set.")
+    cset.add_argument("value", metavar="VALUE", help="New value.")
+    cset.add_argument("--repo",   metavar="NAME", help="Set in repo-level config instead of workspace.")
+    cset.add_argument("--commit", action="store_true", default=False, help="Write to the repo tree so it is version controlled. Default writes to workspace state dir (untracked).")
 
     return parser
 
