@@ -491,6 +491,7 @@ class Orchestrator:
             "turns":   0,
             "blocked": False,
             "idle":    True,
+            "context_messages": [],
         }
 
     def configure_api(self) -> None:
@@ -601,6 +602,7 @@ class Orchestrator:
                 phase=current_phase.name,
                 model=self._router.model_for_phase(current_phase),
                 turns=0,
+                context_messages=messages,
             )
 
             phase_result = self._run_phase(task, current_phase, messages)
