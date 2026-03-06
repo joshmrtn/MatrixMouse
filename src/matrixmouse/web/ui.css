@@ -74,6 +74,13 @@ html, body {
   flex-shrink: 0;
 }
 
+.logo-short { display: none; }
+
+@media (max-width: 600px) {
+	.logo-full { display: none; }
+	.logo-short { display: inline; }
+}
+
 /* Hamburger — hidden on desktop, shown on mobile */
 #sidebar-toggle {
   display: none;
