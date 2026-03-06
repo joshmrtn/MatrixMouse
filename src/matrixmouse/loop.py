@@ -82,12 +82,18 @@ class AgentLoop:
         context_manager=None,   # callable: (messages, config) -> messages
         stuck_detector=None,    # callable: (tool_name, arguments, had_error) -> bool
         comms=None,             # callable: () -> str | None
+        emit=None,
+        stream: bool = True,    # stream tokens to web UI
+        think: bool = False,    # enable extended thinking
         current_repo: str | None = None,
     ):
         self.model = model
         self.messages = list(messages)  # defensive copy — don't mutate caller's list
         self.config = config
         self.paths = paths
+        self._emit = emit or _noop_emit
+        self.stream = stream
+        self.think = think
         self.current_repo = current_repo
 
         # Subsystem callables — fall back to no-ops until implemented
@@ -156,7 +162,12 @@ class AgentLoop:
             if response.message.thinking:
                 logger.debug("Thinking: %s", response.message.thinking)
             if response.message.content:
-                logger.info("Content: %s", response.message.content)
+                # In streaming mode content was already emitted token by token.
+                # Log at debug level only to avoid duplication.
+                if self.stream:
+                    logger.debug("Content (streamed): %s", response.message.content[:120])
+                else:
+                    logger.info("Content: %s", response.message.content)
 
             # --- Append response to history ---
             self.messages.append(response.message)
@@ -180,18 +191,84 @@ class AgentLoop:
             turns_taken=self._turns,
         )
 
+
     def _chat_completion(self):
         """
-        Send the current message history to Ollama and return the response.
-        Raises on parse errors so the caller can handle them.
+        Dispatch to streaming or batch inference based on self.stream.
+        Always returns an object with .message.content, .message.thinking,
+        and .message.tool_calls so the caller is unchanged either way.
+        """
+        if self.stream:
+            return self._chat_completion_stream()
+        return self._chat_completion_batch()
+
+    def _chat_completion_batch(self):
+        """
+        Non-streaming inference. Returns the ollama response object directly.
+        Used when config disables streaming for this role.
         """
         return ollama.chat(
             model=self.model,
             messages=self.messages,
             stream=False,
             tools=TOOLS,
+            think=self.think,
             keep_alive="2h",
         )
+
+    def _chat_completion_stream(self):
+        """
+        Streaming inference. Accumulates chunks into a synthetic response
+        matching the shape expected by the rest of the loop.
+
+        Content tokens are emitted as 'token' events so the web UI can
+        display output in real time. Thinking tokens are accumulated but
+        not emitted — they are too verbose for the chat view.
+
+        Tool calls may appear in any chunk and are accumulated via extend.
+        Tool dispatch is deferred until the full stream is consumed — never
+        dispatch mid-stream.
+
+        Returns a SimpleNamespace with .message matching the ollama Message
+        shape: .content, .thinking, .tool_calls.
+        """
+        from types import SimpleNamespace
+
+        accumulated_content = ""
+        accumulated_thinking = ""
+        accumulated_tool_calls = []
+
+        stream = ollama.chat(
+            model=self.model,
+            messages=self.messages,
+            stream=True,
+            tools=TOOLS,
+            think=self.think,
+            keep_alive="2h",
+        )
+
+        for chunk in stream:
+            msg = chunk.message
+
+            if msg.thinking:
+                accumulated_thinking += msg.thinking
+
+            if msg.content:
+                accumulated_content += msg.content
+                self._emit("token", {"text": msg.content})
+
+            if msg.tool_calls:
+                accumulated_tool_calls.extend(msg.tool_calls)
+
+        # Assemble a synthetic response in the shape the loop expects
+        message = SimpleNamespace(
+            content=accumulated_content,
+            thinking=accumulated_thinking,
+            tool_calls=accumulated_tool_calls if accumulated_tool_calls else None,
+        )
+        return SimpleNamespace(message=message)
+
+
 
     def _dispatch_tools(self, tool_calls) -> LoopResult | None:
         """
@@ -272,3 +349,7 @@ def _noop_stuck_detector(tool_name: str, arguments: dict, had_error: bool) -> bo
 def _noop_comms() -> None:
     """No interjections until comms.py is implemented."""
     return None
+
+def _noop_emit(event_type: str, data: dict) -> None:
+    """No-op emit until comms is wired in."""
+    pass
