@@ -161,6 +161,136 @@ const EVENT_LABELS = {
   clarification_request: 'clarification',
 };
 
+// ─── Markdown renderer ───────────────────────────────────────────
+// Applies to agent content output only (content + token event types).
+// Handles: fenced code blocks, inline code, headers, bold, italic,
+// unordered lists, ordered lists.
+//
+// Processing uses a placeholder pass so code spans are extracted
+// before any inline rules run — prevents bold/italic rules from
+// firing inside code content.
+//
+// Does NOT apply to tool_result rows — those stay as plain text
+// (see renderToolResult for JSON pretty-printing).
+
+function renderMarkdown(raw) {
+  const placeholders = [];
+
+  // Helper: stash a literal HTML string and return a placeholder token
+  function stash(html) {
+    const token = `\x00${placeholders.length}\x00`;
+    placeholders.push(html);
+    return token;
+  }
+
+  // Helper: restore all placeholders
+  function restore(s) {
+    return s.replace(/\x00(\d+)\x00/g, (_, i) => placeholders[+i]);
+  }
+
+  let s = raw;
+
+  // 1. Fenced code blocks  ```lang\n...\n```
+  //    Extracted before any other processing.
+  s = s.replace(/```([^\n`]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const cls = lang.trim() ? ` class="lang-${esc(lang.trim())}"` : '';
+    return stash(`<pre><code${cls}>${esc(code.trimEnd())}</code></pre>`);
+  });
+
+  // 2. Inline code  `code`
+  s = s.replace(/`([^`\n]+)`/g, (_, code) =>
+    stash(`<code>${esc(code)}</code>`)
+  );
+
+  // Process line by line for block-level elements
+  const lines = s.split('\n');
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 3. ATX headers  # / ## / ###
+    const hm = line.match(/^(#{1,3})\s+(.+)/);
+    if (hm) {
+      const level = hm[1].length;
+      out.push(`<h${level}>${inlinePass(hm[2])}</h${level}>`);
+      i++; continue;
+    }
+
+    // 4. Unordered list block  - item  or  * item
+    if (/^[-*]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(`<li>${inlinePass(lines[i].replace(/^[-*]\s+/, ''))}</li>`);
+        i++;
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      continue;
+    }
+
+    // 5. Ordered list block  1. item
+    if (/^\d+\.\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(`<li>${inlinePass(lines[i].replace(/^\d+\.\s+/, ''))}</li>`);
+        i++;
+      }
+      out.push(`<ol>${items.join('')}</ol>`);
+      continue;
+    }
+
+    // 6. Blank line → paragraph break
+    if (line.trim() === '') {
+      out.push('<br>');
+      i++; continue;
+    }
+
+    // 7. Plain line — run inline rules
+    out.push(inlinePass(line) + '<br>');
+    i++;
+  }
+
+  return restore(out.join(''));
+}
+
+// Inline-level rules: bold, italic (runs on already-placeholder-sanitised text)
+function inlinePass(s) {
+  // Bold  **text**
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic  _text_  (not preceded/followed by another _)
+  s = s.replace(/(?<![_\w])_([^_]+)_(?![_\w])/g, '<em>$1</em>');
+  // Italic  *text*  (single asterisk, not **)
+  s = s.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+  return s;
+}
+
+
+// ─── Tool result renderer ────────────────────────────────────────
+// Keeps output raw/plain but pretty-prints JSON when detected.
+// Returns an HTML-safe string.
+
+function renderToolResult(raw) {
+  const trimmed = raw.trim();
+  if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && trimmed.length > 2) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return `<pre>${esc(JSON.stringify(parsed, null, 2))}</pre>`;
+    } catch (_) {
+      // Not valid JSON — fall through to plain rendering
+    }
+  }
+  return escLines(raw);
+}
+
+
+function renderEvText(type, text) {
+  if (type === 'content')     return renderMarkdown(text);
+  if (type === 'tool_result') return renderToolResult(text);
+  return escLines(text);
+}
+
+
 function addEvent(type, label, text, historical) {
   streamingRow = null;
   const div = document.createElement('div');
@@ -168,7 +298,7 @@ function addEvent(type, label, text, historical) {
   div.innerHTML =
     `<span class="ev-ts">${ts()}</span>` +
     `<span class="ev-lbl">${esc(label || type)}</span>` +
-    `<span class="ev-txt">${escLines(text)}</span>`;
+    `<span class="ev-txt">${renderEvText(type, text)}</span>`;
   const log = $id('log');
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
@@ -184,11 +314,14 @@ function appendToken(text) {
     streamingRow.innerHTML =
       `<span class="ev-ts">${ts()}</span>` +
       `<span class="ev-lbl">agent</span>` +
-      `<span class="ev-txt"></span>`;
+      `<span class="ev-txt" data-raw=""></span>`;
     log.appendChild(streamingRow);
     setInferring(false); // first token means model is responding
   }
-  streamingRow.querySelector('.ev-txt').textContent += text;
+  const txtEl = streamingRow.querySelector('.ev-txt');
+  const raw = (txtEl.dataset.raw || '') + text;
+  txtEl.dataset.raw = raw;
+  txtEl.innerHTML = renderMarkdown(raw);
   log.scrollTop = log.scrollHeight;
 }
 
