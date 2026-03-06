@@ -111,6 +111,48 @@ class Router:
         # DONE and unknown phases — fall back to coder
         return self.config.coder_model
 
+
+    def stream_for_phase(self, phase: Phase) -> bool:
+        """
+        Return whether to stream model output for a given phase.
+
+        Streaming is toggled per role in config. Defaults to True for all
+        roles — disable per-role if a model misbehaves with streaming enabled.
+
+        Args:
+            phase: The current SDLC phase.
+
+        Returns:
+            True if streaming should be enabled for this phase's role.
+        """
+        if phase in (Phase.DESIGN, Phase.CRITIQUE, Phase.REVIEW):
+            return self.config.planner_stream
+        if phase in (Phase.IMPLEMENT, Phase.TEST):
+            return self.config.coder_stream
+        return self.config.coder_stream  # DONE and unknown — safe default
+
+
+    def think_for_phase(self, phase: Phase) -> bool:
+        """
+        Return whether to enable extended thinking for a given phase.
+
+        Thinking is disabled by default for all roles — it consumes
+        significant context budget and is only worthwhile for complex
+        reasoning tasks where the model supports it.
+
+        Args:
+            phase: The current SDLC phase.
+
+        Returns:
+            True if extended thinking should be enabled for this phase's role.
+        """
+        if phase in (Phase.DESIGN, Phase.CRITIQUE, Phase.REVIEW):
+            return self.config.planner_think
+        if phase in (Phase.IMPLEMENT, Phase.TEST):
+            return self.config.coder_think
+        return False  # DONE and unknown — never think
+
+
     def escalate(self, detector: StuckDetector) -> tuple[bool, str | None]:
         """
         Attempt to escalate to the next model tier.
