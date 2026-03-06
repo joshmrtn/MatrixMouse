@@ -590,6 +590,8 @@ class Orchestrator:
         """Drive a single task through all phases in sequence."""
         current_phase = task.phase or Phase.DESIGN
         messages = self._build_initial_messages(task, current_phase)
+        self._update_status(context_messages=messages)
+
 
         # Scope path safety to this task's repos
         reconfigure_for_task(task.repo, self.paths.workspace_root)
@@ -628,6 +630,7 @@ class Orchestrator:
                 messages = self._splice_phase_prompt(
                     result.messages, task, current_phase
                 )
+                self._update_status(context_messages=messages)
 
             elif result.exit_reason == LoopExitReason.ESCALATE:
                 escalated, new_model = self._router.escalate(detector)
@@ -639,6 +642,7 @@ class Orchestrator:
                     messages = self._router.build_handoff(
                         detector, result.messages
                     )
+                    self._update_status(context_messages=messages)
                 else:
                     logger.warning(
                         "Task [%s] at cascade ceiling — human needed.",
