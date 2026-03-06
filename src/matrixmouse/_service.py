@@ -7,25 +7,29 @@ Not a user-facing command — use the matrixmouse CLI for interaction.
 Startup sequence:
     1.  Logging initialised (safe defaults)
     2.  Workspace resolved from environment
-    3.  PID lockfile acquired
-    4.  Configuration loaded (workspace → repo cascade)
-    5.  Logging reconfigured with user preferences
-    6.  .env secrets file loaded
-    7.  Safety module configured (workspace-wide, task-level reconfigured per task)
-    8.  Model availability validated
-    9.  AST graph built for registered repos
-    10. Memory and comms modules configured
-    11. Orchestrator instantiated, API state injected
-    12. Web server started (background thread)
-    13. Orchestrator.run() — blocks forever, woken by condition variable
+    3.  ESTOP lockfile checked — exits cleanly if engaged
+    4.  PID lockfile acquired
+    5.  Configuration loaded (workspace → repo cascade)
+    6.  Logging reconfigured with user preferences
+    7.  .env secrets file loaded
+    8.  Safety module configured (workspace-wide, task-level reconfigured per task)
+    9.  Model availability validated
+    10. AST graph built for registered repos
+    11. Memory and comms modules configured
+    12. Orchestrator instantiated, API state injected
+    13. Web server started (background thread)
+    14. Orchestrator.run() — blocks forever, woken by condition variable
 
 Signals:
-    SIGTERM / SIGINT — clean shutdown: releases PID lock, exits.
+    SIGTERM / SIGINT — clean shutdown: stops loaded ollama models,
+                       releases PID lock, exits with code 0.
+                       systemd will NOT restart on code 0 (Restart=on-failure).
 """
 
 import logging
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +54,12 @@ from matrixmouse.tools import _safety, code_tools  # noqa: side-effects
 
 
 # ---------------------------------------------------------------------------
+# Module-level config reference — set after load_config(), used by shutdown
+# ---------------------------------------------------------------------------
+_config = None
+
+
+# ---------------------------------------------------------------------------
 # PID lockfile
 # ---------------------------------------------------------------------------
 
@@ -66,7 +76,6 @@ def _acquire_pidlock(workspace_root: Path) -> None:
         try:
             existing_pid = int(_pidlock_path.read_text().strip())
             os.kill(existing_pid, 0)
-            # Process is alive — another instance is running
             logger.error(
                 "Another MatrixMouse instance is running (PID %d). "
                 "Exiting. If this is wrong, delete: %s",
@@ -91,6 +100,68 @@ def _release_pidlock() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Ollama model unload — called on every shutdown path
+# ---------------------------------------------------------------------------
+
+def _stop_ollama_models() -> None:
+    """
+    Unload all configured models from Ollama VRAM.
+
+    Uses the config model fields (coder_model, planner_model, etc.) rather
+    than `ollama ps` so we don't accidentally stop unrelated models running
+    on the same machine.
+
+    If config hasn't loaded yet (very early crash), this is a no-op.
+    Each stop is attempted independently — one failure doesn't block others.
+    """
+    if _config is None:
+        logger.debug("Config not loaded — skipping ollama model unload.")
+        return
+
+    # Collect all unique model names across all roles
+    model_fields = [
+        getattr(_config, "coder_model",   None),
+        getattr(_config, "planner_model", None),
+        getattr(_config, "summarizer",    None),
+    ]
+
+    # coder_cascade is a list — flatten it
+    cascade = getattr(_config, "coder_cascade", None) or []
+    if isinstance(cascade, str):
+        cascade = [m.strip() for m in cascade.split(",") if m.strip()]
+    model_fields.extend(cascade)
+
+    models = list(dict.fromkeys(m for m in model_fields if m))  # unique, ordered
+
+    if not models:
+        logger.debug("No models configured — skipping ollama model unload.")
+        return
+
+    logger.info("Unloading %d ollama model(s): %s", len(models), ", ".join(models))
+    for model in models:
+        try:
+            result = subprocess.run(
+                ["ollama", "stop", model],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                logger.info("Unloaded model: %s", model)
+            else:
+                # Not an error — model may not have been loaded
+                logger.debug(
+                    "ollama stop %s: %s", model,
+                    (result.stderr or result.stdout).strip() or "no output"
+                )
+        except FileNotFoundError:
+            logger.debug("ollama not found in PATH — skipping model unload.")
+            break  # No point trying further models
+        except subprocess.TimeoutExpired:
+            logger.warning("ollama stop %s timed out.", model)
+        except Exception as e:
+            logger.warning("Failed to stop model %s: %s", model, e)
+
+
+# ---------------------------------------------------------------------------
 # Secrets loader
 # ---------------------------------------------------------------------------
 
@@ -100,9 +171,6 @@ def _load_env_file(env_file_path: str | None) -> None:
     Skips lines starting with # and blank lines.
     Does not override existing environment variables — systemd-set
     values take precedence.
-
-    Args:
-        env_file_path: Path to the .env file, or None to skip.
     """
     if not env_file_path:
         return
@@ -173,11 +241,9 @@ def _load_registered_repos(workspace_root: Path) -> list[Path]:
     return paths
 
 
-
 # ---------------------------------------------------------------------------
-# ESTOP helper
+# ESTOP check
 # ---------------------------------------------------------------------------
-
 
 def _check_estop(workspace_root: Path) -> None:
     """
@@ -187,9 +253,8 @@ def _check_estop(workspace_root: Path) -> None:
     (Restart=on-failure only restarts on non-zero exit codes).
 
     To resume after an ESTOP:
-        1. Delete the lockfile:  matrixmouse estop reset
-           (or manually: rm <workspace>/.matrixmouse/ESTOP)
-        2. Start the service:    sudo systemctl start matrixmouse
+        1. matrixmouse estop reset
+        2. sudo systemctl start matrixmouse
     """
     estop_path = workspace_root / ".matrixmouse" / "ESTOP"
     if estop_path.exists():
@@ -212,13 +277,14 @@ def _check_estop(workspace_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global _config
     logger.info("MatrixMouse service starting.")
 
     # --- Workspace ---
     workspace_root = _resolve_workspace()
     logger.info("Workspace: %s", workspace_root)
 
-    # --- ESTOP check ---
+    # --- ESTOP check (before PID lock — no cleanup needed if engaged) ---
     _check_estop(workspace_root)
 
     # --- PID lock ---
@@ -227,6 +293,7 @@ def main() -> None:
     # --- Signal handlers ---
     def _shutdown(signum, frame):
         logger.info("Signal %d received. Shutting down.", signum)
+        _stop_ollama_models()
         _release_pidlock()
         sys.exit(0)
 
@@ -234,28 +301,27 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
 
     try:
-        # --- Config (workspace-level, no specific repo yet) ---
-        config = load_config(repo_root=None, workspace_root=workspace_root)
+        # --- Config ---
+        _config = load_config(repo_root=None, workspace_root=workspace_root)
 
         # Expose config to git_tools and other modules that read _loaded_config
         import matrixmouse.config as _cfg_module
-        _cfg_module._loaded_config = config
+        _cfg_module._loaded_config = _config
 
         # --- Logging (reconfigure with user prefs) ---
         setup_logging(
-            log_level=config.log_level,
-            log_to_file=config.log_to_file,
+            log_level=_config.log_level,
+            log_to_file=_config.log_to_file,
             repo_root=workspace_root,
         )
         logger.info("Logging configured: level=%s file=%s",
-                    config.log_level, config.log_to_file)
+                    _config.log_level, _config.log_to_file)
 
         # --- Secrets (.env file) ---
-        env_file = getattr(config, "env_file", None)
+        env_file = getattr(_config, "env_file", None)
         _load_env_file(env_file)
 
         # --- Safety module (workspace-wide baseline) ---
-        # Reconfigured per-task in orchestrator._run_task via reconfigure_for_task()
         registered = _load_registered_repos(workspace_root)
         if registered:
             _safety.configure(
@@ -269,7 +335,7 @@ def main() -> None:
             )
 
         # --- Model validation ---
-        validate_models(config)
+        validate_models(_config)
 
         # --- AST graphs for all registered repos ---
         repo_paths = _load_registered_repos(workspace_root)
@@ -290,11 +356,8 @@ def main() -> None:
                     "AST graph failed for %s: %s. Continuing.", repo_path.name, e
                 )
 
-        # Configure code_tools with the first available graph as default.
-        # Per-task graph switching is a future improvement.
         if graphs:
             code_tools.configure(next(iter(graphs.values())))
-
 
         # --- Build paths object ---
         from matrixmouse.config import MatrixMousePaths
@@ -302,19 +365,17 @@ def main() -> None:
 
         # --- Memory and comms ---
         memory.configure(paths.agent_notes)
-        comms.configure(config)
+        comms.configure(_config)
 
         # --- Orchestrator ---
-        orchestrator = Orchestrator(config=config, paths=paths, graph=graphs)
-
-        # Inject live state into api.py before the server starts
+        orchestrator = Orchestrator(config=_config, paths=paths, graph=graphs)
         orchestrator.configure_api()
 
         # --- Web server (background thread) ---
-        start_server(config, paths)
+        start_server(_config, paths)
         logger.info(
             "Web server started on port %d",
-            getattr(config, "server_port", 8080),
+            getattr(_config, "server_port", 8080),
         )
 
         # --- Run forever ---
@@ -323,6 +384,7 @@ def main() -> None:
 
     except Exception as e:
         logger.exception("Fatal error during startup: %s", e)
+        _stop_ollama_models()
         _release_pidlock()
         sys.exit(1)
 

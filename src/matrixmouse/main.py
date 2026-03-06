@@ -6,7 +6,8 @@ the appropriate command.
 
 All state-mutating commands communicate with the running MatrixMouse
 service via its HTTP API (localhost). Commands that do not require a
-running service (add-repo bootstrap, upgrade) are handled locally.
+running service (add-repo bootstrap, estop reset, upgrade) are handled
+locally when the service is unreachable.
 
 Commands:
     add-repo    Clone or register a repo into the workspace.
@@ -14,6 +15,11 @@ Commands:
     interject   Send a message to the running agent.
     answer      Answer a pending clarification request from the agent.
     status      Show current agent status.
+    stop        Soft stop — halt after the current tool call completes.
+    kill        E-STOP — emergency shutdown, no automatic restart.
+    estop       Manage the E-STOP lockfile (status / reset).
+    pause       Pause orchestration — agent won't start new tasks.
+    resume      Resume orchestration after a pause.
     upgrade     Upgrade MatrixMouse and rebuild the test runner image.
     config      Read or set configuration values.
 
@@ -31,9 +37,6 @@ from pathlib import Path
 
 from matrixmouse.utils.logging_utils import setup_logging
 
-# ---------------------------------------------------------------------------
-# Logging — minimal setup for CLI use. The service has its own logging config.
-# ---------------------------------------------------------------------------
 setup_logging(log_level="WARNING", log_to_file=False, repo_root=Path.cwd())
 logger = logging.getLogger(__name__)
 
@@ -43,12 +46,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _resolve_workspace() -> Path:
-    # 1. Environment variable — set by systemd or the user's shell
     env = os.environ.get("WORKSPACE_PATH")
     if env:
         return Path(env).resolve()
 
-    # 2. Global config — written by install.sh, always present on installed systems
     try:
         import tomllib
         global_cfg = Path("/etc/matrixmouse/config.toml")
@@ -61,7 +62,6 @@ def _resolve_workspace() -> Path:
     except Exception:
         pass
 
-    # 3. Standard install default
     default = Path("/var/lib/matrixmouse-workspace")
     if default.exists():
         return default
@@ -78,14 +78,10 @@ def _resolve_port() -> int:
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers — all CLI state commands go through the API
+# HTTP helpers
 # ---------------------------------------------------------------------------
 
 def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
-    """
-    POST to the running agent's HTTP API.
-    Exits with a clear error if the service is not reachable.
-    """
     import urllib.request
     import urllib.error
 
@@ -100,8 +96,6 @@ def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        # Service is running but returned an error — surface it directly,
-        # do NOT fall through to bootstrap.
         try:
             body = json.loads(e.read())
             detail = body.get("detail", str(e))
@@ -119,7 +113,6 @@ def _agent_post(endpoint: str, payload: dict, port: int) -> dict:
 
 
 def _agent_get(endpoint: str, port: int) -> dict:
-    """GET from the running agent's HTTP API."""
     import urllib.request
     import urllib.error
 
@@ -128,8 +121,6 @@ def _agent_get(endpoint: str, port: int) -> dict:
         with urllib.request.urlopen(url, timeout=10) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        # Service is running but returned an error — surface it directly,
-        # do NOT fall through to bootstrap.
         try:
             body = json.loads(e.read())
             detail = body.get("detail", str(e))
@@ -147,7 +138,6 @@ def _agent_get(endpoint: str, port: int) -> dict:
 
 
 def _agent_patch(endpoint: str, payload: dict, port: int) -> dict:
-    """PATCH to the running agent's HTTP API."""
     import urllib.request
     import urllib.error
 
@@ -170,7 +160,6 @@ def _agent_patch(endpoint: str, payload: dict, port: int) -> dict:
 
 
 def _agent_delete(endpoint: str, port: int) -> dict:
-    """DELETE via the running agent's HTTP API."""
     import urllib.request
     import urllib.error
 
@@ -187,19 +176,11 @@ def _agent_delete(endpoint: str, port: int) -> dict:
         sys.exit(1)
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Mirror helpers
 # ---------------------------------------------------------------------------
 
 def _mirrors_base() -> Path:
-    """
-    Per-user mirror directory under /var/lib/matrixmouse-mirrors.
-    Created on first use, owned by the invoking user, group-readable
-    by matrixmouse via the matrixmouse-mirrors group.
-    """
     import getpass
     base = Path("/var/lib/matrixmouse-mirrors") / getpass.getuser()
     if not base.exists():
@@ -208,23 +189,11 @@ def _mirrors_base() -> Path:
 
 
 def _setup_local_mirror(source: Path, name: str) -> Path:
-    """
-    Create a bare mirror of a local repo in the per-user mirrors directory.
-    Runs as the invoking user — can read the source, owns the mirror.
-
-    Args:
-        source: Absolute path to the user's working repo.
-        name:   Repo name (used as mirror directory name).
-
-    Returns:
-        Path to the bare mirror (e.g. /var/lib/matrixmouse-mirrors/ubuntu/name.git)
-    """
     import subprocess
 
     mirror_path = _mirrors_base() / f"{name}.git"
 
     if mirror_path.exists():
-        # Mirror already exists — update it
         result = subprocess.run(
             ["git", "remote", "update"],
             cwd=mirror_path, capture_output=True, text=True,
@@ -241,12 +210,9 @@ def _setup_local_mirror(source: Path, name: str) -> Path:
         print(f"ERROR: Could not create mirror:\n{result.stderr.strip()}")
         sys.exit(1)
 
-    # Make mirror group-readable so the matrixmouse service can clone from it
-    subprocess.run(["chmod", "-R", "g+rX", str(mirror_path)], check=True)
-
-    # Remove the origin remote from the mirror — the service doesn't need it
-    # and git will try to stat it during ownership checks, causing PermissionError.
-    subprocess.run(
+    import subprocess as sp
+    sp.run(["chmod", "-R", "g+rX", str(mirror_path)], check=True)
+    sp.run(
         ["git", "remote", "remove", "origin"],
         cwd=mirror_path, capture_output=True, text=True,
     )
@@ -255,23 +221,13 @@ def _setup_local_mirror(source: Path, name: str) -> Path:
 
 
 def _add_matrixmouse_remote(working_copy: Path, mirror_path: Path) -> None:
-    """
-    Add or update the 'matrixmouse' remote in the user's working copy
-    to point at the bare mirror.
-
-    After this, the user can:
-        git push matrixmouse          # share work with the agent
-        git fetch matrixmouse         # pull agent commits back
-    """
     import subprocess
 
-    # Check if remote already exists
     result = subprocess.run(
         ["git", "remote", "get-url", "matrixmouse"],
         cwd=working_copy, capture_output=True, text=True,
     )
     if result.returncode == 0:
-        # Remote exists — update URL in case mirror moved
         subprocess.run(
             ["git", "remote", "set-url", "matrixmouse", str(mirror_path)],
             cwd=working_copy, check=True,
@@ -288,29 +244,10 @@ def _add_matrixmouse_remote(working_copy: Path, mirror_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_add_repo(args):
-    """
-    Clone or register a repo into the workspace.
-
-    For remote URLs (https://, git@, etc.):
-        Delegates to POST /repos — service clones directly.
-
-    For local paths:
-        1. CLI creates a bare mirror in /var/lib/matrixmouse-mirrors/<user>/
-        2. CLI calls POST /repos with the file:// mirror URL
-        3. Service clones from the mirror into the workspace
-        4. CLI adds 'matrixmouse' remote to the user's working copy
-
-    The 'matrixmouse' remote allows the user to share work with the agent:
-        git push matrixmouse    # agent sees your latest commits
-        git fetch matrixmouse   # you see the agent's commits
-    """
-    import getpass
-
     port = _resolve_port()
     remote = args.remote
     name = getattr(args, "name", None)
 
-    # Detect local path
     local_path = Path(remote)
     is_local = remote.startswith("/") or remote.startswith("./") or remote.startswith("~/")
     if is_local:
@@ -324,28 +261,19 @@ def cmd_add_repo(args):
         if not name:
             name = local_path.name
 
-        # Step 1 — create bare mirror as invoking user
         print(f"Creating mirror of '{local_path}' ...")
         mirror_path = _setup_local_mirror(local_path, name)
         print(f"Mirror ready at {mirror_path}")
-
-        # Step 2 — ask service to clone from mirror
         api_remote = f"file://{mirror_path}"
     else:
         api_remote = remote
 
-    # Call the API
     try:
-        result = _agent_post(
-            "/repos",
-            {"remote": api_remote, "name": name},
-            port,
-        )
+        result = _agent_post("/repos", {"remote": api_remote, "name": name}, port)
         if result.get("ok"):
             repo = result["repo"]
             print(f"Repo '{repo['name']}' added to workspace.")
 
-            # Step 3 — add matrixmouse remote to working copy (local only)
             if is_local:
                 try:
                     _add_matrixmouse_remote(local_path, mirror_path)
@@ -356,7 +284,6 @@ def cmd_add_repo(args):
                     )
                 except Exception as e:
                     print(f"Warning: could not add matrixmouse remote: {e}")
-                    print(f"Add it manually: git remote add matrixmouse {mirror_path}")
 
             _post_add_instructions(repo["name"], Path(repo["local_path"]))
         else:
@@ -372,9 +299,7 @@ def _infer_repo_name(remote: str) -> str:
     return name[:-4] if name.endswith(".git") else name
 
 
-def _register_repo(
-    workspace_root: Path, name: str, local_path: Path, remote: str
-) -> None:
+def _register_repo(workspace_root: Path, name: str, local_path: Path, remote: str) -> None:
     from datetime import datetime, timezone
 
     repos_file = workspace_root / ".matrixmouse" / "repos.json"
@@ -386,7 +311,7 @@ def _register_repo(
             repos = json.load(f)
 
     if any(r.get("name") == name for r in repos):
-        return  # already registered
+        return
 
     repos.append({
         "name": name,
@@ -411,7 +336,6 @@ def _post_add_instructions(name: str, dest: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_repos_list(args):
-    """List repos registered in the workspace."""
     port = _resolve_port()
     try:
         result = _agent_get("/repos", port)
@@ -424,13 +348,11 @@ def cmd_repos_list(args):
             if r.get("remote"):
                 print(f"  {'':20s}  remote: {r['remote']}")
     except SystemExit:
-        # Service not running — read repos.json directly
         workspace = _resolve_workspace()
         repos_file = workspace / ".matrixmouse" / "repos.json"
         if not repos_file.exists():
             print("No repos registered.")
             return
-        import json
         with open(repos_file) as f:
             repos = json.load(f)
         if not repos:
@@ -460,7 +382,6 @@ def cmd_tasks(args):
 
 
 def cmd_tasks_list(args):
-    """List tasks via GET /tasks."""
     port = _resolve_port()
 
     params = []
@@ -481,26 +402,18 @@ def cmd_tasks_list(args):
 
     for t in tasks:
         print(_fmt_task_row(t))
-
     print(f"\n{result.get('count', len(tasks))} task(s) shown.")
 
 
 def cmd_tasks_show(args):
-    """Show task details via GET /tasks/{id}."""
     port = _resolve_port()
     result = _agent_get(f"/tasks/{args.id}", port)
     print(_fmt_task_detail(result))
 
 
 def cmd_tasks_add(args):
-    """
-    Create a task interactively, then POST to /tasks.
-    Prompts for essential fields. The agent picks it up immediately
-    via the condition variable notification in the API handler.
-    """
     port = _resolve_port()
 
-    # Show known repos as a hint
     try:
         repos_result = _agent_get("/repos", port)
         known_repos = [r.get("name", "") for r in repos_result.get("repos", [])]
@@ -542,32 +455,22 @@ def cmd_tasks_add(args):
     except ValueError:
         urgency = 0.5
 
-    payload = {
-        "title": title,
-        "description": description,
-        "repo": repo,
-        "target_files": target_files,
-        "importance": importance,
-        "urgency": urgency,
-    }
-
-    result = _agent_post("/tasks", payload, port)
+    result = _agent_post("/tasks", {
+        "title": title, "description": description, "repo": repo,
+        "target_files": target_files, "importance": importance, "urgency": urgency,
+    }, port)
     print(f"\nTask created: [{result['id']}] {result['title']}")
     print("The agent will pick it up shortly.")
 
 
 def cmd_tasks_edit(args):
-    """Edit a task interactively, then PATCH /tasks/{id}."""
     port = _resolve_port()
-
-    # Fetch current values to show as defaults
     task = _agent_get(f"/tasks/{args.id}", port)
 
     print(f"Editing task [{task['id']}]: {task.get('title', '')}")
     print("Press Enter to keep current value. Press Ctrl+C to cancel.\n")
 
     updates = {}
-
     EDITABLE = [
         ("title",       "Title",       str),
         ("description", "Description", str),
@@ -605,16 +508,11 @@ def cmd_tasks_edit(args):
 
 
 def cmd_tasks_cancel(args):
-    """Cancel a task via DELETE /tasks/{id}."""
     port = _resolve_port()
-
-    # Fetch title for the confirmation prompt
     task = _agent_get(f"/tasks/{args.id}", port)
     title = task.get("title", "")
 
-    confirm = input(
-        f"Cancel task [{task['id']}] '{title}'? [y/N]: "
-    ).strip().lower()
+    confirm = input(f"Cancel task [{task['id']}] '{title}'? [y/N]: ").strip().lower()
     if confirm != "y":
         print("Aborted.")
         return
@@ -671,7 +569,6 @@ def _fmt_task_detail(t: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_interject(args):
-    """Send a message to the running agent."""
     port = _resolve_port()
     payload = {"message": args.message}
     repo = getattr(args, "repo", None)
@@ -692,7 +589,6 @@ def cmd_interject(args):
 # ---------------------------------------------------------------------------
 
 def cmd_answer(args):
-    """Answer a pending clarification request from the agent."""
     port = _resolve_port()
 
     pending = _agent_get("/pending", port)
@@ -728,9 +624,11 @@ def cmd_answer(args):
 # ---------------------------------------------------------------------------
 
 def cmd_status(args):
-    """Show current agent status."""
     port = _resolve_port()
-    status = _agent_get("/status", port)
+    result = _agent_get("/orchestrator/status", port)
+    status  = result.get("status", {})
+    paused  = result.get("paused", False)
+    stopped = result.get("stopped", False)
 
     task    = status.get("task")  or "—"
     phase   = status.get("phase") or "—"
@@ -739,12 +637,156 @@ def cmd_status(args):
     blocked = status.get("blocked", False)
     idle    = status.get("idle", True)
 
-    print(f"Status:  {'blocked' if blocked else 'idle' if idle else 'running'}")
+    state = "PAUSED" if paused else "STOPPED" if stopped else \
+            "BLOCKED" if blocked else "idle" if idle else "running"
+
+    print(f"Status:  {state}")
     print(f"Task:    {task}")
     print(f"Phase:   {phase}")
     print(f"Model:   {model}")
     if turns is not None:
         print(f"Turns:   {turns}")
+    if paused:
+        print("\nOrchestrator is paused. Use 'matrixmouse resume' to continue.")
+
+
+# ---------------------------------------------------------------------------
+# cmd_stop  (soft stop)
+# ---------------------------------------------------------------------------
+
+def cmd_stop(args):
+    """Request a soft stop — agent halts after the current tool call."""
+    port = _resolve_port()
+    result = _agent_post("/stop", {}, port)
+    if result.get("ok"):
+        print("Soft stop requested. Agent will halt after the current tool call.")
+        print("Use 'matrixmouse status' to confirm it has stopped.")
+    else:
+        print(f"ERROR: {result.get('message', 'unknown error')}")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# cmd_kill  (E-STOP)
+# ---------------------------------------------------------------------------
+
+def cmd_kill(args):
+    """Emergency stop — writes ESTOP lockfile and shuts down immediately."""
+    port = _resolve_port()
+
+    if not getattr(args, "yes", False):
+        print("WARNING: This will immediately shut down MatrixMouse.")
+        print("The agent will stop mid-task and may leave work in an inconsistent state.")
+        print("The service will NOT restart automatically.")
+        print()
+        confirm = input("Type 'ESTOP' to confirm: ").strip()
+        if confirm != "ESTOP":
+            print("Aborted.")
+            return
+
+    try:
+        _agent_post("/kill", {}, port)
+        print("E-STOP engaged. Service is shutting down.")
+    except SystemExit:
+        # Service shut down before responding — expected.
+        print("E-STOP signal sent. Service shut down before responding.")
+
+    print()
+    print("To reset and restart:")
+    print("  matrixmouse estop reset")
+    print("  sudo systemctl start matrixmouse")
+
+
+# ---------------------------------------------------------------------------
+# cmd_estop
+# ---------------------------------------------------------------------------
+
+def cmd_estop(args):
+    subcmd = getattr(args, "estop_subcmd", None)
+    if subcmd == "status":
+        cmd_estop_status(args)
+    elif subcmd == "reset":
+        cmd_estop_reset(args)
+    else:
+        print("Usage: matrixmouse estop <status|reset>")
+        sys.exit(1)
+
+
+def cmd_estop_status(args):
+    """Check whether E-STOP is currently engaged."""
+    port = _resolve_port()
+    try:
+        result = _agent_get("/estop", port)
+    except SystemExit:
+        # Service not running — read lockfile directly (normal post-ESTOP state)
+        workspace = _resolve_workspace()
+        lockfile  = workspace / ".matrixmouse" / "ESTOP"
+        if lockfile.exists():
+            print("E-STOP: ENGAGED (service not running)")
+            try:
+                print(lockfile.read_text())
+            except Exception:
+                pass
+        else:
+            print("E-STOP: not engaged (service not running)")
+        return
+
+    if result.get("engaged"):
+        print("E-STOP: ENGAGED")
+        if result.get("message"):
+            print(result["message"])
+        print()
+        print("To reset: matrixmouse estop reset")
+        print("Then start: sudo systemctl start matrixmouse")
+    else:
+        print("E-STOP: not engaged")
+
+
+def cmd_estop_reset(args):
+    """
+    Remove the ESTOP lockfile so the service can start again.
+    Works whether or not the service is running — reads workspace directly
+    when the service is down (the expected post-ESTOP state).
+    """
+    port = _resolve_port()
+
+    try:
+        result = _agent_post("/estop/reset", {}, port)
+        print(result.get("message", "E-STOP reset."))
+    except SystemExit:
+        # Service is down — direct lockfile removal.
+        workspace = _resolve_workspace()
+        lockfile  = workspace / ".matrixmouse" / "ESTOP"
+        if not lockfile.exists():
+            print("E-STOP was not engaged.")
+            return
+        try:
+            lockfile.unlink()
+            print("E-STOP reset.")
+        except Exception as e:
+            print(f"ERROR: Could not remove lockfile: {e}")
+            print(f"Remove manually: rm {lockfile}")
+            sys.exit(1)
+
+    print("Start the service to resume: sudo systemctl start matrixmouse")
+
+
+# ---------------------------------------------------------------------------
+# cmd_pause / cmd_resume
+# ---------------------------------------------------------------------------
+
+def cmd_pause(args):
+    """Pause the orchestrator — prevent it from starting new tasks."""
+    port = _resolve_port()
+    result = _agent_post("/orchestrator/pause", {}, port)
+    print(result.get("message", "Orchestrator paused."))
+
+
+def cmd_resume(args):
+    """Resume the orchestrator after a pause."""
+    port = _resolve_port()
+    result = _agent_post("/orchestrator/resume", {}, port)
+    print(result.get("message", "Orchestrator resumed."))
 
 
 # ---------------------------------------------------------------------------
@@ -752,13 +794,6 @@ def cmd_status(args):
 # ---------------------------------------------------------------------------
 
 def cmd_upgrade(args):
-    """
-    Upgrade MatrixMouse to the latest version.
-
-    Sends POST /upgrade to the running service, which handles the
-    uv tool upgrade and Docker image rebuild. Then restarts the
-    systemd service so the new version takes effect.
-    """
     port = _resolve_port()
 
     print("Upgrading MatrixMouse...")
@@ -779,7 +814,6 @@ def cmd_upgrade(args):
         print("\nUpgrade encountered errors. Check output above.")
         sys.exit(1)
 
-    # Restart the service so the new version loads
     print("\nRestarting service...")
     import subprocess
     restart = subprocess.run(
@@ -812,7 +846,6 @@ def cmd_config(args):
 
 
 def cmd_config_get(args):
-    """Print current config values."""
     port = _resolve_port()
     repo = getattr(args, "repo", None)
 
@@ -835,21 +868,11 @@ def cmd_config_get(args):
 
 
 def cmd_config_set(args):
-    """
-    Set a config value via PATCH /config.
-
-    Usage:
-        matrixmouse config set coder qwen2.5-coder:14b
-        matrixmouse config set --repo myrepo coder qwen2.5-coder:7b
-        matrixmouse config set --repo myrepo --commit create_design_docs true
-    """
-    port = _resolve_port()
-    repo = getattr(args, "repo", None)
+    port   = _resolve_port()
+    repo   = getattr(args, "repo", None)
     commit = getattr(args, "commit", False)
 
-    # Coerce the value to the most sensible type
     raw = args.value
-    value: str | int | float | bool
     if raw.lower() == "true":
         value = True
     elif raw.lower() == "false":
@@ -903,107 +926,104 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- add-repo ---
     add_parser = subparsers.add_parser(
-        "add-repo",
-        help="Clone or register a repo into the workspace.",
+        "add-repo", help="Clone or register a repo into the workspace.",
     )
-    add_parser.add_argument(
-        "remote",
-        metavar="URL_OR_PATH",
-        help="Git remote URL or local path.",
-    )
-    add_parser.add_argument(
-        "--name",
-        metavar="NAME",
-        help="Override directory name in workspace. Defaults to repo name.",
-    )
+    add_parser.add_argument("remote", metavar="URL_OR_PATH")
+    add_parser.add_argument("--name", metavar="NAME")
     add_parser.set_defaults(func=cmd_add_repo)
 
     # --- repos list ---
     repos_p = subparsers.add_parser("repos", help="Manage registered repos.")
     repos_sub = repos_p.add_subparsers(dest="repos_command")
-    repos_sub.add_parser("list", help="List registered repos.").set_defaults(
-        func=cmd_repos_list
-    )
+    repos_sub.add_parser("list", help="List registered repos.").set_defaults(func=cmd_repos_list)
 
     # --- tasks ---
-    tasks_parser = subparsers.add_parser(
-        "tasks",
-        help="View and manage the task queue.",
-    )
+    tasks_parser = subparsers.add_parser("tasks", help="View and manage the task queue.")
     tasks_sub = tasks_parser.add_subparsers(dest="tasks_subcmd", required=True)
     tasks_parser.set_defaults(func=cmd_tasks)
 
     tlist = tasks_sub.add_parser("list", help="List tasks.")
     tlist.add_argument("--status", help="Filter by status.")
     tlist.add_argument("--repo",   help="Filter by repo name.")
-    tlist.add_argument("--all", action="store_true",
-                       help="Include completed and cancelled tasks.")
+    tlist.add_argument("--all", action="store_true", help="Include completed/cancelled.")
 
     tshow = tasks_sub.add_parser("show", help="Show task details.")
-    tshow.add_argument("id", metavar="ID", help="Task ID or prefix.")
+    tshow.add_argument("id", metavar="ID")
 
     tasks_sub.add_parser("add", help="Create a new task interactively.")
 
     tedit = tasks_sub.add_parser("edit", help="Edit a task.")
-    tedit.add_argument("id", metavar="ID", help="Task ID or prefix.")
+    tedit.add_argument("id", metavar="ID")
 
     tcancel = tasks_sub.add_parser("cancel", help="Cancel a task.")
-    tcancel.add_argument("id", metavar="ID", help="Task ID or prefix.")
+    tcancel.add_argument("id", metavar="ID")
 
     # --- interject ---
-    inj = subparsers.add_parser(
-        "interject",
-        help="Send an unsolicited message to the running agent.",
-    )
+    inj = subparsers.add_parser("interject", help="Send a message to the running agent.")
     inj.add_argument("message", metavar="MESSAGE")
-    inj.add_argument(
-        "--repo", metavar="NAME",
-        help="Scope to a specific repo. Default: workspace-wide.",
-    )
+    inj.add_argument("--repo", metavar="NAME")
     inj.set_defaults(func=cmd_interject)
 
     # --- answer ---
     subparsers.add_parser(
-        "answer",
-        help="Answer a pending clarification request from the agent.",
+        "answer", help="Answer a pending clarification request.",
     ).set_defaults(func=cmd_answer)
 
     # --- status ---
     subparsers.add_parser(
-        "status",
-        help="Show current agent status.",
+        "status", help="Show current agent status.",
     ).set_defaults(func=cmd_status)
+
+    # --- stop ---
+    subparsers.add_parser(
+        "stop", help="Soft stop — halt after the current tool call completes.",
+    ).set_defaults(func=cmd_stop)
+
+    # --- kill ---
+    kill_p = subparsers.add_parser(
+        "kill", help="E-STOP — emergency shutdown, no automatic restart.",
+    )
+    kill_p.add_argument(
+        "--yes", action="store_true", help="Skip confirmation prompt.",
+    )
+    kill_p.set_defaults(func=cmd_kill)
+
+    # --- estop ---
+    estop_parser = subparsers.add_parser("estop", help="Manage the E-STOP lockfile.")
+    estop_sub = estop_parser.add_subparsers(dest="estop_subcmd", required=True)
+    estop_parser.set_defaults(func=cmd_estop)
+    estop_sub.add_parser("status", help="Check E-STOP state.").set_defaults(func=cmd_estop_status)
+    estop_sub.add_parser("reset",  help="Remove ESTOP lockfile so service can start.").set_defaults(func=cmd_estop_reset)
+
+    # --- pause ---
+    subparsers.add_parser(
+        "pause", help="Pause orchestration — agent won't start new tasks.",
+    ).set_defaults(func=cmd_pause)
+
+    # --- resume ---
+    subparsers.add_parser(
+        "resume", help="Resume orchestration after a pause.",
+    ).set_defaults(func=cmd_resume)
 
     # --- upgrade ---
     subparsers.add_parser(
-        "upgrade",
-        help="Upgrade MatrixMouse and restart the service.",
+        "upgrade", help="Upgrade MatrixMouse and restart the service.",
     ).set_defaults(func=cmd_upgrade)
 
     # --- config ---
-    config_parser = subparsers.add_parser(
-        "config",
-        help="Read or set configuration values.",
-    )
+    config_parser = subparsers.add_parser("config", help="Read or set configuration values.")
     config_sub = config_parser.add_subparsers(dest="config_subcmd", required=True)
     config_parser.set_defaults(func=cmd_config)
 
     cget = config_sub.add_parser("get", help="Print config values.")
-    cget.add_argument("key", metavar="KEY", nargs="?",
-                      help="Specific key to read. Omit to show all.")
-    cget.add_argument("--repo", metavar="NAME",
-                      help="Read repo-level config instead of workspace.")
+    cget.add_argument("key", metavar="KEY", nargs="?")
+    cget.add_argument("--repo", metavar="NAME")
 
     cset = config_sub.add_parser("set", help="Set a config value.")
-    cset.add_argument("key",   metavar="KEY",   help="Config key to set.")
-    cset.add_argument("value", metavar="VALUE", help="New value.")
-    cset.add_argument("--repo", metavar="NAME",
-                      help="Set in repo-level config instead of workspace.")
-    cset.add_argument("--commit", action="store_true", default=False, help=(
-        "write to the repo tree (<repo>/.matrixmouse/config.toml) "
-        "so it can be version controlled. "
-        "Default writes to the workspace state dir (untracked)."
-        ))
+    cset.add_argument("key",   metavar="KEY")
+    cset.add_argument("value", metavar="VALUE")
+    cset.add_argument("--repo",   metavar="NAME")
+    cset.add_argument("--commit", action="store_true", default=False)
 
     return parser
 

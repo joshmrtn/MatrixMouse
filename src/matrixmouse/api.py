@@ -15,6 +15,8 @@ Endpoints:
     Repos:   GET/POST /repos, DELETE /repos/{name}
     Agent:   GET /status, GET /pending, POST /interject
     Control: POST /stop, POST /kill, GET /estop, POST /estop/reset
+             POST /orchestrator/pause, POST /orchestrator/resume
+    Context: GET /context
     Config:  GET/PATCH /config, GET/PATCH /config/repos/{name}
     System:  GET /health, POST /upgrade, WS /ws (registered by server.py)
 
@@ -658,6 +660,136 @@ async def estop_reset():
             "E-STOP reset. Start the service manually to resume: "
             "sudo systemctl start matrixmouse"
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator pause / resume
+# ---------------------------------------------------------------------------
+
+# Threading event — set means the orchestrator should not start new tasks.
+# Unlike _stop_requested (which halts mid-loop), pause prevents loop entry.
+# The orchestrator checks is_paused() before picking up the next task.
+_orchestrator_paused = threading.Event()
+
+
+def is_paused() -> bool:
+    """Return True if the orchestrator is paused."""
+    return _orchestrator_paused.is_set()
+
+
+@app.post("/orchestrator/pause")
+async def pause_orchestrator():
+    """
+    Pause the orchestrator — prevent it from starting new tasks.
+
+    Any currently running task continues to completion (or until a soft
+    stop is requested via POST /stop). The orchestrator will not pick up
+    the next task until POST /orchestrator/resume is called.
+
+    Primary use case: post-ESTOP examination. After resetting an ESTOP
+    and restarting the service, call this endpoint before the orchestrator
+    has a chance to pick up the task that was running when ESTOP was engaged.
+    This gives you time to inspect and edit the task before resuming.
+
+    The paused state is in-memory only — it does not persist across service
+    restarts. The service always starts unpaused.
+    """
+    _orchestrator_paused.set()
+    logger.info("Orchestrator paused via API.")
+    return {
+        "ok": True,
+        "paused": True,
+        "message": (
+            "Orchestrator paused. The agent will not start new tasks until "
+            "POST /orchestrator/resume is called."
+        ),
+    }
+
+
+@app.post("/orchestrator/resume")
+async def resume_orchestrator():
+    """
+    Resume the orchestrator after a pause.
+
+    Clears the pause flag and notifies the orchestrator's condition variable
+    so it wakes immediately rather than waiting for the next poll interval.
+    """
+    _orchestrator_paused.clear()
+    notify_task_available()  # wake the orchestrator immediately
+    logger.info("Orchestrator resumed via API.")
+    return {
+        "ok": True,
+        "paused": False,
+        "message": "Orchestrator resumed. The agent will pick up the next task.",
+    }
+
+
+@app.get("/orchestrator/status")
+async def orchestrator_status():
+    """Return pause state and current agent status together."""
+    return {
+        "paused":   is_paused(),
+        "stopped":  is_stop_requested(),
+        "status":   dict(_status),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Context
+# ---------------------------------------------------------------------------
+
+@app.get("/context")
+async def get_context(repo: str | None = None):
+    """
+    Return the current agent context messages for display in the web UI.
+
+    The context is stored in the shared _status dict under the
+    'context_messages' key, which the orchestrator updates each turn
+    before calling the model.
+
+    Args:
+        repo: Optional repo name to scope the context. Currently the
+              orchestrator maintains a single active context — this
+              parameter is reserved for when per-repo context isolation
+              is implemented.
+
+    Response:
+        {
+            "messages": [
+                {"role": "system"|"user"|"assistant", "content": "..."},
+                ...
+            ],
+            "count":        int,
+            "estimated_tokens": int,
+        }
+
+    Returns an empty message list if no task is currently active or if
+    the orchestrator has not yet stored context in the status dict.
+    """
+    messages = _status.get("context_messages") or []
+
+    # Sanitise — ensure each message is a plain dict with role + content.
+    # The orchestrator may store ollama Message objects or raw dicts.
+    safe_messages = []
+    for m in messages:
+        if isinstance(m, dict):
+            role    = m.get("role", "unknown")
+            content = m.get("content") or ""
+        else:
+            role    = getattr(m, "role",    "unknown")
+            content = getattr(m, "content", "") or ""
+        safe_messages.append({"role": role, "content": content})
+
+    # Rough token estimate (same heuristic as context.py)
+    total_chars = sum(len(m["content"]) for m in safe_messages)
+    estimated_tokens = total_chars // 4
+
+    return {
+        "messages":         safe_messages,
+        "count":            len(safe_messages),
+        "estimated_tokens": estimated_tokens,
+        "repo":             repo,
     }
 
 
