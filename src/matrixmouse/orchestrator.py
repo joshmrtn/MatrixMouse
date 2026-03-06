@@ -672,7 +672,7 @@ class Orchestrator:
         self, task: Task, phase: Phase, messages: list
     ) -> PhaseResult:
         from matrixmouse.tools import task_tools
-        from matrixmouse.comms import poll_interjection
+        from matrixmouse.comms import poll_interjection, get_manager
         from matrixmouse import memory
 
         task_tools.configure(self.queue, task.id)
@@ -698,6 +698,7 @@ class Orchestrator:
             paths=repo_paths or self.paths,
             coder_model=self._router.model_for_phase(phase),
         )
+        comms_manager = get_manager()
 
         loop = AgentLoop(
             model=self._router.model_for_phase(phase),
@@ -707,6 +708,9 @@ class Orchestrator:
             context_manager=context_manager,
             stuck_detector=detector,
             comms=scoped_comms,
+            emit=comms_manager.emit if comms_manager else lambda t, d: None,
+            stream=self._router.stream_for_phase(phase),
+            think=self._router.think_for_phase(phase),
             current_repo=current_repo,
         )
 

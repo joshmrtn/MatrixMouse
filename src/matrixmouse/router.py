@@ -12,14 +12,14 @@ Responsibilities:
     - Batching tasks of the same type to amortise model load time
 
 Role-to-model mapping:
-    DESIGN, CRITIQUE, REVIEW  → config.planner (general reasoning)
+    DESIGN, CRITIQUE, REVIEW  → config.planner_model (general reasoning)
     IMPLEMENT                 → coder cascade (coding-specialised)
-    TEST                      → config.coder (coding, no cascade)
-    summarization             → config.summarizer (internal, not agent-facing)
+    TEST                      → config.coder_model (coding, no cascade)
+    summarization             → config.summarizer_model (internal, not agent-facing)
 
 Cascade ladder:
     Defined by config.coder_cascade (list, smallest to largest).
-    If empty, config.coder is used as a single-tier ladder with no escalation.
+    If empty, config.coder_model is used as a single-tier ladder with no escalation.
 
 Do not add inference logic or tool dispatch here.
 """
@@ -76,7 +76,7 @@ class Router:
 
         logger.info(
             "Router initialised. Cascade: %s. Planner: %s. Summarizer: %s.",
-            self._cascade, config.planner, config.summarizer
+            self._cascade, config.planner_model, config.summarizer_model
         )
 
     # ------------------------------------------------------------------
@@ -100,16 +100,58 @@ class Router:
             Model name string suitable for passing to ollama.chat().
         """
         if phase in (Phase.DESIGN, Phase.CRITIQUE, Phase.REVIEW):
-            return self.config.planner
+            return self.config.planner_model
 
         if phase == Phase.IMPLEMENT:
             return self._current_model()
 
         if phase == Phase.TEST:
-            return self.config.coder
+            return self.config.coder_model
 
         # DONE and unknown phases — fall back to coder
-        return self.config.coder
+        return self.config.coder_model
+
+
+    def stream_for_phase(self, phase: Phase) -> bool:
+        """
+        Return whether to stream model output for a given phase.
+
+        Streaming is toggled per role in config. Defaults to True for all
+        roles — disable per-role if a model misbehaves with streaming enabled.
+
+        Args:
+            phase: The current SDLC phase.
+
+        Returns:
+            True if streaming should be enabled for this phase's role.
+        """
+        if phase in (Phase.DESIGN, Phase.CRITIQUE, Phase.REVIEW):
+            return self.config.planner_stream
+        if phase in (Phase.IMPLEMENT, Phase.TEST):
+            return self.config.coder_stream
+        return self.config.coder_stream  # DONE and unknown — safe default
+
+
+    def think_for_phase(self, phase: Phase) -> bool:
+        """
+        Return whether to enable extended thinking for a given phase.
+
+        Thinking is disabled by default for all roles — it consumes
+        significant context budget and is only worthwhile for complex
+        reasoning tasks where the model supports it.
+
+        Args:
+            phase: The current SDLC phase.
+
+        Returns:
+            True if extended thinking should be enabled for this phase's role.
+        """
+        if phase in (Phase.DESIGN, Phase.CRITIQUE, Phase.REVIEW):
+            return self.config.planner_think
+        if phase in (Phase.IMPLEMENT, Phase.TEST):
+            return self.config.coder_think
+        return False  # DONE and unknown — never think
+
 
     def escalate(self, detector: StuckDetector) -> tuple[bool, str | None]:
         """
@@ -242,7 +284,7 @@ class Router:
 
         If config.coder_cascade is set, use it directly.
         Otherwise, fall back to a single-tier ladder containing only
-        config.coder — escalation is effectively disabled.
+        config.coder_model — escalation is effectively disabled.
         """
         if self.config.coder_cascade:
             cascade = list(self.config.coder_cascade)
@@ -252,9 +294,9 @@ class Router:
         logger.info(
             "No coder_cascade configured. Using single-tier ladder: [%s]. "
             "Set coder_cascade in config.toml to enable escalation.",
-            self.config.coder
+            self.config.coder_model
         )
-        return [self.config.coder]
+        return [self.config.coder_model]
 
     def _current_model(self) -> str:
         """Return the model at the current cascade tier."""

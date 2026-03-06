@@ -188,7 +188,7 @@
             </div>
             <div class="setting-row">
               <div class="setting-key">Summarizer Model<small>Context compression</small></div>
-              <div class="setting-val"><input type="text" data-key="summarizer" placeholder="e.g. qwen3.5:4b"></div>
+              <div class="setting-val"><input type="text" data-key="summarizer_model" placeholder="e.g. qwen3.5:4b"></div>
             </div>
             <div class="setting-row">
               <div class="setting-key">Coder Cascade<small>Escalation ladder (comma-separated)</small></div>
@@ -196,27 +196,45 @@
             </div>
           </div>
           <div class="settings-group">
-            <div class="settings-group-title">Thinking Control</div>
+            <div class="settings-group-title">Thinking and Streaming Control</div>
             <p style="font-size:11px;color:var(--text3);margin-bottom:10px;line-height:1.6;">
               Extended thinking allows models to reason before responding but can
               consume large amounts of context on simple tasks. Disable per-role if needed.
+	      Streaming lets you watch the tokens stream in live. Streaming may cause issues 
+	      with tool-calling. Disable per-role if needed.
             </p>
             <div class="setting-row">
               <div class="setting-key">Coder Think<small>Extended thinking for coder</small></div>
               <div class="setting-val"><input type="checkbox" data-key="coder_think"></div>
             </div>
+	    <div class="setting-row">
+	      <div class="setting-key">Coder Stream<small>Stream tokens live to web UI</small></div>
+	      <div class="setting-val"><input type="checkbox" data-key="coder_stream"></div>
+	    </div>
             <div class="setting-row">
               <div class="setting-key">Planner Think<small>Extended thinking for planner</small></div>
               <div class="setting-val"><input type="checkbox" data-key="planner_think"></div>
             </div>
+	    <div class="setting-row">
+	      <div class="setting-key">Planner Stream<small>Stream tokens live to web UI</small></div>
+	      <div class="setting-val"><input type="checkbox" data-key="planner_stream"></div>
+	    </div>
             <div class="setting-row">
               <div class="setting-key">Judge Think<small>Extended thinking for judge/critique</small></div>
               <div class="setting-val"><input type="checkbox" data-key="judge_think"></div>
             </div>
+	    <div class="setting-row">
+	      <div class="setting-key">Judge Stream<small>Stream tokens live to web UI</small></div>
+	      <div class="setting-val"><input type="checkbox" data-key="judge_stream"></div>
+	    </div>
             <div class="setting-row">
               <div class="setting-key">Summarizer Think<small>Extended thinking for summarizer</small></div>
               <div class="setting-val"><input type="checkbox" data-key="summarizer_think"></div>
             </div>
+	    <div class="setting-row">
+  	      <div class="setting-key">Summarizer Stream<small>Usually off — summaries don't need live display</small></div>
+  	      <div class="setting-val"><input type="checkbox" data-key="summarizer_stream"></div>
+	    </div>
           </div>
         </div>
 

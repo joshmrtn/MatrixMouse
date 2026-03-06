@@ -281,10 +281,10 @@ def validate_models(config: MatrixMouseConfig) -> None:
     Called once at service startup before the orchestrator starts.
     """
     models_to_check = {
-        "coder":      (config.coder,      True),
-        "planner":    (config.planner,    True),
-        "judge":      (config.judge,      True),
-        "summarizer": (config.summarizer, False),
+        "coder":      (config.coder_model,      True),
+        "planner":    (config.planner_model,    True),
+        "judge":      (config.judge_model,      True),
+        "summarizer": (config.summarizer_model, False),
     }
     for role, (model_name, requires_tools) in models_to_check.items():
         _ensure_model_available(model_name)

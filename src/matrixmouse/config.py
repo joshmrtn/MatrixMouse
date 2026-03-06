@@ -49,19 +49,19 @@ class MatrixMouseConfig(BaseSettings):
     )
 
     # --- Models ---
-    coder: str = Field(
+    coder_model: str = Field(
         default="qwen3.5:4b",
         description="Model for code generation and implementation tasks.",
     )
-    planner: str = Field(
+    planner_model: str = Field(
         default="qwen3.5:4b",
         description="Model for planning, design, and architectural decisions.",
     )
-    judge: str = Field(
+    judge_model: str = Field(
         default="qwen3.5:4b",
         description="Model for critique, review, and stuck detection.",
     )
-    summarizer: str = Field(
+    summarizer_model: str = Field(
         default="qwen3.5:4b",
         description="Model for context summarisation. Should be small and fast.",
     )
@@ -74,6 +74,40 @@ class MatrixMouseConfig(BaseSettings):
             "If only one entry, no escalation occurs. "
             "Example: ['qwen2.5-coder:7b', 'qwen2.5-coder:14b', 'qwen2.5-coder:30b']"
         ),
+    )
+
+    # --- Thinking and Streaming toggles ---
+    coder_think: bool = Field(
+        default=False,
+        description="Enable extended thinking for the coder model. Increases quality but uses more context.",
+    )
+    planner_think: bool = Field(
+        default=False,
+        description="Enable extended thinking for the planner model.",
+    )
+    judge_think: bool = Field(
+        default=False,
+        description="Enable extended thinking for the judge model.",
+    )
+    summarizer_think: bool = Field(
+        default=False,
+        description="Enable extended thinking for the summarizer model.",
+    )
+    coder_stream: bool = Field(
+        default=True,
+        description="Stream coder model output token by token. Disable if the model misbehaves with streaming.",
+    )
+    planner_stream: bool = Field(
+        default=True,
+        description="Stream planner model output token by token.",
+    )
+    judge_stream: bool = Field(
+        default=True,
+        description="Stream judge model output token by token.",
+    )
+    summarizer_stream: bool = Field(
+        default=True,
+        description="Stream summarizer model output token by token. Usually False — summaries don't need live display.",
     )
 
     # --- Logging ---
