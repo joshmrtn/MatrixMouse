@@ -438,6 +438,8 @@ html, body {
 .ev.error         .ev-lbl { color: var(--red); }
 .ev.you           .ev-lbl { color: var(--blue); }
 .ev.system        .ev-lbl { color: var(--text3); }
+.ev.thinking .ev-lbl { color: var(--purple); font-style: italic; }
+.ev.thinking .ev-txt { color: var(--text3); font-style: italic; }
 
 .ev.token .ev-txt { color: var(--purple); }
 

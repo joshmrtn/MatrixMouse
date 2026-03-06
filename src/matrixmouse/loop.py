@@ -252,6 +252,7 @@ class AgentLoop:
 
             if msg.thinking:
                 accumulated_thinking += msg.thinking
+                self._emit("thinking", {"text": msg.thinking})
 
             if msg.content:
                 accumulated_content += msg.content

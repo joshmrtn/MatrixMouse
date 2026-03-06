@@ -8,6 +8,7 @@ let settingsTarget = 'workspace';
 let repos          = [];
 let pendingSettingsChanges = {};
 let streamingRow   = null;  // current token accumulation row
+let thinkingRow    = null;  // current thinking accumulation row
 let inferring      = false; // true while waiting for model response
 
 // ─── Utilities ────────────────────────────────────────────────────
@@ -159,6 +160,7 @@ const EVENT_LABELS = {
   you:                   'you',
   system:                'sys',
   clarification_request: 'clarification',
+  thinking:              'thinking',
 };
 
 // ─── Markdown renderer ───────────────────────────────────────────
@@ -292,6 +294,7 @@ function renderEvText(type, text) {
 
 
 function addEvent(type, label, text, historical) {
+  thinkingRow = null;
   streamingRow = null;
   const div = document.createElement('div');
   div.className = 'ev ' + type + (historical ? ' historical' : '');
@@ -305,7 +308,26 @@ function addEvent(type, label, text, historical) {
   return div;
 }
 
-// Streaming token accumulation — ready for loop.py streaming support
+// Streaming thinking/token accumulation
+
+function appendThinking(text) {
+    const log = $id('log');
+    if (!thinkingRow) {
+        thinkingRow = document.createElement('div');
+        thinkingRow.className = 'ev thinking';
+        thinkingRow.innerHTML =
+            `<span class="ev-ts">${ts()}</span>` +
+            `<span class="ev-lbl">thinking</span>` +
+            `<span class="ev-txt" data-raw=""></span>`;
+        log.appendChild(thinkingRow);
+    }
+    const txtEl = thinkingRow.querySelector('.ev-txt');
+    const raw = (txtEl.dataset.raw || '') + text;
+    txtEl.dataset.raw = raw;
+    txtEl.innerHTML = escLines(raw);  // plain text, not markdown
+    log.scrollTop = log.scrollHeight;
+}
+
 function appendToken(text) {
   const log = $id('log');
   if (!streamingRow) {
@@ -766,6 +788,11 @@ function connect() {
 
     if (msg.type === 'clarification_request') {
       showClarification(msg.data.question || JSON.stringify(msg.data));
+      return;
+    }
+
+    if (msg.type === 'thinking') {
+      appendThinking(msg.data.text || '');
       return;
     }
 
