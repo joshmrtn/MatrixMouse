@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import sys
+import subprocess
 from pathlib import Path
 
 from matrixmouse.utils.logging_utils import setup_logging
@@ -774,27 +775,20 @@ def cmd_estop(args):
 
 def cmd_estop_status(args):
     """Check whether E-STOP is currently engaged."""
-    port = _resolve_port()
-    try:
-        result = _agent_get("/estop", port)
-    except SystemExit:
-        # Service not running — read lockfile directly (normal post-ESTOP state)
-        workspace = _resolve_workspace()
-        lockfile  = workspace / ".matrixmouse" / "ESTOP"
-        if lockfile.exists():
-            print("E-STOP: ENGAGED (service not running)")
-            try:
-                print(lockfile.read_text())
-            except Exception:
-                pass
-        else:
-            print("E-STOP: not engaged (service not running)")
-        return
-
-    if result.get("engaged"):
+    workspace = _resolve_workspace()
+    lockfile  = workspace / ".matrixmouse" / "ESTOP"
+    if _sudo_needs_password():
+        print("Checking E-STOP requires sudo privileges.")
+    exists = subprocess.run(
+        ["sudo", "test", "-f", str(lockfile)],
+        capture_output=True,
+    ).returncode == 0
+    if exists:
         print("E-STOP: ENGAGED")
-        if result.get("message"):
-            print(result["message"])
+        content = subprocess.run(["sudo", "cat", str(lockfile)],
+                                 capture_output=True, text=True)
+        if content.returncode == 0:
+            print(content.stdout.strip())
         print()
         print("To reset: matrixmouse estop reset")
         print("Then start: sudo systemctl start matrixmouse")
@@ -808,26 +802,26 @@ def cmd_estop_reset(args):
     Works whether or not the service is running — reads workspace directly
     when the service is down (the expected post-ESTOP state).
     """
-    port = _resolve_port()
-
-    try:
-        result = _agent_post("/estop/reset", {}, port)
-        print(result.get("message", "E-STOP reset."))
-    except SystemExit:
-        # Service is down — direct lockfile removal.
-        workspace = _resolve_workspace()
-        lockfile  = workspace / ".matrixmouse" / "ESTOP"
-        if not lockfile.exists():
-            print("E-STOP was not engaged.")
-            return
-        try:
-            lockfile.unlink()
-            print("E-STOP reset.")
-        except Exception as e:
-            print(f"ERROR: Could not remove lockfile: {e}")
-            print(f"Remove manually: rm {lockfile}")
-            sys.exit(1)
-
+    workspace = _resolve_workspace()
+    lockfile  = workspace / ".matrixmouse" / "ESTOP"
+    if _sudo_needs_password():
+        print("Resetting E-STOP requires sudo privileges.")
+    exists = subprocess.run(
+        ["sudo", "test", "-f", str(lockfile)],
+        capture_output=True,
+    ).returncode == 0
+    if not exists:
+        print("E-STOP is not engaged.")
+        return
+    result = subprocess.run(
+        ["sudo", "rm", str(lockfile)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: {result.stderr.strip() or 'Could not remove lockfile.'}")
+        print(f"Remove manually: sudo rm {lockfile}")
+        sys.exit(1)
+    print("E-STOP reset.")
     print("Start the service to resume: sudo systemctl start matrixmouse")
 
 
@@ -848,6 +842,16 @@ def cmd_resume(args):
     result = _agent_post("/orchestrator/resume", {}, port)
     print(result.get("message", "Orchestrator resumed."))
 
+
+# ---------------------------------------------------------------------------
+# sudoers helper
+# ---------------------------------------------------------------------------
+
+def _sudo_needs_password() -> bool:
+    """Return True if sudo will prompt for a password."""
+    return subprocess.run(
+            ["sudo", "-n", "true"], capture_output=True
+            ).returncode != 0
 
 # ---------------------------------------------------------------------------
 # cmd_upgrade
@@ -880,6 +884,8 @@ def cmd_upgrade(args):
 
     print("\nRestarting service...")
     import subprocess
+    if _sudo_needs_password():
+        print("Restarting the service requires sudo privileges.")
     restart = subprocess.run(
         ["sudo", "systemctl", "restart", "matrixmouse"],
         capture_output=True, text=True,
