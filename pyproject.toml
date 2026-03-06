@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "matrixmouse"
-version = "0.0.2"
+version = "0.1.0"
 authors = [
   { name="Josh Martin", email="" },
 ]
@@ -40,3 +40,4 @@ dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-v --tb=short"
