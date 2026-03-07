@@ -7,8 +7,8 @@ Config is loaded from five sources in order of increasing priority:
     1. Field defaults defined in MatrixMouseConfig below
     2. Global config          — /etc/matrixmouse/config.toml
     3. Workspace config       — <workspace_root>/.matrixmouse/config.toml
-    4. Repo-local, untracked  — <workspace_root>/.matrixmouse/<repo>/config.toml
-    5. Repo-local, tracked    — <repo_root>/.matrixmouse/config.toml
+    4. Repo-local, tracked    — <repo_root>/.matrixmouse/config.toml
+    5. Repo-local, untracked  — <workspace_root>/.matrixmouse/<repo>/config.toml
 
 Each source overwrites keys from the previous. Keys not present in a
 source are inherited unchanged.
@@ -208,8 +208,8 @@ def load_config(
         1. Field defaults
         2. /etc/matrixmouse/config.toml                         global
         3. <workspace>/.matrixmouse/config.toml                 workspace-wide
-        4. <workspace>/.matrixmouse/<repo_name>/config.toml     repo-local, untracked
-        5. <repo_root>/.matrixmouse/config.toml                 repo-local, tracked
+        4. <repo_root>/.matrixmouse/config.toml                 repo-local, tracked
+        5. <workspace>/.matrixmouse/<repo_name>/config.toml     repo-local, untracked
 
     repo_root may be None at service startup (workspace-level context).
     Layers 4 and 5 are both skipped in that case.
@@ -239,16 +239,17 @@ def load_config(
         # Layer 3 — workspace-wide
         config_paths.append(workspace_root / ".matrixmouse" / "config.toml")
 
-        if repo_root is not None:
-            # Layer 4 — repo-local, untracked (workspace state dir)
-            repo_name = Path(repo_root).resolve().name
-            config_paths.append(
-                workspace_root / ".matrixmouse" / repo_name / "config.toml"
-            )
-
     if repo_root is not None:
-        # Layer 5 — repo-local, tracked (inside the git tree)
+        # Layer 4 — repo-local, tracked (inside the git tree)
         config_paths.append(repo_root / ".matrixmouse" / "config.toml")
+
+
+    if workspace_root is not None and repo_root is not None:
+        # Layer 5 — repo-local, untracked (workspace state dir)
+        repo_name = Path(repo_root).resolve().name
+        config_paths.append(
+            workspace_root / ".matrixmouse" / repo_name / "config.toml"
+        )
 
     for config_path in config_paths:
         if config_path.exists():
