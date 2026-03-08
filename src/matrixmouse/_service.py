@@ -371,6 +371,16 @@ def main() -> None:
         orchestrator = Orchestrator(config=_config, paths=paths, graph=graphs)
         orchestrator.configure_api()
 
+        # --- Pause on startup ---
+        start_paused = _config.start_paused or os.environ.get("MATRIXMOUSE_START_PAUSED") == "1"
+        if start_paused:
+            from matrixmouse.api import pause_orchestrator
+            pause_orchestrator()
+            logger.info(
+                "Orchestrator started in paused state. "
+                "Resume via: matrixmouse resume"
+            )
+
         # --- Web server (background thread) ---
         start_server(_config, paths)
         logger.info(

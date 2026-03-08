@@ -693,7 +693,8 @@ async def pause_orchestrator():
     This gives you time to inspect and edit the task before resuming.
 
     The paused state is in-memory only — it does not persist across service
-    restarts. The service always starts unpaused.
+    restarts unless start_paused is set in config or the MATRIXMOUSE_START_PAUSED 
+    environment variable is set.
     """
     _orchestrator_paused.set()
     logger.info("Orchestrator paused via API.")

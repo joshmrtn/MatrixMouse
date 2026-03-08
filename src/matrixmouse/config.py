@@ -190,6 +190,16 @@ class MatrixMouseConfig(BaseSettings):
         description="Maximum priority bonus from aging (caps at this value).",
     )
 
+    # --- Start Paused (e.g., after an E-STOP) --- 
+    start_paused: bool = Field(
+        default=False,
+        description=(
+            "Start the orchestrator in a paused state. "
+            "Tasks will not be picked up until manually resumed via CLI or web UI. "
+            "Useful after an E-STOP reset to inspect state before resuming."
+        ),
+    )
+
     model_config = {"extra": "ignore"}  # silently ignore unknown keys from TOML
 
 
