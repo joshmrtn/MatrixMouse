@@ -173,6 +173,10 @@ class MatrixMouseConfig(BaseSettings):
         default="matrixmouse",
         description="ntfy topic name.",
     )
+    web_ui_url: str = Field(
+        default="",
+        description="Public URL of the MatrixMouse web UI, e.g. https://mm.example.com. Used to add a link to ntfy notifications.",
+    )
 
     # --- Server ---
     server_port: int = Field(

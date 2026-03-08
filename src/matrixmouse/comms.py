@@ -207,6 +207,9 @@ class CommsManager:
         """
         url = getattr(self.config, "ntfy_url", None)
         topic = getattr(self.config, "ntfy_topic", "matrixmouse")
+        web_ui = getattr(self.config, "web_ui_url", "")
+        username = os.environ.get("NTFY_USERNAME", "")
+        password = os.environ.get("NTFY_PASSWORD", "")
 
         if not url:
             logger.debug("ntfy not configured. Skipping notification: %s", title)
@@ -214,15 +217,26 @@ class CommsManager:
 
         endpoint = f"{url.rstrip('/')}/{topic}"
 
+        # Append web UI link to message body if configured
+        if web_ui:
+            message = f"{message}\n\n{web_ui.rstrip('/')}"
+
+        headers = {
+                "Title": title,
+                "Priority": priority,
+                "Tags": "robot",
+                }
+        if web_ui:
+            headers["Actions"] = f"view, Open Web UI, {web_ui.rstrip('/')}"
+
+        auth = (username, password) if username else None
+
         try:
             response = requests.post(
                 endpoint,
                 data=message.encode("utf-8"),
-                headers={
-                    "Title": title,
-                    "Priority": priority,
-                    "Tags": "robot",
-                },
+                headers=headers,
+                auth=auth,
                 timeout=5,
             )
             if response.status_code == 200:

@@ -177,7 +177,7 @@ def _load_env_file(env_file_path: str | None) -> None:
 
     env_path = Path(env_file_path)
     if not env_path.exists():
-        logger.warning("env_file configured but not found: %s", env_path)
+        logger.warning("Environment file not found: %s", env_path)
         return
 
     loaded = 0
@@ -317,9 +317,9 @@ def main() -> None:
         logger.info("Logging configured: level=%s file=%s",
                     _config.log_level, _config.log_to_file)
 
-        # --- Secrets (.env file) ---
-        env_file = getattr(_config, "env_file", None)
-        _load_env_file(env_file)
+        # --- Secrets ---
+        _load_env_file("/etc/matrixmouse/secrets/github_token")
+        _load_env_file("/etc/matrixmouse/secrets/ntfy")
 
         # --- Safety module (workspace-wide baseline) ---
         registered = _load_registered_repos(workspace_root)
