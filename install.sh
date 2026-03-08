@@ -193,12 +193,13 @@ success "matrixmouse:         $(command -v matrixmouse)"
 success "matrixmouse-service: $(command -v matrixmouse-service)"
 
 # ---------------------------------------------------------------------------
-# Step 3 — System user
+# Step 3 — System user and Shared Group
 # ---------------------------------------------------------------------------
 
 header "Step 3 — System user"
 
 MM_USER="matrixmouse"
+MM_GROUP="matrixmouse"
 
 if id "$MM_USER" &>/dev/null; then
     success "System user '$MM_USER' already exists"
@@ -229,6 +230,14 @@ cd /tmp
 sudo -u matrixmouse git config --global safe.directory '*'
 success "git safe.directory configured for $MM_USER"
 
+# Create the shared group if it doesn't exist
+if ! getent group "$MM_GROUP" &>/dev/null; then
+    sudo groupadd --system "$MM_GROUP"
+    success "Created group: $MM_GROUP"
+else
+    success "Group $MM_GROUP already exists"
+fi
+
 
 # ---------------------------------------------------------------------------
 # Step 4 — /etc/matrixmouse  (config + secrets)
@@ -247,7 +256,7 @@ if [ -d "$ETC_DIR" ]; then
     success "/etc/matrixmouse already exists — skipping directory creation"
 else
     sudo mkdir -p "$ETC_DIR"
-    sudo chown "$MM_USER:$MM_USER" "$ETC_DIR"
+    sudo chown "$MM_USER:$MM_GROUP" "$ETC_DIR"
     sudo chmod 750 "$ETC_DIR"
     success "Created $ETC_DIR"
 fi
@@ -260,6 +269,43 @@ else
     sudo chmod 700 "$SECRETS_DIR"
     success "Created $SECRETS_DIR"
 fi
+
+# Global config — readable by matrixmouse group (regular user can read server_port etc.)
+GLOBAL_CONFIG="$ETC_DIR/config.toml"
+
+if sudo test -f "$GLOBAL_CONFIG"; then
+    success "$GLOBAL_CONFIG already exists — skipping"
+else
+    sudo tee "$GLOBAL_CONFIG" > /dev/null << 'EOF'
+# MatrixMouse global configuration
+# Values here apply to all workspaces. Workspace and repo configs override these.
+# Uncomment and edit lines to activate settings.
+# Full reference: https://github.com/joshmrtn/MatrixMouse
+
+# --- Server ---
+# server_port = 8080
+
+# --- Models ---
+# coder_model     = "qwen3.5:4b"
+# planner_model   = "qwen3.5:4b"
+# judge_model     = "qwen3.5:4b"
+# summarizer_model = "qwen3.5:4b"
+# coder_cascade   = ["qwen3.5:4b", "qwen3.5:9b", "qwen3.5:27b"]
+
+# --- Logging ---
+# log_level   = "INFO"
+# log_to_file = false
+
+# --- Comms ---
+# ntfy_url   = ""
+# ntfy_topic = "matrixmouse"
+# web_ui_url = ""
+EOF
+    sudo chown "$MM_USER:$MM_GROUP" "$GLOBAL_CONFIG"
+    sudo chmod 640 "$GLOBAL_CONFIG"
+    success "Written $GLOBAL_CONFIG"
+fi
+
 
 # ---------------------------------------------------------------------------
 # Step 5 — Agent credentials
@@ -351,33 +397,23 @@ success "Workspace: $WORKSPACE_PATH (owned by $MM_USER)"
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — matrixmouse-mirrors group and directory
+# Step 7 — matrixmouse group and mirror directory
 # ---------------------------------------------------------------------------
 
 header "Step 7 — Mirror directory"
 
 MIRRORS_DIR="/var/lib/matrixmouse-mirrors"
-MIRRORS_GROUP="matrixmouse-mirrors"
-
-# Create the shared group if it doesn't exist
-if ! getent group "$MIRRORS_GROUP" &>/dev/null; then
-    sudo groupadd --system "$MIRRORS_GROUP"
-    success "Created group: $MIRRORS_GROUP"
-else
-    success "Group $MIRRORS_GROUP already exists"
-fi
-
 
 # Add both users to the group
-sudo usermod -aG "$MIRRORS_GROUP" "$MM_USER"
-sudo usermod -aG "$MIRRORS_GROUP" "$INVOKING_USER"
-success "Added $MM_USER and $INVOKING_USER to $MIRRORS_GROUP"
+sudo usermod -aG "$MM_GROUP" "$MM_USER"
+sudo usermod -aG "$MM_GROUP" "$INVOKING_USER"
+success "Added $MM_USER and $INVOKING_USER to $MM_GROUP"
 
 # Check group membership — requires re-login to take effect
 NEEDS_RELOGIN=false
 
-if ! groups "$INVOKING_USER" | grep -qw "$MIRRORS_GROUP"; then
-    warn "$INVOKING_USER was just added to $MIRRORS_GROUP."
+if ! groups "$INVOKING_USER" | grep -qw "$MM_GROUP"; then
+    warn "$INVOKING_USER was just added to $MM_GROUP."
     NEEDS_RELOGIN=true
 fi
 
@@ -393,10 +429,9 @@ if [ "$NEEDS_RELOGIN" = true ]; then
 fi
 
 # Create the mirrors root with setgid so subdirs inherit the group
-sudo install -d -m 2775 -g "$MIRRORS_GROUP" "$MIRRORS_DIR"
+sudo install -d -m 2775 -g "$MM_GROUP" "$MIRRORS_DIR"
 success "Mirror directory ready at $MIRRORS_DIR"
 
-# Allow the service user to clone from any mirror without ownership warnings
 sudo -u matrixmouse git config --global --add \
     safe.directory '/var/lib/matrixmouse-mirrors/*'
 success "git safe.directory configured for matrixmouse user"
@@ -413,7 +448,8 @@ echo "Models must support tool calling. Check available: ollama list"
 echo ""
 
 prompt_required CODER_MODEL      "Coder model (implementation)"           "qwen3.5:4b"
-prompt_required PLANNER_MODEL    "Planner model (design/critique)"        "qwen3.5:9b"
+prompt_required PLANNER_MODEL    "Planner model (design/task management)" "qwen3.5:9b"
+prompt_required JUDGE_MODEL      "Judge model (critique/decision making)" "qwen3.5:9b"
 prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" "qwen3.5:4b"
 
 echo ""
@@ -440,28 +476,6 @@ prompt NTFY_TOPIC "ntfy topic"                              "matrixmouse"
 
 header "Step 10 — Configuration files"
 
-# .env secrets file — 600 matrixmouse:matrixmouse
-ENV_FILE="$ETC_DIR/matrixmouse.env"
-
-if sudo test -f "$ENV_FILE"; then
-    success "$ENV_FILE already exists — skipping"
-else
-    sudo -u "$MM_USER" tee "$ENV_FILE" > /dev/null << EOF
-# MatrixMouse environment / secrets file
-# Loaded by the service at startup via the env_file config setting.
-# Owned by matrixmouse:matrixmouse, mode 600.
-# Never commit this file.
-
-WORKSPACE_PATH=$WORKSPACE_PATH
-SECRETS_PATH=$SECRETS_DIR
-MATRIXMOUSE_AGENT_GH_KEY_FILE=$(basename "$AGENT_KEY_PATH")
-MATRIXMOUSE_GITHUB_TOKEN_FILE=$(basename "$AGENT_TOKEN_PATH")
-MM_SERVER_PORT=8080
-EOF
-    sudo chmod 600 "$ENV_FILE"
-    success "Written $ENV_FILE"
-fi
-
 # workspace config.toml — 640 matrixmouse:matrixmouse
 CONFIG_FILE="$WORKSPACE_PATH/.matrixmouse/config.toml"
 
@@ -486,13 +500,11 @@ else
     sudo -u "$MM_USER" tee "$CONFIG_FILE" > /dev/null << EOF
 # MatrixMouse workspace configuration
 # Repo-specific overrides: <repo>/.matrixmouse/config.toml
-# Secrets are in env_file — not here.
 
-env_file = "$ENV_FILE"
-
-coder      = "$CODER_MODEL"
-planner    = "$PLANNER_MODEL"
-summarizer = "$SUMMARIZER_MODEL"
+coder_model      = "$CODER_MODEL"
+planner_model    = "$PLANNER_MODEL"
+judge_model      = "$JUDGE_MODEL"
+summarizer_model = "$SUMMARIZER_MODEL"
 $CASCADE_LINE
 
 agent_git_name  = "$AGENT_GIT_NAME"

@@ -162,17 +162,16 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Step 6 — Mirrors group
+# Step 6 — matrixmouse group
 # ---------------------------------------------------------------------------
 
+header "Step 6 — matrixmouse group"
 
-header "Step 6 — Mirrors group"
-
-if getent group matrixmouse-mirrors &>/dev/null; then
-    if confirm "Remove matrixmouse-mirrors group?"; then
-        sudo groupdel matrixmouse-mirrors
+if getent group matrixmouse &>/dev/null; then
+    if confirm "Remove matrixmouse group?"; then
+        sudo groupdel matrixmouse
         success "Group removed"
-	info "Kept mirror directory — user owned repos"
+        info "Kept mirror directory — user owned repos"
     fi
 fi
 
