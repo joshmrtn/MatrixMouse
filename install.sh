@@ -77,6 +77,16 @@ confirm() {
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
+# Read a single value from a TOML file.
+# Returns the bare value (no quotes) or empty string if not found.
+read_toml() {
+    local file="$1" key="$2"
+    [ -f "$file" ] || { echo ""; return; }
+    sudo grep -E "^${key}[[:space:]]*=" "$file" 2>/dev/null \
+        | head -1 \
+        | sed "s/^${key}[[:space:]]*=[[:space:]]*//;s/[\"']//g;s/[[:space:]]*$//"
+}
+
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVOKING_USER="$USER"
 
@@ -368,8 +378,13 @@ else
     fi
 fi
 
-prompt_required AGENT_GIT_NAME  "Agent git commit name"  "MatrixMouse Agent"
-prompt_required AGENT_GIT_EMAIL "Agent git commit email" "matrixmouse-bot@users.noreply.github.com"
+_cur_git_name=$(read_toml "$CONFIG_FILE" "agent_git_name")
+_cur_git_email=$(read_toml "$CONFIG_FILE" "agent_git_email")
+prompt_required AGENT_GIT_NAME  "Agent git commit name" \
+    "${_cur_git_name:-MatrixMouse Agent}"
+prompt_required AGENT_GIT_EMAIL "Agent git commit email" \
+    "${_cur_git_email:-matrixmouse-bot@users.noreply.github.com}"
+
 
 # ---------------------------------------------------------------------------
 # Step 6 — Workspace directory
@@ -447,15 +462,28 @@ echo "Enter Ollama model names for each role."
 echo "Models must support tool calling. Check available: ollama list"
 echo ""
 
-prompt_required CODER_MODEL      "Coder model (implementation)"           "qwen3.5:4b"
-prompt_required PLANNER_MODEL    "Planner model (design/task management)" "qwen3.5:9b"
-prompt_required JUDGE_MODEL      "Judge model (critique/decision making)" "qwen3.5:9b"
-prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" "qwen3.5:4b"
+_cur_coder=$(read_toml "$CONFIG_FILE" "coder_model")
+_cur_planner=$(read_toml "$CONFIG_FILE" "planner_model")
+_cur_judge=$(read_toml "$CONFIG_FILE" "judge_model")
+_cur_summarizer=$(read_toml "$CONFIG_FILE" "summarizer_model")
+_cur_cascade=$(read_toml "$CONFIG_FILE" "coder_cascade")
+
+prompt_required CODER_MODEL      "Coder model (implementation)" \
+    "${_cur_coder:-qwen3.5:4b}"
+prompt_required PLANNER_MODEL    "Planner model (design/task management)" \
+    "${_cur_planner:-qwen3.5:9b}"
+prompt_required JUDGE_MODEL      "Judge model (critique/decision making)" \
+    "${_cur_judge:-qwen3.5:9b}"
+prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" \
+    "${_cur_summarizer:-qwen3.5:4b}"
 
 echo ""
 echo "Coder cascade: models to escalate through when stuck (comma-separated,"
 echo "smallest to largest). Defaults to just the coder model (no escalation)."
-prompt_required CODER_CASCADE "Coder cascade" "$CODER_MODEL"
+# Strip TOML array syntax for display if needed
+_cur_cascade_clean=$(echo "$_cur_cascade" | tr -d '[]' | tr ',' ' ' | xargs | tr ' ' ',')
+prompt_required CODER_CASCADE "Coder cascade" \
+    "${_cur_cascade_clean:-$CODER_MODEL}"
 
 # ---------------------------------------------------------------------------
 # Step 9 — Notifications (optional)
@@ -467,8 +495,16 @@ echo "MatrixMouse can push notifications via ntfy when it needs attention."
 echo "Leave blank to skip — configure later in /etc/matrixmouse/config.toml"
 echo ""
 
-prompt NTFY_URL   "ntfy server URL (e.g. https://ntfy.sh)" ""
-prompt NTFY_TOPIC "ntfy topic"                              "matrixmouse"
+_cur_ntfy_url=$(read_toml "$CONFIG_FILE" "ntfy_url")
+_cur_ntfy_topic=$(read_toml "$CONFIG_FILE" "ntfy_topic")
+_cur_web_ui_url=$(read_toml "$CONFIG_FILE" "web_ui_url")
+
+prompt NTFY_URL   "ntfy server URL (e.g. https://ntfy.sh)" \
+	"${_cur_ntfy_url:-""}"
+prompt NTFY_TOPIC "ntfy topic" \
+       "${_cur_ntfy_topic:-"matrixmouse"}"	
+prompt_required DOMAIN "Your domain name" \
+    "${_cur_web_ui_url:-"https://mm.example.com"}"
 
 # ---------------------------------------------------------------------------
 # Step 10 — Write configuration files
@@ -491,12 +527,6 @@ else
     done
     CASCADE_LINE="coder_cascade = [${TOML_ARRAY%, }]"
 
-    if [ -n "$NTFY_URL" ]; then
-        NTFY_LINES="ntfy_url   = \"$NTFY_URL\"\nntfy_topic = \"$NTFY_TOPIC\""
-    else
-        NTFY_LINES="# ntfy_url   = \"https://ntfy.sh\"\n# ntfy_topic = \"matrixmouse\""
-    fi
-
     sudo -u "$MM_USER" tee "$CONFIG_FILE" > /dev/null << EOF
 # MatrixMouse workspace configuration
 # Repo-specific overrides: <repo>/.matrixmouse/config.toml
@@ -511,10 +541,12 @@ agent_git_name  = "$AGENT_GIT_NAME"
 agent_git_email = "$AGENT_GIT_EMAIL"
 
 server_port = 8080
+web_ui_url  = "$DOMAIN"
 log_level   = "INFO"
 log_to_file = false
 
-$(echo -e "$NTFY_LINES")
+ntfy_url    = "$NTFY_URL"
+ntfy_topic  = "$NTFY_TOPIC"
 
 priority_aging_rate      = 0.01
 priority_max_aging_bonus = 0.3
@@ -524,15 +556,25 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Step 11 — Build test runner Docker image
+# Step 11 — Build test runner Docker image and install script
 # ---------------------------------------------------------------------------
 
-header "Step 11 — Test runner Docker image"
+header "Step 11 — Test runner"
 
 DOCKERFILE_TR="$INSTALL_DIR/Dockerfile.testrunner"
 [ -f "$DOCKERFILE_TR" ] || fatal "Dockerfile.testrunner not found at $INSTALL_DIR"
+[ -f "$INSTALL_DIR/test_runner.sh" ] || fatal "test_runner.sh not found at $INSTALL_DIR"
 
-# Hash stored in workspace so it's owned by the service user
+# Install test_runner.sh to a system path the service user can execute
+TR_LIB_DIR="/usr/local/lib/matrixmouse"
+TR_INSTALL_PATH="$TR_LIB_DIR/test_runner.sh"
+
+sudo mkdir -p "$TR_LIB_DIR"
+sudo cp "$INSTALL_DIR/test_runner.sh" "$TR_INSTALL_PATH"
+sudo chown "$MM_USER:$MM_USER" "$TR_INSTALL_PATH"
+sudo chmod 755 "$TR_INSTALL_PATH"
+success "test_runner.sh installed to $TR_INSTALL_PATH"
+
 HASH_FILE="$WORKSPACE_PATH/.matrixmouse/testrunner.image.sha256"
 
 if docker image inspect matrixmouse-test-runner &>/dev/null 2>&1; then
@@ -551,6 +593,7 @@ else
     success "matrixmouse-test-runner image built"
 fi
 
+
 # ---------------------------------------------------------------------------
 # Step 12 — systemd services
 # ---------------------------------------------------------------------------
@@ -558,8 +601,6 @@ fi
 header "Step 12 — systemd services"
 
 MM_SERVICE_BIN="$(command -v matrixmouse-service)"
-MM_TEST_RUNNER="$INSTALL_DIR/test_runner.sh"
-chmod +x "$MM_TEST_RUNNER"
 
 if $HAS_SYSTEMD; then
 
@@ -587,19 +628,12 @@ RestartSec=10
 TimeoutStopSec=30
 
 Environment=WORKSPACE_PATH=$WORKSPACE_PATH
-EnvironmentFile=-$ENV_FILE
 
-# Security hardening
-# Workspace is under /var/lib and binaries under /usr/local —
-# nothing service-related lives under any user's home directory.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=$WORKSPACE_PATH $SECRETS_DIR $ETC_DIR /run/matrixmouse-pipes
 
-# systemd creates /run/matrixmouse-pipes before the service starts,
-# owned by the service user. Replaces PrivateTmp (which caused NAMESPACE
-# failures by trying to bind-mount paths that don't exist yet).
 RuntimeDirectory=matrixmouse-pipes
 RuntimeDirectoryMode=0750
 
@@ -633,11 +667,11 @@ Requires=docker.service
 Type=simple
 User=$MM_USER
 Group=$MM_USER
-ExecStart=$MM_TEST_RUNNER
+ExecStart=$TR_INSTALL_PATH
 Restart=always
 RestartSec=5
 
-Environment=/run/matrixmouse-pipes
+Environment=FIFO_DIR=/run/matrixmouse-pipes
 Environment=WORKSPACE=$WORKSPACE_PATH
 Environment=TEST_IMAGE=matrixmouse-test-runner
 
@@ -653,13 +687,6 @@ EOF
         sudo systemctl start matrixmouse-test-runner
         success "matrixmouse-test-runner.service installed and started"
     fi
-
-
-
-else
-    warn "systemd not available. Start manually:"
-    warn "  $MM_SERVICE_BIN &"
-    warn "  FIFO_DIR=/run/matrixmouse-pipes WORKSPACE=$WORKSPACE_PATH $MM_TEST_RUNNER &"
 fi
 
 # ---------------------------------------------------------------------------
@@ -700,9 +727,11 @@ echo "See docs/deployment/ for nginx, Caddy, and Traefik examples."
 echo ""
 
 if confirm "Generate a basic nginx config template?"; then
+    if [ -z "$DOMAIN" ]; then
+	prompt_required DOMAIN "Your domain name" "matrixmouse.example.com"
+    fi
     NGINX_DIR="$INSTALL_DIR/nginx"
     mkdir -p "$NGINX_DIR/certs"
-    prompt_required DOMAIN "Your domain name" "matrixmouse.example.com"
     cat > "$NGINX_DIR/nginx.conf" << EOF
 # MatrixMouse nginx reverse proxy template
 # htpasswd -c nginx/certs/.htpasswd youruser
@@ -745,10 +774,11 @@ header "Installation complete"
 
 echo ""
 echo -e "${BOLD}Directory layout:${RESET}"
-echo "  /etc/matrixmouse/          config, secrets (.env, SSH key, PAT)"
+echo "  /etc/matrixmouse/           config, secrets (SSH key, PAT, ntfy)"
 echo "  $WORKSPACE_PATH"
-echo "    .matrixmouse/            tasks, repos, workspace config.toml"
-echo "  /tmp/matrixmouse-pipes/    test runner FIFO pipes"
+echo "    .matrixmouse/             tasks, repos, workspace config.toml"
+echo "  /run/matrixmouse-pipes/     test runner FIFO pipes (created by systemd)"
+echo "  /usr/local/lib/matrixmouse/ test_runner.sh"
 echo ""
 echo -e "${BOLD}Binaries:${RESET}"
 echo "  matrixmouse:         $(command -v matrixmouse)"
@@ -764,6 +794,7 @@ echo ""
 echo "  1. Pull your models:"
 echo "       ollama pull $CODER_MODEL"
 echo "       ollama pull $PLANNER_MODEL"
+echo "       ollama pull $JUDGE_MODEL"
 echo "       ollama pull $SUMMARIZER_MODEL"
 echo ""
 echo "  2. Add a repo:"
