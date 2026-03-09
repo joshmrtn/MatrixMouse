@@ -77,6 +77,16 @@ confirm() {
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
+# Read a single value from a TOML file.
+# Returns the bare value (no quotes) or empty string if not found.
+read_toml() {
+    local file="$1" key="$2"
+    [ -f "$file" ] || { echo ""; return; }
+    sudo grep -E "^${key}[[:space:]]*=" "$file" 2>/dev/null \
+        | head -1 \
+        | sed "s/^${key}[[:space:]]*=[[:space:]]*//;s/[\"']//g;s/[[:space:]]*$//"
+}
+
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVOKING_USER="$USER"
 
@@ -144,12 +154,10 @@ else
     warn "The agent will not work until Ollama is running with a model pulled."
 fi
 
-HAS_SYSTEMD=false
 if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
-    HAS_SYSTEMD=true
     success "systemd found"
 else
-    warn "systemd not found. Services must be started manually."
+    fatal "systemd is required. MatrixMouse cannot run without it."
 fi
 
 # ---------------------------------------------------------------------------
@@ -193,12 +201,13 @@ success "matrixmouse:         $(command -v matrixmouse)"
 success "matrixmouse-service: $(command -v matrixmouse-service)"
 
 # ---------------------------------------------------------------------------
-# Step 3 — System user
+# Step 3 — System user and Shared Group
 # ---------------------------------------------------------------------------
 
 header "Step 3 — System user"
 
 MM_USER="matrixmouse"
+MM_GROUP="matrixmouse"
 
 if id "$MM_USER" &>/dev/null; then
     success "System user '$MM_USER' already exists"
@@ -226,8 +235,16 @@ fi
 # safe.directory '*' disables ownership checks for this user, which is
 # safe because matrixmouse has no shell access (nologin).
 cd /tmp
-sudo -u matrixmouse git config --global safe.directory '*'
+sudo -u matrixmouse git config --global --replace-all safe.directory '*'
 success "git safe.directory configured for $MM_USER"
+
+# Create the shared group if it doesn't exist
+if ! getent group "$MM_GROUP" &>/dev/null; then
+    sudo groupadd --system "$MM_GROUP"
+    success "Created group: $MM_GROUP"
+else
+    success "Group $MM_GROUP already exists"
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +264,7 @@ if [ -d "$ETC_DIR" ]; then
     success "/etc/matrixmouse already exists — skipping directory creation"
 else
     sudo mkdir -p "$ETC_DIR"
-    sudo chown "$MM_USER:$MM_USER" "$ETC_DIR"
+    sudo chown "$MM_USER:$MM_GROUP" "$ETC_DIR"
     sudo chmod 750 "$ETC_DIR"
     success "Created $ETC_DIR"
 fi
@@ -261,11 +278,74 @@ else
     success "Created $SECRETS_DIR"
 fi
 
+# Global config — readable by matrixmouse group (regular user can read server_port etc.)
+GLOBAL_CONFIG="$ETC_DIR/config.toml"
+
+if sudo test -f "$GLOBAL_CONFIG"; then
+    success "$GLOBAL_CONFIG already exists — skipping"
+else
+    sudo tee "$GLOBAL_CONFIG" > /dev/null << 'EOF'
+# MatrixMouse global configuration
+# Values here apply to all workspaces. Workspace and repo configs override these.
+# Uncomment and edit lines to activate settings.
+# Full reference: https://github.com/joshmrtn/MatrixMouse
+
+# --- Server ---
+# server_port = 8080
+
+# --- Models ---
+# coder_model     = "qwen3.5:4b"
+# planner_model   = "qwen3.5:4b"
+# judge_model     = "qwen3.5:4b"
+# summarizer_model = "qwen3.5:4b"
+# coder_cascade   = ["qwen3.5:4b", "qwen3.5:9b", "qwen3.5:27b"]
+
+# --- Logging ---
+# log_level   = "INFO"
+# log_to_file = false
+
+# --- Comms ---
+# ntfy_url   = ""
+# ntfy_topic = "matrixmouse"
+# web_ui_url = ""
+EOF
+    sudo chown "$MM_USER:$MM_GROUP" "$GLOBAL_CONFIG"
+    sudo chmod 640 "$GLOBAL_CONFIG"
+    success "Written $GLOBAL_CONFIG"
+fi
+
+
 # ---------------------------------------------------------------------------
-# Step 5 — Agent credentials
+# Step 5 — Workspace directory
 # ---------------------------------------------------------------------------
 
-header "Step 5 — Agent credentials"
+header "Step 5 — Workspace directory"
+
+prompt_required WORKSPACE_PATH \
+    "Workspace directory" \
+    "/var/lib/matrixmouse-workspace"
+WORKSPACE_PATH="$(eval echo "$WORKSPACE_PATH")"
+
+if [ -d "$WORKSPACE_PATH" ]; then
+    success "Workspace already exists: $WORKSPACE_PATH"
+else
+    sudo mkdir -p "$WORKSPACE_PATH"
+    success "Created workspace: $WORKSPACE_PATH"
+fi
+
+sudo mkdir -p "$WORKSPACE_PATH/.matrixmouse"
+sudo chown -R "$MM_USER:$MM_USER" "$WORKSPACE_PATH"
+sudo chmod -R u=rwX,g=,o= "$WORKSPACE_PATH"
+
+success "Workspace: $WORKSPACE_PATH (owned by $MM_USER)"
+
+CONFIG_FILE="$WORKSPACE_PATH/.matrixmouse/config.toml"
+
+# ---------------------------------------------------------------------------
+# Step 6 — Agent credentials
+# ---------------------------------------------------------------------------
+
+header "Step 6 — Agent credentials"
 
 echo "MatrixMouse uses a dedicated bot account for git operations and PRs."
 echo "Credentials are stored in $SECRETS_DIR, owned by the matrixmouse user."
@@ -322,62 +402,32 @@ else
     fi
 fi
 
-prompt_required AGENT_GIT_NAME  "Agent git commit name"  "MatrixMouse Agent"
-prompt_required AGENT_GIT_EMAIL "Agent git commit email" "matrixmouse-bot@users.noreply.github.com"
-
-# ---------------------------------------------------------------------------
-# Step 6 — Workspace directory
-# ---------------------------------------------------------------------------
-
-header "Step 6 — Workspace directory"
-
-prompt_required WORKSPACE_PATH \
-    "Workspace directory" \
-    "/var/lib/matrixmouse-workspace"
-WORKSPACE_PATH="$(eval echo "$WORKSPACE_PATH")"
-
-if [ -d "$WORKSPACE_PATH" ]; then
-    success "Workspace already exists: $WORKSPACE_PATH"
-else
-    sudo mkdir -p "$WORKSPACE_PATH"
-    success "Created workspace: $WORKSPACE_PATH"
-fi
-
-sudo mkdir -p "$WORKSPACE_PATH/.matrixmouse"
-sudo chown -R "$MM_USER:$MM_USER" "$WORKSPACE_PATH"
-sudo chmod -R u=rwX,g=,o= "$WORKSPACE_PATH"
-
-success "Workspace: $WORKSPACE_PATH (owned by $MM_USER)"
+_cur_git_name=$(read_toml "$CONFIG_FILE" "agent_git_name")
+_cur_git_email=$(read_toml "$CONFIG_FILE" "agent_git_email")
+prompt_required AGENT_GIT_NAME  "Agent git commit name" \
+    "${_cur_git_name:-MatrixMouse Agent}"
+prompt_required AGENT_GIT_EMAIL "Agent git commit email" \
+    "${_cur_git_email:-matrixmouse-bot@users.noreply.github.com}"
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — matrixmouse-mirrors group and directory
+# Step 7 — matrixmouse group and mirror directory
 # ---------------------------------------------------------------------------
 
 header "Step 7 — Mirror directory"
 
 MIRRORS_DIR="/var/lib/matrixmouse-mirrors"
-MIRRORS_GROUP="matrixmouse-mirrors"
-
-# Create the shared group if it doesn't exist
-if ! getent group "$MIRRORS_GROUP" &>/dev/null; then
-    sudo groupadd --system "$MIRRORS_GROUP"
-    success "Created group: $MIRRORS_GROUP"
-else
-    success "Group $MIRRORS_GROUP already exists"
-fi
-
 
 # Add both users to the group
-sudo usermod -aG "$MIRRORS_GROUP" "$MM_USER"
-sudo usermod -aG "$MIRRORS_GROUP" "$INVOKING_USER"
-success "Added $MM_USER and $INVOKING_USER to $MIRRORS_GROUP"
+sudo usermod -aG "$MM_GROUP" "$MM_USER"
+sudo usermod -aG "$MM_GROUP" "$INVOKING_USER"
+success "Added $MM_USER and $INVOKING_USER to $MM_GROUP"
 
 # Check group membership — requires re-login to take effect
 NEEDS_RELOGIN=false
 
-if ! groups "$INVOKING_USER" | grep -qw "$MIRRORS_GROUP"; then
-    warn "$INVOKING_USER was just added to $MIRRORS_GROUP."
+if ! groups "$INVOKING_USER" | grep -qw "$MM_GROUP"; then
+    warn "$INVOKING_USER was just added to $MM_GROUP."
     NEEDS_RELOGIN=true
 fi
 
@@ -393,13 +443,8 @@ if [ "$NEEDS_RELOGIN" = true ]; then
 fi
 
 # Create the mirrors root with setgid so subdirs inherit the group
-sudo install -d -m 2775 -g "$MIRRORS_GROUP" "$MIRRORS_DIR"
+sudo install -d -m 2775 -g "$MM_GROUP" "$MIRRORS_DIR"
 success "Mirror directory ready at $MIRRORS_DIR"
-
-# Allow the service user to clone from any mirror without ownership warnings
-sudo -u matrixmouse git config --global --add \
-    safe.directory '/var/lib/matrixmouse-mirrors/*'
-success "git safe.directory configured for matrixmouse user"
 
 
 # ---------------------------------------------------------------------------
@@ -412,14 +457,29 @@ echo "Enter Ollama model names for each role."
 echo "Models must support tool calling. Check available: ollama list"
 echo ""
 
-prompt_required CODER_MODEL      "Coder model (implementation)"           "qwen3.5:4b"
-prompt_required PLANNER_MODEL    "Planner model (design/critique)"        "qwen3.5:9b"
-prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" "qwen3.5:4b"
+_cur_coder=$(read_toml "$CONFIG_FILE" "coder_model")
+_cur_planner=$(read_toml "$CONFIG_FILE" "planner_model")
+_cur_judge=$(read_toml "$CONFIG_FILE" "judge_model")
+_cur_summarizer=$(read_toml "$CONFIG_FILE" "summarizer_model")
+
+prompt_required CODER_MODEL      "Coder model (implementation)" \
+    "${_cur_coder:-qwen3.5:4b}"
+prompt_required PLANNER_MODEL    "Planner model (design/task management)" \
+    "${_cur_planner:-qwen3.5:9b}"
+prompt_required JUDGE_MODEL      "Judge model (critique/decision making)" \
+    "${_cur_judge:-qwen3.5:9b}"
+prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" \
+    "${_cur_summarizer:-qwen3.5:4b}"
 
 echo ""
 echo "Coder cascade: models to escalate through when stuck (comma-separated,"
 echo "smallest to largest). Defaults to just the coder model (no escalation)."
-prompt_required CODER_CASCADE "Coder cascade" "$CODER_MODEL"
+if sudo test -f "$CONFIG_FILE"; then
+    info "coder_cascade: edit directly in $CONFIG_FILE if needed — skipping prompt"
+    CODER_CASCADE=""  # sentinel: skip upsert in Step 9
+else
+    prompt_required CODER_CASCADE "Coder cascade" "$CODER_MODEL"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 9 — Notifications (optional)
@@ -431,8 +491,16 @@ echo "MatrixMouse can push notifications via ntfy when it needs attention."
 echo "Leave blank to skip — configure later in /etc/matrixmouse/config.toml"
 echo ""
 
-prompt NTFY_URL   "ntfy server URL (e.g. https://ntfy.sh)" ""
-prompt NTFY_TOPIC "ntfy topic"                              "matrixmouse"
+_cur_ntfy_url=$(read_toml "$CONFIG_FILE" "ntfy_url")
+_cur_ntfy_topic=$(read_toml "$CONFIG_FILE" "ntfy_topic")
+_cur_web_ui_url=$(read_toml "$CONFIG_FILE" "web_ui_url")
+
+prompt NTFY_URL     "ntfy server URL (e.g. https://ntfy.sh)" \
+    "${_cur_ntfy_url:-}"
+prompt NTFY_TOPIC   "ntfy topic" \
+    "${_cur_ntfy_topic:-matrixmouse}"
+prompt WEB_UI_URL   "Web UI URL (included in ntfy notifications)" \
+    "${_cur_web_ui_url:-https://mm.example.com}"
 
 # ---------------------------------------------------------------------------
 # Step 10 — Write configuration files
@@ -440,35 +508,11 @@ prompt NTFY_TOPIC "ntfy topic"                              "matrixmouse"
 
 header "Step 10 — Configuration files"
 
-# .env secrets file — 600 matrixmouse:matrixmouse
-ENV_FILE="$ETC_DIR/matrixmouse.env"
+CONFIG_EXISTS=false
+sudo test -f "$CONFIG_FILE" && CONFIG_EXISTS=true
 
-if sudo test -f "$ENV_FILE"; then
-    success "$ENV_FILE already exists — skipping"
-else
-    sudo -u "$MM_USER" tee "$ENV_FILE" > /dev/null << EOF
-# MatrixMouse environment / secrets file
-# Loaded by the service at startup via the env_file config setting.
-# Owned by matrixmouse:matrixmouse, mode 600.
-# Never commit this file.
-
-WORKSPACE_PATH=$WORKSPACE_PATH
-SECRETS_PATH=$SECRETS_DIR
-MATRIXMOUSE_AGENT_GH_KEY_FILE=$(basename "$AGENT_KEY_PATH")
-MATRIXMOUSE_GITHUB_TOKEN_FILE=$(basename "$AGENT_TOKEN_PATH")
-MM_SERVER_PORT=8080
-EOF
-    sudo chmod 600 "$ENV_FILE"
-    success "Written $ENV_FILE"
-fi
-
-# workspace config.toml — 640 matrixmouse:matrixmouse
-CONFIG_FILE="$WORKSPACE_PATH/.matrixmouse/config.toml"
-
-if sudo test -f "$CONFIG_FILE"; then
-    success "$CONFIG_FILE already exists — skipping"
-else
-    # Build coder_cascade TOML array
+if [ "$CONFIG_EXISTS" = false ]; then
+    # Fresh install — write full config via heredoc
     IFS=',' read -ra CASCADE_MODELS <<< "$CODER_CASCADE"
     TOML_ARRAY=""
     for m in "${CASCADE_MODELS[@]}"; do
@@ -477,50 +521,68 @@ else
     done
     CASCADE_LINE="coder_cascade = [${TOML_ARRAY%, }]"
 
-    if [ -n "$NTFY_URL" ]; then
-        NTFY_LINES="ntfy_url   = \"$NTFY_URL\"\nntfy_topic = \"$NTFY_TOPIC\""
-    else
-        NTFY_LINES="# ntfy_url   = \"https://ntfy.sh\"\n# ntfy_topic = \"matrixmouse\""
-    fi
-
     sudo -u "$MM_USER" tee "$CONFIG_FILE" > /dev/null << EOF
 # MatrixMouse workspace configuration
 # Repo-specific overrides: <repo>/.matrixmouse/config.toml
-# Secrets are in env_file — not here.
 
-env_file = "$ENV_FILE"
-
-coder      = "$CODER_MODEL"
-planner    = "$PLANNER_MODEL"
-summarizer = "$SUMMARIZER_MODEL"
+coder_model      = "$CODER_MODEL"
+planner_model    = "$PLANNER_MODEL"
+judge_model      = "$JUDGE_MODEL"
+summarizer_model = "$SUMMARIZER_MODEL"
 $CASCADE_LINE
 
 agent_git_name  = "$AGENT_GIT_NAME"
 agent_git_email = "$AGENT_GIT_EMAIL"
 
 server_port = 8080
+web_ui_url  = "$WEB_UI_URL"
 log_level   = "INFO"
 log_to_file = false
 
-$(echo -e "$NTFY_LINES")
+ntfy_url   = "$NTFY_URL"
+ntfy_topic = "$NTFY_TOPIC"
 
 priority_aging_rate      = 0.01
 priority_max_aging_bonus = 0.3
 EOF
     success "Written $CONFIG_FILE"
+
+else
+    # Reinstall — upsert individual keys, never clobber
+    # coder_cascade is skipped — edit manually if needed (multi-line array safe)
+    upsert_toml "$CONFIG_FILE" "coder_model"      "$CODER_MODEL"
+    upsert_toml "$CONFIG_FILE" "planner_model"    "$PLANNER_MODEL"
+    upsert_toml "$CONFIG_FILE" "judge_model"      "$JUDGE_MODEL"
+    upsert_toml "$CONFIG_FILE" "summarizer_model" "$SUMMARIZER_MODEL"
+    upsert_toml "$CONFIG_FILE" "agent_git_name"   "$AGENT_GIT_NAME"
+    upsert_toml "$CONFIG_FILE" "agent_git_email"  "$AGENT_GIT_EMAIL"
+    upsert_toml "$CONFIG_FILE" "web_ui_url"       "$WEB_UI_URL"
+    upsert_toml "$CONFIG_FILE" "ntfy_url"         "$NTFY_URL"
+    upsert_toml "$CONFIG_FILE" "ntfy_topic"       "$NTFY_TOPIC"
+    success "Updated $CONFIG_FILE"
 fi
 
 
 # ---------------------------------------------------------------------------
-# Step 11 — Build test runner Docker image
+# Step 11 — Build test runner Docker image and install script
 # ---------------------------------------------------------------------------
 
-header "Step 11 — Test runner Docker image"
+header "Step 11 — Test runner"
 
 DOCKERFILE_TR="$INSTALL_DIR/Dockerfile.testrunner"
 [ -f "$DOCKERFILE_TR" ] || fatal "Dockerfile.testrunner not found at $INSTALL_DIR"
+[ -f "$INSTALL_DIR/test_runner.sh" ] || fatal "test_runner.sh not found at $INSTALL_DIR"
 
-# Hash stored in workspace so it's owned by the service user
+# Install test_runner.sh to a system path the service user can execute
+TR_LIB_DIR="/usr/local/lib/matrixmouse"
+TR_INSTALL_PATH="$TR_LIB_DIR/test_runner.sh"
+
+sudo mkdir -p "$TR_LIB_DIR"
+sudo cp "$INSTALL_DIR/test_runner.sh" "$TR_INSTALL_PATH"
+sudo chown "$MM_USER:$MM_USER" "$TR_INSTALL_PATH"
+sudo chmod 755 "$TR_INSTALL_PATH"
+success "test_runner.sh installed to $TR_INSTALL_PATH"
+
 HASH_FILE="$WORKSPACE_PATH/.matrixmouse/testrunner.image.sha256"
 
 if docker image inspect matrixmouse-test-runner &>/dev/null 2>&1; then
@@ -539,6 +601,7 @@ else
     success "matrixmouse-test-runner image built"
 fi
 
+
 # ---------------------------------------------------------------------------
 # Step 12 — systemd services
 # ---------------------------------------------------------------------------
@@ -546,18 +609,13 @@ fi
 header "Step 12 — systemd services"
 
 MM_SERVICE_BIN="$(command -v matrixmouse-service)"
-MM_TEST_RUNNER="$INSTALL_DIR/test_runner.sh"
-chmod +x "$MM_TEST_RUNNER"
 
-if $HAS_SYSTEMD; then
-
-
-    MM_SVC="/etc/systemd/system/matrixmouse.service"
-    if [ -f "$MM_SVC" ]; then
-        success "matrixmouse.service already exists — skipping"
-    else
-        info "Installing matrixmouse.service..."
-        sudo tee "$MM_SVC" > /dev/null << EOF
+MM_SVC="/etc/systemd/system/matrixmouse.service"
+if [ -f "$MM_SVC" ]; then
+    success "matrixmouse.service already exists — skipping"
+else
+    info "Installing matrixmouse.service..."
+    sudo tee "$MM_SVC" > /dev/null << EOF
 [Unit]
 Description=MatrixMouse autonomous coding agent
 Documentation=https://github.com/joshmrtn/MatrixMouse
@@ -567,7 +625,7 @@ Wants=ollama.service
 [Service]
 Type=simple
 User=$MM_USER
-Group=$MM_USER
+Group=$MM_GROUP
 WorkingDirectory=$WORKSPACE_PATH
 ExecStart=$MM_SERVICE_BIN
 Restart=on-failure
@@ -575,19 +633,13 @@ RestartSec=10
 TimeoutStopSec=30
 
 Environment=WORKSPACE_PATH=$WORKSPACE_PATH
-EnvironmentFile=-$ENV_FILE
 
-# Security hardening
-# Workspace is under /var/lib and binaries under /usr/local —
-# nothing service-related lives under any user's home directory.
 NoNewPrivileges=true
 ProtectSystem=strict
+# read-only not true: matrixmouse user reads ~/.gitconfig at runtime
 ProtectHome=read-only
 ReadWritePaths=$WORKSPACE_PATH $SECRETS_DIR $ETC_DIR /run/matrixmouse-pipes
 
-# systemd creates /run/matrixmouse-pipes before the service starts,
-# owned by the service user. Replaces PrivateTmp (which caused NAMESPACE
-# failures by trying to bind-mount paths that don't exist yet).
 RuntimeDirectory=matrixmouse-pipes
 RuntimeDirectoryMode=0750
 
@@ -598,20 +650,18 @@ SyslogIdentifier=matrixmouse
 [Install]
 WantedBy=multi-user.target
 EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable matrixmouse
-        sudo systemctl start matrixmouse
-        success "matrixmouse.service installed and started"
-    fi
+    sudo systemctl daemon-reload
+    sudo systemctl enable matrixmouse
+    sudo systemctl start matrixmouse
+    success "matrixmouse.service installed and started"
+fi
 
-
-
-    TR_SVC="/etc/systemd/system/matrixmouse-test-runner.service"
-    if [ -f "$TR_SVC" ]; then
-        success "matrixmouse-test-runner.service already exists — skipping"
-    else
-        info "Installing matrixmouse-test-runner.service..."
-        sudo tee "$TR_SVC" > /dev/null << EOF
+TR_SVC="/etc/systemd/system/matrixmouse-test-runner.service"
+if [ -f "$TR_SVC" ]; then
+    success "matrixmouse-test-runner.service already exists — skipping"
+else
+    info "Installing matrixmouse-test-runner.service..."
+    sudo tee "$TR_SVC" > /dev/null << EOF
 [Unit]
 Description=MatrixMouse test runner (Docker sandbox)
 After=docker.service matrixmouse.service
@@ -620,12 +670,12 @@ Requires=docker.service
 [Service]
 Type=simple
 User=$MM_USER
-Group=$MM_USER
-ExecStart=$MM_TEST_RUNNER
+Group=$MM_GROUP
+ExecStart=$TR_INSTALL_PATH
 Restart=always
 RestartSec=5
 
-Environment=/run/matrixmouse-pipes
+Environment=FIFO_DIR=/run/matrixmouse-pipes
 Environment=WORKSPACE=$WORKSPACE_PATH
 Environment=TEST_IMAGE=matrixmouse-test-runner
 
@@ -636,18 +686,10 @@ SyslogIdentifier=matrixmouse-test-runner
 [Install]
 WantedBy=multi-user.target
 EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable matrixmouse-test-runner
-        sudo systemctl start matrixmouse-test-runner
-        success "matrixmouse-test-runner.service installed and started"
-    fi
-
-
-
-else
-    warn "systemd not available. Start manually:"
-    warn "  $MM_SERVICE_BIN &"
-    warn "  FIFO_DIR=/run/matrixmouse-pipes WORKSPACE=$WORKSPACE_PATH $MM_TEST_RUNNER &"
+    sudo systemctl daemon-reload
+    sudo systemctl enable matrixmouse-test-runner
+    sudo systemctl start matrixmouse-test-runner
+    success "matrixmouse-test-runner.service installed and started"
 fi
 
 # ---------------------------------------------------------------------------
@@ -657,73 +699,31 @@ fi
 header "Step 13 — Ollama configuration"
 
 OLLAMA_OVERRIDE="/etc/systemd/system/ollama.service.d/override.conf"
-if $HAS_SYSTEMD; then
-    if [ -f "$OLLAMA_OVERRIDE" ] || \
-       grep -q "OLLAMA_MAX_LOADED_MODELS" /etc/systemd/system/ollama.service 2>/dev/null; then
-        success "OLLAMA_MAX_LOADED_MODELS already configured"
-    else
-        if confirm "Set OLLAMA_MAX_LOADED_MODELS=4 in Ollama's systemd service?"; then
-            sudo mkdir -p "$(dirname "$OLLAMA_OVERRIDE")"
-            sudo tee "$OLLAMA_OVERRIDE" > /dev/null << 'EOF'
+
+if grep -q "OLLAMA_MAX_LOADED_MODELS" "$OLLAMA_OVERRIDE" 2>/dev/null || \
+   grep -q "OLLAMA_MAX_LOADED_MODELS" /etc/systemd/system/ollama.service 2>/dev/null; then
+    success "OLLAMA_MAX_LOADED_MODELS already configured"
+elif [ -f "$OLLAMA_OVERRIDE" ]; then
+    # Override file exists with other settings — append rather than clobber
+    if confirm "Add OLLAMA_MAX_LOADED_MODELS=4 to existing Ollama override?"; then
+        echo 'Environment="OLLAMA_MAX_LOADED_MODELS=4"' | sudo tee -a "$OLLAMA_OVERRIDE" > /dev/null
+        sudo systemctl daemon-reload
+        sudo systemctl restart ollama 2>/dev/null || true
+        success "OLLAMA_MAX_LOADED_MODELS=4 added to existing override"
+    fi
+else
+    if confirm "Set OLLAMA_MAX_LOADED_MODELS=4 in Ollama's systemd service?"; then
+        sudo mkdir -p "$(dirname "$OLLAMA_OVERRIDE")"
+        sudo tee "$OLLAMA_OVERRIDE" > /dev/null << 'EOF'
 [Service]
 Environment="OLLAMA_MAX_LOADED_MODELS=4"
 EOF
-            sudo systemctl daemon-reload
-            sudo systemctl restart ollama 2>/dev/null || true
-            success "OLLAMA_MAX_LOADED_MODELS=4 configured"
-        fi
+        sudo systemctl daemon-reload
+        sudo systemctl restart ollama 2>/dev/null || true
+        success "OLLAMA_MAX_LOADED_MODELS=4 configured"
     fi
-else
-    warn "Set OLLAMA_MAX_LOADED_MODELS=4 in your Ollama environment manually."
 fi
 
-# ---------------------------------------------------------------------------
-# Step 14 — Reverse proxy (optional)
-# ---------------------------------------------------------------------------
-
-header "Step 14 — Reverse proxy (optional)"
-
-echo "The web UI runs at http://localhost:8080 by default."
-echo "See docs/deployment/ for nginx, Caddy, and Traefik examples."
-echo ""
-
-if confirm "Generate a basic nginx config template?"; then
-    NGINX_DIR="$INSTALL_DIR/nginx"
-    mkdir -p "$NGINX_DIR/certs"
-    prompt_required DOMAIN "Your domain name" "matrixmouse.example.com"
-    cat > "$NGINX_DIR/nginx.conf" << EOF
-# MatrixMouse nginx reverse proxy template
-# htpasswd -c nginx/certs/.htpasswd youruser
-
-events { worker_connections 1024; }
-
-http {
-    server {
-        listen 80;
-        server_name $DOMAIN;
-        return 301 https://\$host\$request_uri;
-    }
-    server {
-        listen 443 ssl;
-        server_name $DOMAIN;
-        ssl_certificate     /etc/nginx/certs/fullchain.pem;
-        ssl_certificate_key /etc/nginx/certs/privkey.pem;
-        ssl_protocols       TLSv1.2 TLSv1.3;
-        auth_basic           "MatrixMouse";
-        auth_basic_user_file /etc/nginx/certs/.htpasswd;
-        location / {
-            proxy_pass         http://127.0.0.1:8080;
-            proxy_http_version 1.1;
-            proxy_set_header   Upgrade \$http_upgrade;
-            proxy_set_header   Connection "upgrade";
-            proxy_set_header   Host \$host;
-            proxy_read_timeout 3600s;
-        }
-    }
-}
-EOF
-    success "nginx template written to $NGINX_DIR/nginx.conf"
-fi
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -733,25 +733,25 @@ header "Installation complete"
 
 echo ""
 echo -e "${BOLD}Directory layout:${RESET}"
-echo "  /etc/matrixmouse/          config, secrets (.env, SSH key, PAT)"
+echo "  /etc/matrixmouse/           global config, secrets (SSH key, PAT, ntfy)"
 echo "  $WORKSPACE_PATH"
-echo "    .matrixmouse/            tasks, repos, workspace config.toml"
-echo "  /tmp/matrixmouse-pipes/    test runner FIFO pipes"
+echo "    .matrixmouse/             tasks, repos, workspace config.toml"
+echo "  /run/matrixmouse-pipes/     test runner FIFO pipes (created by systemd)"
+echo "  /usr/local/lib/matrixmouse/ test_runner.sh"
 echo ""
 echo -e "${BOLD}Binaries:${RESET}"
 echo "  matrixmouse:         $(command -v matrixmouse)"
 echo "  matrixmouse-service: $(command -v matrixmouse-service)"
 echo ""
-if $HAS_SYSTEMD; then
 echo -e "${BOLD}Services:${RESET}"
 echo "  matrixmouse               matrixmouse-test-runner"
 echo ""
-fi
 echo -e "${BOLD}Next steps:${RESET}"
 echo ""
 echo "  1. Pull your models:"
 echo "       ollama pull $CODER_MODEL"
 echo "       ollama pull $PLANNER_MODEL"
+echo "       ollama pull $JUDGE_MODEL"
 echo "       ollama pull $SUMMARIZER_MODEL"
 echo ""
 echo "  2. Add a repo:"
@@ -763,8 +763,6 @@ echo ""
 echo "  4. Check status:"
 echo "       matrixmouse status"
 echo "       curl http://localhost:8080/health"
-if $HAS_SYSTEMD; then
 echo "       sudo systemctl status matrixmouse"
 echo "       journalctl -u matrixmouse -f"
-fi
 echo ""

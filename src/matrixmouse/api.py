@@ -996,15 +996,23 @@ def _infer_repo_name(remote: str) -> str:
 
 def _git_env() -> dict:
     env = os.environ.copy()
-    key_file = os.environ.get("MATRIXMOUSE_AGENT_GH_KEY_FILE")
-    secrets_path = os.environ.get("SECRETS_PATH", "/run/secrets")
-    if key_file:
-        key_path = Path(secrets_path) / key_file
+    
+    from matrixmouse import config as config_module
+    cfg = getattr(config_module, "_loaded_config", None)
+    if cfg:
+        secrets_dir = Path("/etc/matrixmouse/secrets")
+        key_path = secrets_dir / cfg.gh_ssh_key_file
         if key_path.exists():
             env["GIT_SSH_COMMAND"] = (
                 f"ssh -i {key_path} -o IdentitiesOnly=yes "
                 f"-o StrictHostKeyChecking=accept-new"
             )
+        else:
+            logger.warning(
+                "SSH key not found at %s — git clone may fail for private repos.",
+                key_path,
+            )
+
     return env
 
 

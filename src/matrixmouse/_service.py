@@ -208,7 +208,7 @@ def _resolve_workspace() -> Path:
             return p
         logger.error("WORKSPACE_PATH set but directory does not exist: %s", p)
         sys.exit(1)
-    default = Path.home() / "matrixmouse-workspace"
+    default = Path("/var/lib/matrixmouse-workspace")
     if default.exists():
         return default
     logger.error(

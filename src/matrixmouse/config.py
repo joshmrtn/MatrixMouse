@@ -48,6 +48,16 @@ class MatrixMouseConfig(BaseSettings):
         description="Email used for git commits made by the agent.",
     )
 
+    # --- Agent secret credential files ---
+    gh_ssh_key_file: str = Field(
+        default="agent_ed25519",
+        description="Filename of the agent's SSH key within /etc/matrixmouse/secrets/.",
+    )
+    gh_token_file: str = Field(
+        default="github_token",
+        description="Filename of the agent's GitHub token (PAT) within /etc/matrixmouse/secrets/.",
+    )
+
     # --- Models ---
     coder_model: str = Field(
         default="qwen3.5:4b",
@@ -241,9 +251,14 @@ def load_config(
     merged: dict[str, Any] = {}
 
     if workspace_root is None:
+        # Fall back to WORKSPACE_PATH env var - set in systemd unit file
+        # or overriden via `Environment=` for non-default workspace locations.
         env_workspace = os.environ.get("WORKSPACE_PATH")
         if env_workspace:
             workspace_root = Path(env_workspace)
+        else:
+            # Default - matches install.sh
+            workspace_root = Path("/var/lib/matrixmouse-workspace")
 
     # Layer 1 defaults are provided by MatrixMouseConfig field defaults.
     # Layers 2-5 are loaded in order, each overwriting the previous.

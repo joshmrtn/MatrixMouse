@@ -75,6 +75,27 @@ def _resolve_workspace() -> Path:
 
 
 def _resolve_port() -> int:
+    """
+    Resolve the API port from the global config file.
+    Falls back to MM_SERVER_PORT env var, then 8080.
+    The global config is readable by the matrixmouse group.
+    """
+    import tomllib
+    global_config = Path("/etc/matrixmouse/config.toml")
+    try:
+        if global_config.exists():
+            with open(global_config, "rb") as f:
+                data = tomllib.load(f)
+            if "server_port" in data:
+                return int(data["server_port"])
+    except PermissionError:
+        print(
+            "Warning: Cannot read /etc/matrixmouse/config.toml — "
+            "you may need to log out and back in for group membership to take effect. "
+            "Falling back to MM_SERVER_PORT or default 8080."
+        )
+    except Exception:
+        pass
     return int(os.environ.get("MM_SERVER_PORT", "8080"))
 
 
