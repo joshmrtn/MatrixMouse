@@ -40,35 +40,40 @@ def _git_env() -> dict:
         - GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL: agent identity for commits.
         - GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL: same.
 
-    The SSH key path is read from MATRIXMOUSE_AGENT_GH_KEY env var.
-    If not set, falls back to the host's default SSH config — fine for
-    development, but production should always have the key configured.
+    The SSH key filename is read from config (gh_ssh_key_file), resolved
+    against /etc/matrixmouse/secrets/. Falls back to the host's default
+    SSH config if config is not loaded — fine for development.
     """
     env = os.environ.copy()
 
-    key_file = os.environ.get("MATRIXMOUSE_AGENT_GH_KEY_FILE")
-    key_path = f"/run/secrets/{key_file}" if key_file else None
-    if key_path:
-        env["GIT_SSH_COMMAND"] = (
-            f"ssh -i {key_path} "
-            f"-o IdentitiesOnly=yes "
-            f"-o StrictHostKeyChecking=accept-new"
-        )
-    else:
-        logger.debug(
-            "MATRIXMOUSE_AGENT_GH_KEY not set. "
-            "Git operations will use the host's default SSH config."
-        )
-
-    # Agent git identity — set here so it overrides any host-level
-    # git config without modifying it
     from matrixmouse import config as config_module
     cfg = getattr(config_module, "_loaded_config", None)
+
     if cfg:
+        secrets_dir = Path("/etc/matrixmouse/secrets")
+        key_path = secrets_dir / cfg.gh_ssh_key_file
+        if key_path.exists():
+            env["GIT_SSH_COMMAND"] = (
+                f"ssh -i {key_path} "
+                f"-o IdentitiesOnly=yes "
+                f"-o StrictHostKeyChecking=accept-new"
+            )
+        else:
+            logger.warning(
+                "SSH key not found at %s. "
+                "Git operations will use the host's default SSH config.",
+                key_path,
+            )
+
         env["GIT_AUTHOR_NAME"]     = cfg.agent_git_name
         env["GIT_AUTHOR_EMAIL"]    = cfg.agent_git_email
         env["GIT_COMMITTER_NAME"]  = cfg.agent_git_name
         env["GIT_COMMITTER_EMAIL"] = cfg.agent_git_email
+    else:
+        logger.debug(
+            "Config not loaded. "
+            "Git operations will use the host's default SSH config."
+        )
 
     return env
 
