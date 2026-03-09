@@ -86,35 +86,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2 — Ollama override
+# Step 2 — Docker image 
 # ---------------------------------------------------------------------------
 
-header "Step 2 — Ollama configuration"
+header "Step 2 — Docker test runner"
 
-OLLAMA_OVERRIDE="/etc/systemd/system/ollama.service.d/override.conf"
-if [ -f "$OLLAMA_OVERRIDE" ]; then
-    if confirm "Remove MatrixMouse Ollama override (OLLAMA_MAX_LOADED_MODELS)?"; then
-        sudo rm -f "$OLLAMA_OVERRIDE"
-        sudo rmdir /etc/systemd/system/ollama.service.d 2>/dev/null || true
-        if $HAS_SYSTEMD; then
-            sudo systemctl daemon-reload
-            sudo systemctl restart ollama 2>/dev/null || true
-        fi
-        success "Ollama override removed"
-    fi
-else
-    info "No Ollama override found — skipping"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 3 — Docker image 
-# ---------------------------------------------------------------------------
-
-header "Step 3 — Docker test runner"
-
-if docker image inspect matrixmouse-test-runner &>/dev/null 2>&1; then
+if sudo docker image inspect matrixmouse-test-runner &>/dev/null 2>&1; then
     if confirm "Remove matrixmouse-test-runner Docker image?"; then
-        docker rmi matrixmouse-test-runner
+        sudo docker rmi matrixmouse-test-runner
         success "Docker image removed"
     fi
 else
@@ -122,29 +101,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 — Uninstall MatrixMouse package
+# Step 3 — Uninstall MatrixMouse package
 # ---------------------------------------------------------------------------
 
-header "Step 4 — MatrixMouse package"
+header "Step 3 — Remove MatrixMouse binaries"
 
-if uv tool list 2>/dev/null | grep -q "matrixmouse"; then
-    if confirm "Uninstall matrixmouse via uv?"; then
-        uv tool uninstall matrixmouse
-        success "matrixmouse package uninstalled"
+if [ -f "/usr/local/bin/matrixmouse-service" ]; then
+    if confirm "Remove matrixmouse binaries and uv tool installation?"; then
+        sudo rm -f /usr/local/bin/matrixmouse
+        sudo rm -f /usr/local/bin/matrixmouse-service
+        sudo UV_TOOL_DIR=/usr/local/share/uv/tools \
+            uv tool uninstall matrixmouse 2>/dev/null || \
+            sudo rm -rf /usr/local/share/uv/tools/matrixmouse
+        sudo rm -rf /usr/local/lib/matrixmouse
+        success "Binaries and tool installation removed"
     fi
 else
-    info "matrixmouse not found in uv tools — skipping"
+    success "matrixmouse not found at /usr/local/bin — skipping"
 fi
 
+
+
 # ---------------------------------------------------------------------------
-# Step 5 — System user
+# Step 4 — System user
 # ---------------------------------------------------------------------------
 
-header "Step 5 — System user"
+header "Step 4 — System user"
 
 if id "$MM_USER" &>/dev/null; then
-    if confirm "Remove system user '$MM_USER'?"; then
+    if confirm "Remove matrixmouse system user '$MM_USER'?"; then
         sudo userdel "$MM_USER" 2>/dev/null || true
+	sudo rm -rf /home/matrixmouse
         success "System user '$MM_USER' removed"
     fi
 else
@@ -162,10 +149,10 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Step 6 — matrixmouse group
+# Step 5 — matrixmouse group
 # ---------------------------------------------------------------------------
 
-header "Step 6 — matrixmouse group"
+header "Step 5 — matrixmouse group"
 
 if getent group matrixmouse &>/dev/null; then
     if confirm "Remove matrixmouse group?"; then
@@ -177,10 +164,10 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — /etc/matrixmouse (config + secrets) — DANGEROUS
+# Step 6 — /etc/matrixmouse (config + secrets) — DANGEROUS
 # ---------------------------------------------------------------------------
 
-header "Step 7 — /etc/matrixmouse"
+header "Step 6 — /etc/matrixmouse"
 
 if [ -d "$ETC_DIR" ]; then
     echo ""
@@ -200,10 +187,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 8 — Workspace — DANGEROUS
+# Step 7 — Workspace — DANGEROUS
 # ---------------------------------------------------------------------------
 
-header "Step 8 — Workspace"
+header "Step 7 — Workspace"
 
 # Find workspace — try the default, fall back to env var
 WORKSPACE_PATH="${WORKSPACE_PATH:-$DEFAULT_WORKSPACE}"
@@ -235,5 +222,7 @@ echo "Intentionally preserved (if you declined above):"
 echo "  $ETC_DIR   — credentials, ready for reinstall"
 echo "  $WORKSPACE_PATH  — repos and task history"
 echo "  /var/lib/matrixmouse-mirrors/  — not touched"
+echo "  Ollama override (OLLAMA_MAX_LOADED_MODELS) not touched"
+echo "  remove manually if desired: `/etc/systemd/system/ollama.service.d/override.conf`"
 echo "  ollama, docker   — not touched"
 echo ""
