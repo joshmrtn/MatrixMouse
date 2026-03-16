@@ -295,6 +295,7 @@ class Router:
                 f"A smaller model was unable to make progress and has "
                 f"escalated to you.\n\n"
                 f"Stuck reason: {summary.get('reason', 'unknown')}\n"
+                f"Role: {summary.get('role', 'unknown')}\n"
                 f"Turns taken: {summary.get('total_calls', 0)}\n"
                 f"Consecutive errors: {summary.get('consecutive_errors', 0)}\n"
                 f"Turns without a write: "
