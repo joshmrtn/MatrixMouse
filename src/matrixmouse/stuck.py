@@ -143,7 +143,7 @@ class StuckDetector:
         self._score = self._compute_score()
 
         threshold = ROLE_THRESHOLDS.get(self.role, DEFAULT_THRESHOLD)
-        should_escalate = self._score >= threshold
+        should_escalate = self._score >= threshold and threshold < 1.0
 
         if should_escalate:
             logger.warning(
