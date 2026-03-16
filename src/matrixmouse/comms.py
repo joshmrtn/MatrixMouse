@@ -46,7 +46,7 @@ class AgentEvent:
     A structured event broadcast to connected web UI clients.
     server.py serialises these to JSON and sends over websocket.
     """
-    event_type: str          # "tool_call" | "tool_result" | "content" | "phase_change"
+    event_type: str          # "tool_call" | "tool_result" | "content" | 
                              # "escalation" | "blocked" | "complete" | "error"
     data: dict = field(default_factory=dict)
 
@@ -271,13 +271,13 @@ class CommsManager:
             task:    Current task ID.
             role:    Current agent role name.
             model:   Active model name.
-            turns:   Turn count for the current phase.
+            turns:   Turn count for the current task.
             blocked: Whether the agent is currently blocked.
         """
         if task is not None:
             self._status["task"] = task
-        if phase is not None:
-            self._status["role"] = phase
+        if role is not None:
+            self._status["role"] = role
         if model is not None:
             self._status["model"] = model
         if turns is not None:

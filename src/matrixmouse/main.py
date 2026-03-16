@@ -620,7 +620,7 @@ def _fmt_task_detail(t: dict) -> str:
         f"ID:           {t.get('id', '?')}",
         f"Title:        {t.get('title', '')}",
         f"Status:       {t.get('status', 'pending')}",
-        f"Phase:        {t.get('phase', '?')}",
+        f"Role:         {t.get('role', '?')}",
         f"Repo:         {', '.join(t.get('repo', [])) or '—'}",
         f"Importance:   {t.get('importance', 0.5)}",
         f"Urgency:      {t.get('urgency', 0.5)}",
@@ -713,7 +713,7 @@ def cmd_status(args):
     stopped = result.get("stopped", False)
 
     task    = status.get("task")  or "—"
-    phase   = status.get("phase") or "—"
+    role    = status.get("role") or "—"
     model   = status.get("model") or "—"
     turns   = status.get("turns")
     blocked = status.get("blocked", False)
@@ -724,7 +724,7 @@ def cmd_status(args):
 
     print(f"Status:  {state}")
     print(f"Task:    {task}")
-    print(f"Phase:   {phase}")
+    print(f"Role:    {role}")
     print(f"Model:   {model}")
     if turns is not None:
         print(f"Turns:   {turns}")
