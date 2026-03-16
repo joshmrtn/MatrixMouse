@@ -90,6 +90,8 @@ class Task:
                                     — number of human confirmation events granted
                                       on this branch's decomposition depth
         time_slice_started          — Unix timestamp when status became RUNNING
+        preempt                     — transient flag set by orchestrator to preempt
+                                      the currently running task
         wip_commit_hash             — hash of last real (non-WIP) commit at task
                                       start; used as baseline for git diff tooling
         reviews_task_id             — for CRITIC tasks: points at task under review
@@ -133,6 +135,8 @@ class Task:
     importance: float = 0.5
     urgency: float = 0.5
     time_slice_started: Optional[float] = None
+    # preempt is transient, not persisted to disk.
+    preempt: bool = field(default = False)
 
     # --- Dependency graph ---
     blocked_by: list[str] = field(default_factory=list)

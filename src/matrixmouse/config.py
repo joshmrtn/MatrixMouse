@@ -203,6 +203,82 @@ class MatrixMouseConfig(BaseSettings):
         default=0.3,
         description="Maximum priority bonus from aging (caps at this value).",
     )
+    
+    # --- Priority weights ---
+    priority_importance_weight: float = Field(
+        default=0.6,
+        description="Weight applied to importance when calculating priority score (0.0-1.0).",
+    )
+    priority_urgency_weight: float = Field(
+        default=0.4,
+        description="Weight applied to urgency when calculating priority score (0.0-1.0). importance_weight + urgency_weight should sum to 1.0.",
+    )
+
+    # --- Scheduler ---
+    scheduler_p1_threshold: float = Field(
+        default=0.35,
+        description="Priority score below which a task enters the P1 (highest) queue.",
+    )
+    scheduler_p2_threshold: float = Field(
+        default=0.65,
+        description="Priority score below which a task enters the P2 queue. Scores at or above this enter P3.",
+    )
+    scheduler_p1_slice_minutes: float = Field(
+        default=120.0,
+        description="Time slice in minutes for P1 tasks.",
+    )
+    scheduler_p2_slice_minutes: float = Field(
+        default=90.0,
+        description="Time slice in minutes for P2 tasks.",
+    )
+    scheduler_p3_slice_minutes: float = Field(
+        default=60.0,
+        description="Time slice in minutes for P3 tasks.",
+    )
+    scheduler_adaptive: bool = Field(
+        default=False,
+        description="Enable adaptive time slice adjustment based on observed context switch overhead.",
+    )
+    scheduler_adaptive_step_minutes: float = Field(
+        default=10.0,
+        description="Step size in minutes for adaptive slice adjustments.",
+    )
+    scheduler_adaptive_min_pct: float = Field(
+        default=0.05,
+        description="If switch overhead is below this fraction of the slice, decrease the slice.",
+    )
+    scheduler_adaptive_max_pct: float = Field(
+        default=0.15,
+        description="If switch overhead exceeds this fraction of the slice, increase the slice.",
+    )
+    scheduler_adaptive_min_slice_minutes: float = Field(
+        default=30.0,
+        description="Floor for adaptive slice adjustment. Slices will never be reduced below this.",
+    )
+
+    # --- Manager review schedule ---
+    manager_review_schedule: str = Field(
+        default="0 9 * * *",
+        description="Cron expression for the Manager's daily review task. Default: 9am daily.",
+    )
+
+    # --- Decomposition ---
+    decomposition_depth_limit: int = Field(
+        default=3,
+        description="Maximum task decomposition depth before human confirmation is required.",
+    )
+
+    # --- Critic ---
+    critic_max_turns: int = Field(
+        default=5,
+        description="Maximum turns the Critic agent takes before escalating to human review.",
+    )
+
+    # --- Merge conflicts ---
+    merge_conflict_max_turns: int = Field(
+        default=5,
+        description="Maximum turns an agent attempts autonomous merge conflict resolution before escalating to BLOCKED_BY_HUMAN.",
+    )
 
     # --- Start Paused (e.g., after an E-STOP) --- 
     start_paused: bool = Field(
