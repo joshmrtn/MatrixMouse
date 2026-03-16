@@ -25,6 +25,7 @@ import logging
 import queue
 import threading
 import time
+import os
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -75,7 +76,7 @@ class CommsManager:
         # Track current status for the web UI
         self._status: dict = {
             "task": None,
-            "phase": None,
+            "role": None,
             "model": None,
             "turns": 0,
             "blocked": False,
@@ -146,49 +147,6 @@ class CommsManager:
         return None
 
 
-
-    def wait_for_interjection(
-        self,
-        timeout: float | None = None,
-        current_repo: str | None = None,
-    ) -> str | None:
-        """
-        Block until a relevant interjection arrives or timeout expires.
-        Used by request_clarification(blocking=True).
-
-        Args:
-            timeout:      Seconds to wait. None means wait forever.
-            current_repo: Repo scope filter, same as get_interjection.
-
-        Returns:
-            Message string if one arrived in scope, None if timed out.
-        """
-        import time
-        deadline = (time.monotonic() + timeout) if timeout is not None else None
-
-        while True:
-            remaining = None
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-
-            try:
-                item = self._interjection_queue.get(timeout=min(remaining or 1.0, 1.0))
-            except queue.Empty:
-                if deadline is not None and time.monotonic() >= deadline:
-                    return None
-                continue
-
-            item_repo = item.get("repo")
-
-            if item_repo is None or item_repo == current_repo:
-                return item["message"]
-
-            # Out of scope — put back and keep waiting
-            self._interjection_queue.put(item)
-
-
     # ------------------------------------------------------------------
     # Notifications — agent → human (push)
     # ------------------------------------------------------------------
@@ -251,19 +209,17 @@ class CommsManager:
         except Exception as e:
             logger.warning("Notification failed: %s", e)
 
-    def notify_blocked(self, task_id: str, phase: str, reason: str) -> None:
+    def notify_blocked(self, message: str) -> None:
         """
-        Convenience wrapper for the most common notification type —
-        the agent is blocked and needs human attention.
+        Convenience wrapper for blocked-task notifications.
 
         Args:
-            task_id: The task that is blocked.
-            phase:   The phase during which blocking occurred.
-            reason:  Human-readable reason for the block.
+            message: Human-readable description of the block, including
+                    task ID and reason.
         """
         self.notify(
-            title=f"MatrixMouse blocked — {task_id}",
-            message=f"Phase: {phase}\nReason: {reason}\n\nSend a message to unblock.",
+            title="MatrixMouse needs attention",
+            message=message,
             priority="high",
         )
 
@@ -301,19 +257,19 @@ class CommsManager:
     def update_status(
         self,
         task: str | None = None,
-        phase: str | None = None,
+        role: str | None = None,
         model: str | None = None,
         turns: int | None = None,
         blocked: bool | None = None,
     ) -> None:
         """
         Update the current status and broadcast a status_update event.
-        Called by the orchestrator at phase transitions and by the loop
+        Called by the orchestrator at task transitions and by the loop
         each turn.
 
         Args:
             task:    Current task ID.
-            phase:   Current phase name.
+            role:    Current agent role name.
             model:   Active model name.
             turns:   Turn count for the current phase.
             blocked: Whether the agent is currently blocked.
@@ -321,7 +277,7 @@ class CommsManager:
         if task is not None:
             self._status["task"] = task
         if phase is not None:
-            self._status["phase"] = phase
+            self._status["role"] = phase
         if model is not None:
             self._status["model"] = model
         if turns is not None:
@@ -335,70 +291,6 @@ class CommsManager:
     def status(self) -> dict:
         """Current agent status snapshot."""
         return dict(self._status)
-
-    # ------------------------------------------------------------------
-    # Clarification request tool logic
-    # ------------------------------------------------------------------
-
-    def request_clarification(
-        self,
-        question: str,
-        blocking: bool = True,
-        timeout: float = 3600.0,
-    ) -> str:
-        """
-        Ask the human operator a question and optionally wait for a reply.
-
-        If blocking=True, the loop pauses here until a reply arrives or
-        timeout expires. If blocking=False, the question is logged and
-        notified but the loop continues immediately.
-
-        Args:
-            question: The question to ask the human.
-            blocking: Whether to halt the loop until a reply is received.
-            timeout:  Seconds to wait for a reply (blocking mode only).
-                      Defaults to 1 hour.
-
-        Returns:
-            The human's reply, a timeout message, or an acknowledgement
-            for non-blocking requests.
-        """
-        logger.info("Agent requesting clarification: %s", question)
-
-        self.notify(
-            title="MatrixMouse needs clarification",
-            message=question,
-            priority="high" if blocking else "default",
-        )
-        self.set_pending_question(question)
-        self.emit("clarification_request", {
-            "question": question,
-            "blocking": blocking,
-        })
-        self.update_status(blocked=blocking)
-
-        if not blocking:
-            return (
-                "Clarification request sent. Continuing without waiting for reply. "
-                "The operator's response will be injected at the next loop boundary."
-            )
-
-        logger.info("Loop paused waiting for human reply (timeout: %ds)...", timeout)
-        reply = self.wait_for_interjection(timeout=timeout, current_repo=None)
-        self.set_pending_question(None)
-
-        self.update_status(blocked=False)
-
-        if reply is None:
-            logger.warning("Clarification request timed out after %ds.", timeout)
-            return (
-                f"No reply received within {timeout:.0f} seconds. "
-                "Continuing with best judgement. "
-                "The operator can still send a message to course-correct."
-            )
-
-        logger.info("Clarification reply received: %s", reply[:80])
-        return reply
 
 
     def set_pending_question(self, question: str | None) -> None:
