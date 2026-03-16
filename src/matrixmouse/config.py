@@ -187,6 +187,10 @@ class MatrixMouseConfig(BaseSettings):
         default="",
         description="Public URL of the MatrixMouse web UI, e.g. https://mm.example.com. Used to add a link to ntfy notifications.",
     )
+    clarification_grace_period_minutes: int = Field(
+        default=10,
+        description="Number of minutes to wait after a request_clarification for human input. After this time elapses, the scheduler moves on to another task.",
+    )
 
     # --- Server ---
     server_port: int = Field(
