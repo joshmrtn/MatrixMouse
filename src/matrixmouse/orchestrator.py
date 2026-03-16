@@ -393,7 +393,7 @@ class Orchestrator:
         from matrixmouse.comms import poll_interjection, get_manager
         from matrixmouse import memory
 
-        task_tools.configure(self.queue, task.id)
+        task_tools.configure(self.queue, task.id, self.config)
 
         def _persist_messages(messages: list) -> None:
             """Write context_messages back to the task and flush to disk.

@@ -44,22 +44,32 @@ logger = logging.getLogger(__name__)
 
 _queue: Optional["TaskQueue"] = None
 _active_task_id: Optional[str] = None
+_config: Optional["MatrixMouseConfig"] = None
 
 
-def configure(queue: "TaskQueue", active_task_id: Optional[str] = None) -> None:
+def configure(
+    queue: "TaskQueue",
+    active_task_id: Optional[str] = None,
+    config: Optional["MatrixMouseConfig"] = None,
+) -> None:
     """
-    Inject the task queue and active task ID.
+    Inject the task queue, active task ID, and config.
 
     Called by the orchestrator at the start of each task so tools
-    can read and mutate the correct task.
+    can read and mutate the correct task and respect config values
+    such as decomposition_depth_limit.
 
     Args:
         queue:          The workspace-level TaskQueue.
         active_task_id: ID of the task currently being worked on.
+        config:         MatrixMouseConfig instance. Used for depth
+                        limit enforcement in split_task. If None,
+                        split_task falls back to the default value of 3.
     """
-    global _queue, _active_task_id
+    global _queue, _active_task_id, _config
     _queue = queue
     _active_task_id = active_task_id
+    _config = config
     logger.debug("task_tools configured. Active task: %s", active_task_id)
 
 
@@ -265,13 +275,12 @@ def split_task(
         )
 
     # --- Depth limit check ---
+    depth_limit = (
+        getattr(_config, "decomposition_depth_limit", 3)
+        if _config is not None else 3
+    )
     # decomposition_confirmed_depth tracks how many confirmation events
-    # have been granted on this branch, each granting 3 additional levels.
-    depth_limit = getattr(_queue, '_config_depth_limit', None)
-    if depth_limit is None:
-        # Fall back: try to read from a config reference if available
-        depth_limit = 3  # matches config default
-
+    # have been granted on this branch, each granting depth_limit additional levels.
     allowed_depth = depth_limit + (parent.decomposition_confirmed_depth * depth_limit)
     if parent.depth >= allowed_depth:
         import uuid
