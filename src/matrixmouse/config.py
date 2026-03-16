@@ -63,6 +63,10 @@ class MatrixMouseConfig(BaseSettings):
         default="qwen3.5:4b",
         description="Model for code generation and implementation tasks.",
     )
+    writer_model: str = Field(
+        default="qwen3.5:4b",
+        description="Model for prose generation tasks. (Not for source code).",
+    )
     planner_model: str = Field(
         default="qwen3.5:4b",
         description="Model for planning, design, and architectural decisions.",
@@ -91,6 +95,10 @@ class MatrixMouseConfig(BaseSettings):
         default=False,
         description="Enable extended thinking for the coder model. Increases quality but uses more context.",
     )
+    writer_think: bool = Field(
+        default=False,
+        description="Enable extended thinking for the writer model. Increases quality but uses more context.",
+    )
     planner_think: bool = Field(
         default=False,
         description="Enable extended thinking for the planner model.",
@@ -106,6 +114,10 @@ class MatrixMouseConfig(BaseSettings):
     coder_stream: bool = Field(
         default=True,
         description="Stream coder model output token by token. Disable if the model misbehaves with streaming.",
+    )
+    writer_think: bool = Field(
+        default=True,
+        description="Stream writer model output token by token. Disable if the model misbehaves with streaming.",
     )
     planner_stream: bool = Field(
         default=True,
