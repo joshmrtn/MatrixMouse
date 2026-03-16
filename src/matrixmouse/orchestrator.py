@@ -64,7 +64,6 @@ class PhaseResult:
     """Bundles loop outcome with stuck diagnostics for _run_task."""
     loop_result: LoopResult
     detector: StuckDetector
-    time_slice_expired: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -314,10 +313,9 @@ class Orchestrator:
             detector = phase_result.detector
 
             # --- Time slice expiry / preemption ---
-            if phase_result.time_slice_expired:
+            if result.exit_reason == LoopExitReason.YIELD:
                 logger.info(
-                    "Task [%s] time slice expired after phase %s. "
-                    "Returning to READY.",
+                    "Task [%s] yielding after phase %s. Returning to READY.",
                     task.id, current_phase.name,
                 )
                 self.queue.mark_ready(task.id)
@@ -397,6 +395,25 @@ class Orchestrator:
 
         task_tools.configure(self.queue, task.id)
 
+        def _persist_messages(messages: list) -> None:
+            """Write context_messages back to the task and flush to disk.
+            
+            TODO: We'll want to give each task its own dedicated file at some 
+            point to avoid write bottleneck.
+            """
+            task.context_messages = list(messages)
+            try:
+                self.queue.update(task)
+            except Exception as e:
+                logger.warning(
+                    "Failed to persist context_messages for task [%s]: %s",
+                    task.id, e,
+                    )
+                
+        def _should_yield_now() -> bool:
+            """Check time slice expiry and preemption at each inference boundary."""
+            return self._should_yield(task)
+
         current_repo = task.repo[0] if task.repo else None
         scoped_comms = functools.partial(
             poll_interjection, current_repo=current_repo
@@ -426,6 +443,8 @@ class Orchestrator:
             stuck_detector=detector,
             comms=scoped_comms,
             emit=comms_manager.emit if comms_manager else lambda t, d: None,
+            persist=_persist_messages,
+            should_yield=_should_yield_now,
             stream=self._router.stream_for_phase(phase),
             think=self._router.think_for_phase(phase),
             current_repo=current_repo,
@@ -437,14 +456,9 @@ class Orchestrator:
         if result.exit_reason == LoopExitReason.ESCALATE:
             logger.warning("Stuck summary: %s", detector.summary)
 
-        # Check time slice expiry and preemption after inference completes.
-        # Never interrupts mid-inference — only checked at this boundary.
-        slice_expired = self._should_yield(task)
-
         return PhaseResult(
             loop_result=result,
             detector=detector,
-            time_slice_expired=slice_expired,
         )
 
     # -----------------------------------------------------------------------
@@ -598,3 +612,4 @@ class Orchestrator:
             "importance_weight": getattr(self.config, "priority_importance_weight", 0.6),
             "urgency_weight":    getattr(self.config, "priority_urgency_weight",    0.4),
         }
+    

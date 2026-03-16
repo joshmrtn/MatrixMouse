@@ -42,6 +42,7 @@ class LoopExitReason(Enum):
     ESCALATE        = auto()  # stuck detector triggered escalation
     MAX_TURNS       = auto()  # safety limit reached
     ERROR           = auto()  # unrecoverable error
+    YIELD           = auto()  # yield control back to orchestrator
 
 
 @dataclass
@@ -83,6 +84,8 @@ class AgentLoop:
         stuck_detector=None,    # callable: (tool_name, arguments, had_error) -> bool
         comms=None,             # callable: () -> str | None
         emit=None,
+        persist=None,           # callable: (messages: list) -> None
+        should_yield=None,      # callable: () -> bool
         stream: bool = True,    # stream tokens to web UI
         think: bool = False,    # enable extended thinking
         current_repo: str | None = None,
@@ -92,6 +95,8 @@ class AgentLoop:
         self.config = config
         self.paths = paths
         self._emit = emit or _noop_emit
+        self._persist = persist or _noop_persist
+        self._should_yield = should_yield or _noop_should_yield
         self.stream = stream
         self.think = think
         self.current_repo = current_repo
@@ -171,6 +176,9 @@ class AgentLoop:
 
             # --- Append response to history ---
             self.messages.append(response.message)
+            self._persist(self.messages)
+
+
 
             # --- Tool dispatch ---
             if response.message.tool_calls:
@@ -182,6 +190,19 @@ class AgentLoop:
                 # plain text response. Log it and continue; the model may
                 # be reasoning before its next tool call.
                 logger.debug("No tool calls in turn %d.", self._turns)
+
+             # --- Yield check (time slice/ preemption) ---
+            if self._should_yield():
+                logger.info(
+                    "Yield signal received after turn %d. "
+                    "Returning control to scheduler.",
+                    self._turns,
+                )
+                return LoopResult(
+                    exit_reason=LoopExitReason.YIELD,
+                    messages=self.messages,
+                    turns_taken=self._turns,
+                )
 
         # Should not be reachable — loop exits via return inside the while.
         # Included as a safety net.
@@ -317,6 +338,8 @@ class AgentLoop:
                 "content": str(result),
             })
 
+            self._persist(self.messages)
+
             # --- Stuck check after each tool call ---
             if self._check_stuck(name, arguments, had_error):
                 logger.warning("Stuck detector triggered on tool: %s", name)
@@ -354,3 +377,11 @@ def _noop_comms() -> None:
 def _noop_emit(event_type: str, data: dict) -> None:
     """No-op emit until comms is wired in."""
     pass
+
+def _noop_persist(messages: list) -> None:
+    """No-op until persistence is wired in."""
+    pass
+
+def _noop_should_yield() -> bool:
+    """Never yields until scheduler is wired in."""
+    return False
