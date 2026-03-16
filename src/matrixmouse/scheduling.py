@@ -184,31 +184,35 @@ class Scheduler:
         running = [t for t in all_active if t.status == TaskStatus.RUNNING]
         if running:
             current = running[0]
-            level   = self._queue_level(current)
-            elapsed = self._elapsed_minutes(current)
-            limit   = self._slice_minutes(level)
-            if elapsed < limit:
-                # Slice has not expired — keep running
-                return SchedulingDecision(
-                    task=current,
-                    reason=(
-                        f"Time slice active: [{current.id}] "
-                        f"{elapsed:.1f}/{limit:.0f} min elapsed (P{level})."
-                    ),
-                    queue_level=level,
-                    candidates_considered=len(ready),
-                    total_active=len(all_active),
+            if current.time_slice_started is None:
+                # Inconsistent state — running but no slice recorded.
+                # Treat as expired and fall through to select next task.
+                logger.warning(
+                    "Task [%s] is RUNNING but has no time_slice_started — "
+                    "treating slice as expired.",
+                    current.id,
                 )
             else:
-                logger.info(
-                    "Scheduler: time slice expired for [%s] "
-                    "(%.1f min, limit %.0f min, P%d).",
-                    current.id, elapsed, limit, level,
-                )
-                # Slice expired — fall through to select next task.
-                # Orchestrator is responsible for calling queue.mark_ready()
-                # on the current task before the next mark_running() call.
-
+                level   = self._queue_level(current)
+                elapsed = self._elapsed_minutes(current)
+                limit   = self._slice_minutes(level)
+                if elapsed < limit:
+                    return SchedulingDecision(
+                        task=current,
+                        reason=(
+                            f"Time slice active: [{current.id}] "
+                            f"{elapsed:.1f}/{limit:.0f} min elapsed (P{level})."
+                        ),
+                        queue_level=level,
+                        candidates_considered=len(ready),
+                        total_active=len(all_active),
+                    )
+                else:
+                    logger.info(
+                        "Scheduler: time slice expired for [%s] "
+                        "(%.1f min, limit %.0f min, P%d).",
+                        current.id, elapsed, limit, level,
+                    )
         # --- Select next task from queue levels ---
         chosen, level = self._select_from_queues(ready)
         self._last_served_level = level

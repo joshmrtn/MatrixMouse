@@ -269,7 +269,7 @@ class Task:
             status = TaskStatus.READY
 
         return cls(
-            id=data.get("id", str(uuid.uuid4())),
+            id=data.get("id", str(uuid.uuid4().hex[:16])),
             title=data.get("title", ""),
             description=data.get("description", ""),
             role=role,
