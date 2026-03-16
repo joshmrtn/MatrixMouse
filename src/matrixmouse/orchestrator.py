@@ -371,6 +371,10 @@ class Orchestrator:
             )
             return
 
+        if result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED:
+            self._handle_turn_limit(task, result)
+            return
+
         # --- Error ---
         if result.exit_reason == LoopExitReason.ERROR:
             self._request_human_intervention(
@@ -459,6 +463,7 @@ class Orchestrator:
             stream=self._router.stream_for_role(task.role),
             think=self._router.think_for_role(task.role),
             current_repo=current_repo,
+            task_turn_limit=task.turn_limit,
         )
 
         result = loop.run()
@@ -716,3 +721,42 @@ class Orchestrator:
             "importance_weight": getattr(self.config, "priority_importance_weight", 0.6),
             "urgency_weight":    getattr(self.config, "priority_urgency_weight",    0.4),
         }
+
+    def _handle_turn_limit(self, task: Task, result: LoopResult) -> None:
+        """
+        Handle a task that has reached its turn limit.
+
+        Moves the task to BLOCKED_BY_HUMAN and emits a turn_limit_reached
+        event so the UI can display the confirmation modal. The operator
+        can then extend, respec, or cancel via POST /tasks/{id}/turn-limit-response.
+        """
+        self.queue.mark_blocked_by_human(
+            task.id,
+            reason=f"Turn limit reached ({result.turns_taken} turns).",
+        )
+        self._update_status(blocked=True)
+
+        logger.warning(
+            "Turn limit reached — Task [%s] %s | %d turns | Role: %s",
+            task.id, task.title, result.turns_taken, task.role.value,
+        )
+
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.notify_blocked(
+                    f"Task [{task.id}] hit turn limit ({result.turns_taken} turns): "
+                    f"{task.title}"
+                )
+                m.emit("turn_limit_reached", {
+                    "task_id":     task.id,
+                    "task_title":  task.title,
+                    "role":        task.role.value,
+                    "turns_taken": result.turns_taken,
+                    "turn_limit":  task.turn_limit or getattr(
+                        self.config, "agent_max_turns", 50
+                    ),
+                })
+        except Exception as e:
+            logger.warning("Failed to send turn limit notification: %s", e)

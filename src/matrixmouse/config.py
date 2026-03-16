@@ -79,6 +79,14 @@ class MatrixMouseConfig(BaseSettings):
         default="qwen3.5:4b",
         description="Model for context summarisation. Should be small and fast.",
     )
+    agent_max_turns: int = Field(
+        default=50,
+        description=(
+            "Maximum turns an agent may take on a single task before the "
+            "task is moved to BLOCKED_BY_HUMAN. The operator can extend, "
+            "respec, or cancel via the turn-limit response endpoint."
+        ),
+    )
 
     # --- Coder cascade ---
     coder_cascade: list[str] = Field(
