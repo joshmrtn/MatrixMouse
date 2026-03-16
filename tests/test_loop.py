@@ -8,7 +8,7 @@ Coverage:
     - _chat_completion dispatches correctly based on self.stream
     - _chat_completion_batch passes correct arguments to ollama.chat
     - _chat_completion_stream accumulates content, thinking, tool_calls
-    - _chat_completion_stream emits token and thinking events for respective chunk types 
+    - _chat_completion_stream emits token and thinking events for respective chunk types
     - _chat_completion_stream returns correct response shape
     - _chat_completion_stream returns tool_calls=None when none present
     - think flag passed through in both batch and stream paths
@@ -21,13 +21,21 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from matrixmouse.loop import AgentLoop, LoopExitReason, _noop_emit
+from matrixmouse.loop import (
+    AgentLoop,
+    LoopExitReason,
+    LoopResult,
+    _noop_emit,
+    _noop_persist,
+    _noop_should_yield,
+)
 from matrixmouse.config import MatrixMouseConfig
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_config(**kwargs):
     """Return a MatrixMouseConfig with test-friendly defaults."""
@@ -67,15 +75,43 @@ def make_batch_response(content="", thinking="", tool_calls=None):
     return SimpleNamespace(message=msg)
 
 
+def make_loop_full(
+    stream=True, think=False, emit=None, messages=None, persist=None, should_yield=None
+):
+    """Construct an AgentLoop with all Phase A callables injectable."""
+    return AgentLoop(
+        model="test-model",
+        messages=messages or [{"role": "user", "content": "do something"}],
+        config=make_config(),
+        paths=MagicMock(),
+        emit=emit,
+        persist=persist,
+        should_yield=should_yield,
+        stream=stream,
+        think=think,
+    )
+
+
+def make_declare_complete_call():
+    """Fake tool call that triggers declare_complete."""
+    call = MagicMock()
+    call.function.name = "declare_complete"
+    call.function.arguments = {"summary": "all done"}
+    return call
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
+
 class TestDispatch:
     def test_stream_true_calls_stream_path(self):
         loop = make_loop(stream=True)
-        with patch.object(loop, "_chat_completion_stream") as mock_stream, \
-             patch.object(loop, "_chat_completion_batch") as mock_batch:
+        with (
+            patch.object(loop, "_chat_completion_stream") as mock_stream,
+            patch.object(loop, "_chat_completion_batch") as mock_batch,
+        ):
             mock_stream.return_value = make_batch_response("hi")
             loop._chat_completion()
             mock_stream.assert_called_once()
@@ -83,8 +119,10 @@ class TestDispatch:
 
     def test_stream_false_calls_batch_path(self):
         loop = make_loop(stream=False)
-        with patch.object(loop, "_chat_completion_stream") as mock_stream, \
-             patch.object(loop, "_chat_completion_batch") as mock_batch:
+        with (
+            patch.object(loop, "_chat_completion_stream") as mock_stream,
+            patch.object(loop, "_chat_completion_batch") as mock_batch,
+        ):
             mock_batch.return_value = make_batch_response("hi")
             loop._chat_completion()
             mock_batch.assert_called_once()
@@ -94,6 +132,7 @@ class TestDispatch:
 # ---------------------------------------------------------------------------
 # Batch path
 # ---------------------------------------------------------------------------
+
 
 class TestBatchCompletion:
     def test_calls_ollama_with_stream_false(self):
@@ -139,6 +178,7 @@ class TestBatchCompletion:
 # ---------------------------------------------------------------------------
 # Stream path — accumulation
 # ---------------------------------------------------------------------------
+
 
 class TestStreamAccumulation:
     def test_accumulates_content_across_chunks(self):
@@ -196,6 +236,7 @@ class TestStreamAccumulation:
 # Stream path — response shape
 # ---------------------------------------------------------------------------
 
+
 class TestStreamResponseShape:
     def test_response_has_message_attribute(self):
         loop = make_loop(stream=True)
@@ -231,6 +272,7 @@ class TestStreamResponseShape:
 # Stream path — token emission
 # ---------------------------------------------------------------------------
 
+
 class TestTokenEmission:
     def test_emits_token_for_each_content_chunk(self):
         emitted = []
@@ -256,7 +298,7 @@ class TestTokenEmission:
         with patch("matrixmouse.loop.ollama.chat", return_value=iter(chunks)):
             loop._chat_completion_stream()
         thinking_events = [(t, d) for t, d in emitted if t == "thinking"]
-        token_events    = [(t, d) for t, d in emitted if t == "token"]
+        token_events = [(t, d) for t, d in emitted if t == "token"]
         assert len(thinking_events) == 1
         assert thinking_events[0] == ("thinking", {"text": "internal reasoning"})
         assert len(token_events) == 1
@@ -295,11 +337,14 @@ class TestTokenEmission:
 # Think flag passthrough
 # ---------------------------------------------------------------------------
 
+
 class TestThinkFlag:
     def test_stream_passes_think_true(self):
         loop = make_loop(stream=True, think=True)
         chunks = [make_chunk(content="done")]
-        with patch("matrixmouse.loop.ollama.chat", return_value=iter(chunks)) as mock_chat:
+        with patch(
+            "matrixmouse.loop.ollama.chat", return_value=iter(chunks)
+        ) as mock_chat:
             loop._chat_completion_stream()
         _, kwargs = mock_chat.call_args
         assert kwargs["think"] is True
@@ -307,7 +352,9 @@ class TestThinkFlag:
     def test_stream_passes_think_false(self):
         loop = make_loop(stream=True, think=False)
         chunks = [make_chunk(content="done")]
-        with patch("matrixmouse.loop.ollama.chat", return_value=iter(chunks)) as mock_chat:
+        with patch(
+            "matrixmouse.loop.ollama.chat", return_value=iter(chunks)
+        ) as mock_chat:
             loop._chat_completion_stream()
         _, kwargs = mock_chat.call_args
         assert kwargs["think"] is False
@@ -316,6 +363,7 @@ class TestThinkFlag:
 # ---------------------------------------------------------------------------
 # _noop_emit
 # ---------------------------------------------------------------------------
+
 
 class TestNoopEmit:
     def test_accepts_any_args(self):
@@ -326,3 +374,164 @@ class TestNoopEmit:
 
     def test_returns_none(self):
         assert _noop_emit("token", {}) is None
+
+
+# ---------------------------------------------------------------------------
+# persist callable
+# ---------------------------------------------------------------------------
+
+
+class TestPersistCallable:
+    def test_persist_stored_when_provided(self):
+        persist = MagicMock()
+        loop = make_loop_full(persist=persist)
+        assert loop._persist is persist
+
+    def test_persist_defaults_to_noop(self):
+        loop = make_loop_full(persist=None)
+        assert loop._persist is _noop_persist
+
+    def test_persist_called_after_inference(self):
+        persist = MagicMock()
+        loop = make_loop_full(persist=persist, stream=False)
+
+        response = make_batch_response(tool_calls=[make_declare_complete_call()])
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            loop.run()
+
+        assert persist.called
+        # First call is after appending model response
+        first_call_messages = persist.call_args_list[0][0][0]
+        assert isinstance(first_call_messages, list)
+
+    def test_persist_called_after_tool_result(self):
+        persist = MagicMock()
+
+        # First turn: model calls a real tool, second turn: declare_complete
+        tool_call = MagicMock()
+        tool_call.function.name = "read_file"
+        tool_call.function.arguments = {"path": "foo.py"}
+
+        response1 = make_batch_response(tool_calls=[tool_call])
+        response2 = make_batch_response(tool_calls=[make_declare_complete_call()])
+
+        loop = make_loop_full(persist=persist, stream=False)
+
+        with (
+            patch("matrixmouse.loop.ollama.chat", side_effect=[response1, response2]),
+            patch.dict(
+                "matrixmouse.loop.TOOL_REGISTRY",
+                {"read_file": lambda path: "file content"},
+            ),
+        ):
+            loop.run()
+
+        # persist should have been called at least twice:
+        # once after model response, once after tool result
+        assert persist.call_count >= 2
+
+    def test_noop_persist_accepts_any_messages(self):
+        _noop_persist([])
+        _noop_persist([{"role": "user", "content": "hi"}])
+
+    def test_noop_persist_returns_none(self):
+        assert _noop_persist([]) is None
+
+
+# ---------------------------------------------------------------------------
+# should_yield callable
+# ---------------------------------------------------------------------------
+
+
+class TestShouldYieldCallable:
+    def test_should_yield_stored_when_provided(self):
+        should_yield = MagicMock(return_value=False)
+        loop = make_loop_full(should_yield=should_yield)
+        assert loop._should_yield is should_yield
+
+    def test_should_yield_defaults_to_noop(self):
+        loop = make_loop_full(should_yield=None)
+        assert loop._should_yield is _noop_should_yield
+
+    def test_yield_signal_causes_yield_exit(self):
+        # should_yield returns True after first turn
+        call_count = 0
+
+        def yield_after_one():
+            nonlocal call_count
+            call_count += 1
+            return call_count >= 1
+
+        loop = make_loop_full(
+            stream=False,
+            should_yield=yield_after_one,
+        )
+        response = make_batch_response(content="thinking...")
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+
+        assert result.exit_reason == LoopExitReason.YIELD
+
+    def test_yield_result_contains_messages(self):
+        loop = make_loop_full(
+            stream=False,
+            should_yield=lambda: True,
+        )
+        response = make_batch_response(content="hi")
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+
+        assert isinstance(result.messages, list)
+        assert len(result.messages) > 0
+
+    def test_yield_result_contains_turns_taken(self):
+        loop = make_loop_full(
+            stream=False,
+            should_yield=lambda: True,
+        )
+        response = make_batch_response(content="hi")
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+
+        assert result.turns_taken == 1
+
+    def test_no_yield_when_should_yield_false(self):
+        loop = make_loop_full(
+            stream=False,
+            should_yield=lambda: False,
+        )
+        response = make_batch_response(tool_calls=[make_declare_complete_call()])
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+
+        assert result.exit_reason == LoopExitReason.COMPLETE
+
+    def test_yield_checked_after_tool_dispatch(self):
+        """Yield should not fire before tools are executed."""
+        dispatched = []
+
+        def my_tool(**kwargs):
+            dispatched.append(True)
+            return "ok"
+
+        tool_call = MagicMock()
+        tool_call.function.name = "my_tool"
+        tool_call.function.arguments = {}
+
+        # yield on first check — but tool should still have run
+        loop = make_loop_full(
+            stream=False,
+            should_yield=lambda: True,
+        )
+        response = make_batch_response(tool_calls=[tool_call])
+        with (
+            patch("matrixmouse.loop.ollama.chat", return_value=response),
+            patch.dict("matrixmouse.loop.TOOL_REGISTRY", {"my_tool": my_tool}),
+        ):
+            result = loop.run()
+
+        assert dispatched, "Tool should have been dispatched before yield"
+        assert result.exit_reason == LoopExitReason.YIELD
+
+    def test_noop_should_yield_returns_false(self):
+        assert _noop_should_yield() is False
