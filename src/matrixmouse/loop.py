@@ -40,7 +40,6 @@ class LoopExitReason(Enum):
     """
     COMPLETE           = auto() # agent called declare_complete
     ESCALATE           = auto() # stuck detector triggered escalation
-    MAX_TURNS          = auto() # safety limit reached
     TURN_LIMIT_REACHED = auto() # task turn limit reached, intervention required
     ERROR              = auto() # unrecoverable error
     YIELD              = auto() # yield control back to orchestrator

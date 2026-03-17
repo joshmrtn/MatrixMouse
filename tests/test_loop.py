@@ -611,9 +611,6 @@ class TestTurnLimit:
             result = loop.run()
         assert result.exit_reason == LoopExitReason.COMPLETE
 
-    def test_turn_limit_reached_is_distinct_from_max_turns(self):
-        assert LoopExitReason.TURN_LIMIT_REACHED != LoopExitReason.MAX_TURNS
-
     def test_allowed_tools_parameter_stored(self):
         """allowed_tools frozenset is accepted without error."""
         loop = AgentLoop(

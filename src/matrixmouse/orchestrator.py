@@ -365,12 +365,6 @@ class Orchestrator:
             return
 
         # --- Max turns ---
-        if result.exit_reason == LoopExitReason.MAX_TURNS:
-            self._request_human_intervention(
-                task, result, reason="Turn limit reached."
-            )
-            return
-
         if result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED:
             self._handle_turn_limit(task, result)
             return
