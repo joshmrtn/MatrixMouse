@@ -32,6 +32,8 @@ Submodules:
     comms_tools      — request_clarification
     _safety.py       — path validation (internal, not a tool module)
 """
+import logging
+logger = logging.getLogger(__name__)
 
 from matrixmouse.tools.file_tools import read_file, str_replace, append_to_file
 from matrixmouse.tools.task_tools import (
@@ -294,8 +296,7 @@ def tools_for_role(role: "AgentRole") -> frozenset[str]:
     from matrixmouse.task import AgentRole
     result = _ROLE_TOOL_SETS.get(role)
     if result is None:
-        import logging
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "tools_for_role called with unknown role %r — "
             "returning empty tool set. All tool calls will be blocked.",
             role,
