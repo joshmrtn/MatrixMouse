@@ -86,6 +86,8 @@ class AgentLoop:
         think: bool = False,    # enable extended thinking
         current_repo: str | None = None,
         task_turn_limit: int = 0, # use config.agent_max_turns
+        tools: list | None = None,              # role-filtered tool list for models to call
+        allowed_tools: frozenset | None = None, # role-filtered tool names for dispatch
     ):
         self.model = model
         self.messages = list(messages)  # defensive copy — don't mutate caller's list
@@ -98,6 +100,8 @@ class AgentLoop:
         self.think = think
         self.current_repo = current_repo
         self._task_turn_limit = task_turn_limit
+        self._tools = tools
+        self._allowed_tools = allowed_tools
 
         # Subsystem callables — fall back to no-ops until implemented
         self._check_context = context_manager or _noop_context_manager
@@ -235,7 +239,7 @@ class AgentLoop:
             model=self.model,
             messages=self.messages,
             stream=False,
-            tools=TOOLS,
+            tools=self._tools if self._tools is not None else TOOLS,
             think=self.think,
             keep_alive="2h",
         )
@@ -266,7 +270,7 @@ class AgentLoop:
             model=self.model,
             messages=self.messages,
             stream=True,
-            tools=TOOLS,
+            tools=self._tools if self._tools is not None else TOOLS,
             think=self.think,
             keep_alive="2h",
         )
@@ -317,6 +321,31 @@ class AgentLoop:
                     turns_taken=self._turns,
                     completion_summary=summary,
                 )
+
+            # --- Allowlist enforcement ---
+            if self._allowed_tools is not None and name not in self._allowed_tools:
+                result = (
+                    f"ERROR: Tool '{name}' is not permitted for this agent role. "
+                    f"Allowed tools: {sorted(self._allowed_tools)}."
+                )
+                had_error = True
+                logger.warning(
+                    "Tool '%s' blocked by allowed_tools enforcement.", name
+                )
+                self.messages.append({
+                    "role": "tool",
+                    "name": name,
+                    "content": result,
+                })
+                self._persist(self.messages)
+                if self._check_stuck(name, arguments, had_error):
+                    return LoopResult(
+                        exit_reason=LoopExitReason.ESCALATE,
+                        messages=self.messages,
+                        turns_taken=self._turns,
+                    )
+                continue
+
 
             # --- Normal tool dispatch ---
             had_error = False
