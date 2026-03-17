@@ -535,3 +535,128 @@ class TestShouldYieldCallable:
 
     def test_noop_should_yield_returns_false(self):
         assert _noop_should_yield() is False
+
+
+# ---------------------------------------------------------------------------
+# turn_limit_reached
+# ---------------------------------------------------------------------------
+
+def make_loop_with_limit(task_turn_limit=0, agent_max_turns=50, **kwargs):
+    cfg = MatrixMouseConfig(agent_max_turns=agent_max_turns)
+    return AgentLoop(
+        model="test-model",
+        messages=kwargs.get("messages",
+                            [{"role": "user", "content": "do something"}]),
+        config=cfg,
+        paths=MagicMock(),
+        stream=False,
+        task_turn_limit=task_turn_limit,
+        **{k: v for k, v in kwargs.items() if k != "messages"},
+    )
+
+
+class TestTurnLimit:
+    def test_task_turn_limit_stored(self):
+        loop = make_loop_with_limit(task_turn_limit=25)
+        assert loop._task_turn_limit == 25
+
+    def test_default_task_turn_limit_is_zero(self):
+        loop = make_loop_full()
+        assert loop._task_turn_limit == 0
+
+    def test_uses_task_turn_limit_when_set(self):
+        """When task_turn_limit > 0 it overrides config.agent_max_turns."""
+        loop = make_loop_with_limit(
+            task_turn_limit=2, agent_max_turns=50
+        )
+        response = make_batch_response(content="thinking")
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+        assert result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED
+        assert result.turns_taken == 2
+
+    def test_falls_back_to_config_when_task_limit_is_zero(self):
+        """When task_turn_limit == 0, config.agent_max_turns is used."""
+        loop = make_loop_with_limit(
+            task_turn_limit=0, agent_max_turns=2
+        )
+        response = make_batch_response(content="thinking")
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+        assert result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED
+        assert result.turns_taken == 2
+
+    def test_turn_limit_reached_exit_reason(self):
+        loop = make_loop_with_limit(task_turn_limit=1)
+        response = make_batch_response(content="thinking")
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+        assert result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED
+
+    def test_turn_limit_result_contains_messages(self):
+        loop = make_loop_with_limit(task_turn_limit=1)
+        response = make_batch_response(content="thinking")
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+        assert isinstance(result.messages, list)
+        assert len(result.messages) > 0
+
+    def test_does_not_trigger_before_limit(self):
+        """Task completes normally before hitting the limit."""
+        loop = make_loop_with_limit(task_turn_limit=10)
+        response = make_batch_response(
+            tool_calls=[make_declare_complete_call()]
+        )
+        with patch("matrixmouse.loop.ollama.chat", return_value=response):
+            result = loop.run()
+        assert result.exit_reason == LoopExitReason.COMPLETE
+
+    def test_turn_limit_reached_is_distinct_from_max_turns(self):
+        assert LoopExitReason.TURN_LIMIT_REACHED != LoopExitReason.MAX_TURNS
+
+    def test_allowed_tools_parameter_stored(self):
+        """allowed_tools frozenset is accepted without error."""
+        loop = AgentLoop(
+            model="test-model",
+            messages=[{"role": "user", "content": "go"}],
+            config=make_config(),
+            paths=MagicMock(),
+            allowed_tools=frozenset({"read_file", "declare_complete"}),
+            stream=False,
+        )
+        assert loop._allowed_tools == frozenset({"read_file", "declare_complete"})
+
+    def test_disallowed_tool_returns_error_not_exception(self):
+        """A tool call not in allowed_tools returns an error message."""
+        loop = AgentLoop(
+            model="test-model",
+            messages=[{"role": "user", "content": "go"}],
+            config=make_config(),
+            paths=MagicMock(),
+            allowed_tools=frozenset({"declare_complete"}),
+            stream=False,
+        )
+        tool_call = MagicMock()
+        tool_call.function.name = "read_file"
+        tool_call.function.arguments = {"path": "foo.py"}
+
+        # First turn: disallowed tool call
+        # Second turn: declare_complete so the loop can exit cleanly
+        response1 = make_batch_response(tool_calls=[tool_call])
+        response2 = make_batch_response(
+            tool_calls=[make_declare_complete_call()]
+        )
+        with patch("matrixmouse.loop.ollama.chat",
+                   side_effect=[response1, response2]):
+            result = loop.run()
+
+        assert result.exit_reason == LoopExitReason.COMPLETE
+        # The disallowed tool error should appear as a tool message
+        tool_messages = [
+            m for m in result.messages
+            if isinstance(m, dict) and m.get("role") == "tool"
+        ]
+        assert any("not permitted" in m.get("content", "").lower()
+                   or "not allowed" in m.get("content", "").lower()
+                   or "allowed_tools" in m.get("content", "").lower()
+                   for m in tool_messages)
