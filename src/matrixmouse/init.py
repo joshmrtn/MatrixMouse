@@ -277,20 +277,29 @@ def setup_repo(
 def validate_models(config: MatrixMouseConfig) -> None:
     """
     Verify all configured models are available and support tool calling.
-    Pulls missing models automatically.
+    Pulls missing models automatically (Ollama only).
     Called once at service startup before the orchestrator starts.
+
+    TODO: When LLM backend flexibility is implemented (#10), this function
+    will delegate to the backend adapter's ensure_model() and
+    is_model_available() methods rather than calling ollama directly.
     """
     models_to_check = {
-        "coder":      (config.coder_model,      True),
-        "planner":    (config.planner_model,    True),
-        "judge":      (config.judge_model,      True),
-        "summarizer": (config.summarizer_model, False),
+        "coder":      (config.coder_model,       True),
+        "planner":    (config.planner_model,     True),
+        "critic":     (config.planner_model,     True),   # critic uses planner_model
+        "writer":     (config.writer_model),     True),
+        "summarizer": (config.summarizer_model,  False),
     }
+    # Deduplicate — same model may serve multiple roles
+    seen: set[str] = set()
     for role, (model_name, requires_tools) in models_to_check.items():
+        if model_name in seen:
+            continue
+        seen.add(model_name)
         _ensure_model_available(model_name)
         if requires_tools:
             _ensure_model_supports_tools(model_name, role)
-
 
 def _ensure_model_available(model_name: str) -> None:
     try:
