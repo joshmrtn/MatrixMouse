@@ -38,11 +38,12 @@ class LoopExitReason(Enum):
     Describes why the agent loop terminated.
     Returned to the orchestrator so it can decide what to do next.
     """
-    COMPLETE        = auto()  # agent called declare_complete
-    ESCALATE        = auto()  # stuck detector triggered escalation
-    MAX_TURNS       = auto()  # safety limit reached
-    ERROR           = auto()  # unrecoverable error
-    YIELD           = auto()  # yield control back to orchestrator
+    COMPLETE           = auto() # agent called declare_complete
+    ESCALATE           = auto() # stuck detector triggered escalation
+    MAX_TURNS          = auto() # safety limit reached
+    TURN_LIMIT_REACHED = auto() # task turn limit reached, intervention required
+    ERROR              = auto() # unrecoverable error
+    YIELD              = auto() # yield control back to orchestrator
 
 
 @dataclass
@@ -67,11 +68,6 @@ class AgentLoop:
     the stuck detector signals escalation, or the turn limit is reached.
     """
 
-    # Safety ceiling on turns regardless of other signals.
-    # Prevents runaway loops during development. 
-    # TODO: Make MAX_TURNS configurable once the system is stable.
-    MAX_TURNS = 50
-
     def __init__(
         self,
         model: str,
@@ -89,6 +85,9 @@ class AgentLoop:
         stream: bool = True,    # stream tokens to web UI
         think: bool = False,    # enable extended thinking
         current_repo: str | None = None,
+        task_turn_limit: int = 0, # use config.agent_max_turns
+        tools: list | None = None,              # role-filtered tool list for models to call
+        allowed_tools: frozenset | None = None, # role-filtered tool names for dispatch
     ):
         self.model = model
         self.messages = list(messages)  # defensive copy — don't mutate caller's list
@@ -100,6 +99,9 @@ class AgentLoop:
         self.stream = stream
         self.think = think
         self.current_repo = current_repo
+        self._task_turn_limit = task_turn_limit
+        self._tools = tools
+        self._allowed_tools = allowed_tools
 
         # Subsystem callables — fall back to no-ops until implemented
         self._check_context = context_manager or _noop_context_manager
@@ -121,10 +123,15 @@ class AgentLoop:
         while not self._is_done:
 
             # --- Safety ceiling ---
-            if self._turns >= self.MAX_TURNS:
-                logger.warning("Turn limit (%d) reached. Exiting loop.", self.MAX_TURNS)
+            _max = (
+                self._task_turn_limit
+                if self._task_turn_limit > 0
+                else getattr(self.config, "agent_max_turns", 50)
+            )
+            if self._turns >= _max:
+                logger.warning("Turn limit (%d) reached. Exiting loop.", _max)
                 return LoopResult(
-                    exit_reason=LoopExitReason.MAX_TURNS,
+                    exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
                     messages=self.messages,
                     turns_taken=self._turns,
                 )
@@ -232,7 +239,7 @@ class AgentLoop:
             model=self.model,
             messages=self.messages,
             stream=False,
-            tools=TOOLS,
+            tools=self._tools if self._tools is not None else TOOLS,
             think=self.think,
             keep_alive="2h",
         )
@@ -263,7 +270,7 @@ class AgentLoop:
             model=self.model,
             messages=self.messages,
             stream=True,
-            tools=TOOLS,
+            tools=self._tools if self._tools is not None else TOOLS,
             think=self.think,
             keep_alive="2h",
         )
@@ -314,6 +321,31 @@ class AgentLoop:
                     turns_taken=self._turns,
                     completion_summary=summary,
                 )
+
+            # --- Allowlist enforcement ---
+            if self._allowed_tools is not None and name not in self._allowed_tools:
+                result = (
+                    f"ERROR: Tool '{name}' is not permitted for this agent role. "
+                    f"Allowed tools: {sorted(self._allowed_tools)}."
+                )
+                had_error = True
+                logger.warning(
+                    "Tool '%s' blocked by allowed_tools enforcement.", name
+                )
+                self.messages.append({
+                    "role": "tool",
+                    "name": name,
+                    "content": result,
+                })
+                self._persist(self.messages)
+                if self._check_stuck(name, arguments, had_error):
+                    return LoopResult(
+                        exit_reason=LoopExitReason.ESCALATE,
+                        messages=self.messages,
+                        turns_taken=self._turns,
+                    )
+                continue
+
 
             # --- Normal tool dispatch ---
             had_error = False

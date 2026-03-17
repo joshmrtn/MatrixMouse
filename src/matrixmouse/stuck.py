@@ -6,7 +6,7 @@ Monitors the agent's behaviour within a task and emits escalation signals.
 Detects:
     - Repeated identical tool calls within a sliding window (hash-based)
     - Consecutive tool call errors without a successful write
-    - Extended read-only stretches late in an implementation phase
+    - Extended read-only stretches for roles that should be producing output
 
 Produces a float escalation score (0.0-1.0) internally. The callable
 interface returns a bool for loop.py (simple, no refactoring needed).
@@ -16,8 +16,13 @@ escalation decisions when it receives LoopExitReason.ESCALATE.
 Does not directly escalate — reports to loop.py which reports to
 orchestrator.py which decides action.
 
+Escalation only applies to the Coder role (cascade escalation). For
+Manager and Critic, the turn limit mechanism handles stuck detection.
+For Writer, escalation is not currently supported — Writers use the same
+turn limit path as Manager and Critic.
+
 TODO: Add periodic self-assessment (ask the model if it's stuck every N turns)
-      once the latency cost is acceptable and router.py is implemented.
+      once the latency cost is acceptable.
       Self-assessment adds an inference call per check but gives the richest
       signal, especially for tasks where tool patterns don't reveal confusion.
 """
@@ -27,26 +32,31 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 
-from matrixmouse.phases import Phase
+from matrixmouse.task import AgentRole
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Per-phase escalation thresholds
+# Per-role escalation thresholds
 # ---------------------------------------------------------------------------
 # Higher threshold = more tolerance before escalating.
-# Exploration phases (DESIGN, CRITIQUE) naturally involve many reads with
-# few writes, so we tolerate more before flagging. Implementation phases
-# should be producing output, so we escalate sooner.
+#
+# Manager and Critic: set to 1.0 (never escalate via stuck detector —
+# they use the turn limit path instead). This ensures stuck detection
+# does not interfere with their fixed-model operation.
+#
+# Writer: set to 1.0 — Writers produce prose, which naturally involves
+# many reads. The read-only signal would produce false positives.
+#
+# Coder: lower threshold — should be producing writes. Escalates through
+# the coder cascade when stuck.
 
-PHASE_THRESHOLDS: dict[Phase, float] = {
-    Phase.DESIGN:     0.85,
-    Phase.CRITIQUE:   0.85,
-    Phase.IMPLEMENT:  0.65,
-    Phase.TEST:       0.70,
-    Phase.REVIEW:     0.80,
-    Phase.DONE:       1.00,  # never escalate from DONE
+ROLE_THRESHOLDS: dict[AgentRole, float] = {
+    AgentRole.MANAGER: 1.00,  # never escalate — use turn limit path
+    AgentRole.CODER:   0.65,
+    AgentRole.WRITER:  1.00,  # never escalate — use turn limit path
+    AgentRole.CRITIC:  1.00,  # never escalate — use turn limit path
 }
 
 DEFAULT_THRESHOLD = 0.70
@@ -73,8 +83,13 @@ class StuckDetector:
     Instantiated per AgentLoop run. Pass as the stuck_detector callable
     to AgentLoop — it will be called after each tool dispatch.
 
+    Escalation via this detector is only meaningful for the Coder role,
+    which has a cascade of larger models to escalate through. All other
+    roles have their thresholds set to 1.0 and will never trigger
+    escalation here — they use the turn limit path instead.
+
     Usage:
-        detector = StuckDetector(phase=Phase.IMPLEMENT)
+        detector = StuckDetector(role=AgentRole.CODER)
         loop = AgentLoop(..., stuck_detector=detector)
 
         # After loop exits with ESCALATE:
@@ -82,14 +97,16 @@ class StuckDetector:
         print(detector.last_reason)  # human-readable explanation
     """
 
-    phase: Phase = Phase.IMPLEMENT
+    role: AgentRole = AgentRole.CODER
     window_size: int = 6        # sliding window for repeat detection
     repeat_threshold: int = 2   # how many repeats in window triggers signal
     max_errors: int = 3         # consecutive errors before signalling
-    max_readonly_turns: int = 8 # read-only turns before signalling (in IMPLEMENT/TEST)
+    max_readonly_turns: int = 8 # read-only turns before signalling (Coder only)
 
     # Internal state — not constructor arguments
-    _recent_calls: deque = field(default_factory=lambda: deque(maxlen=6), init=False)
+    _recent_calls: deque = field(
+        default_factory=lambda: deque(maxlen=6), init=False
+    )
     _consecutive_errors: int = field(default=0, init=False)
     _turns_without_write: int = field(default=0, init=False)
     _total_calls: int = field(default=0, init=False)
@@ -119,21 +136,21 @@ class StuckDetector:
             had_error:  True if the tool returned an error result.
 
         Returns:
-            True if the escalation score exceeds the phase threshold.
+            True if the escalation score exceeds the role threshold.
         """
         self._total_calls += 1
         self._record_call(tool_name, arguments, had_error)
-        self._score = self._compute_score(tool_name)
+        self._score = self._compute_score()
 
-        threshold = PHASE_THRESHOLDS.get(self.phase, DEFAULT_THRESHOLD)
-        should_escalate = self._score >= threshold
+        threshold = ROLE_THRESHOLDS.get(self.role, DEFAULT_THRESHOLD)
+        should_escalate = self._score >= threshold and threshold < 1.0
 
         if should_escalate:
             logger.warning(
                 "StuckDetector escalating. Score: %.2f (threshold %.2f). "
-                "Reason: %s. Phase: %s. Total calls: %d.",
+                "Reason: %s. Role: %s. Total calls: %d.",
                 self._score, threshold, self._last_reason,
-                self.phase.name, self._total_calls,
+                self.role.value, self._total_calls,
             )
 
         return should_escalate
@@ -158,11 +175,11 @@ class StuckDetector:
         Full diagnostic summary for the orchestrator/router to log or act on.
         """
         return {
-            "score": self._score,
-            "reason": self._last_reason,
-            "phase": self.phase.name,
-            "total_calls": self._total_calls,
-            "consecutive_errors": self._consecutive_errors,
+            "score":               self._score,
+            "reason":              self._last_reason,
+            "role":                self.role.value,
+            "total_calls":         self._total_calls,
+            "consecutive_errors":  self._consecutive_errors,
             "turns_without_write": self._turns_without_write,
         }
 
@@ -177,45 +194,40 @@ class StuckDetector:
         had_error: bool,
     ) -> None:
         """Update internal counters based on the latest tool call."""
-        # Hash the call signature for repeat detection
         sig = _call_signature(tool_name, arguments)
         self._recent_calls.append(sig)
 
-        # Update error counter
         if had_error:
             self._consecutive_errors += 1
         else:
             self._consecutive_errors = 0
 
-        # Update write counter — reset on any productive write
         if tool_name in WRITE_TOOLS and not had_error:
             self._turns_without_write = 0
         else:
             self._turns_without_write += 1
 
-    def _compute_score(self, tool_name: str) -> float:
+    def _compute_score(self) -> float:
         """
         Compute the current escalation score from all active signals.
+
         Returns the maximum signal strength rather than averaging, so a
         single strong signal is enough to escalate regardless of others.
+        The read-only signal is only evaluated for the Coder role — other
+        roles naturally spend many turns reading without writing.
         """
         signals: list[tuple[float, str]] = []
 
         # Signal 1: repeated identical tool calls
-        repeat_score, repeat_reason = self._score_repeats()
-        signals.append((repeat_score, repeat_reason))
+        signals.append(self._score_repeats())
 
         # Signal 2: consecutive errors
-        error_score, error_reason = self._score_errors()
-        signals.append((error_score, error_reason))
+        signals.append(self._score_errors())
 
-        # Signal 3: extended read-only stretch (only meaningful in
-        # phases where the agent should be producing output)
-        if self.phase in (Phase.IMPLEMENT, Phase.TEST):
-            readonly_score, readonly_reason = self._score_readonly()
-            signals.append((readonly_score, readonly_reason))
+        # Signal 3: extended read-only stretch — Coder only
+        if self.role == AgentRole.CODER:
+            signals.append(self._score_readonly())
 
-        # Take the strongest signal
         best_score, best_reason = max(signals, key=lambda x: x[0])
         self._last_reason = best_reason
 
@@ -232,7 +244,6 @@ class StuckDetector:
         if len(self._recent_calls) < 2:
             return 0.0, ""
 
-        # Count the most frequent call in the window
         counts: dict[str, int] = {}
         for sig in self._recent_calls:
             counts[sig] = counts.get(sig, 0) + 1
@@ -241,7 +252,6 @@ class StuckDetector:
         if max_repeats < self.repeat_threshold:
             return 0.0, ""
 
-        # Scale: repeat_threshold repeats = 0.6, window fully saturated = 1.0
         score = min(
             0.6 + 0.4 * (max_repeats - self.repeat_threshold) /
             max(1, self.window_size - self.repeat_threshold),
@@ -258,29 +268,35 @@ class StuckDetector:
         if self._consecutive_errors < 2:
             return 0.0, ""
 
-        # Scale: 2 errors = 0.5, max_errors = 0.9, beyond = 1.0
         score = min(
             0.5 + 0.4 * (self._consecutive_errors - 2) /
             max(1, self.max_errors - 2),
             1.0
         )
-        reason = f"{self._consecutive_errors} consecutive tool errors without a successful write."
+        reason = (
+            f"{self._consecutive_errors} consecutive tool errors "
+            f"without a successful write."
+        )
         return score, reason
 
     def _score_readonly(self) -> tuple[float, str]:
-        """Score based on how long the agent has gone without writing anything."""
+        """
+        Score based on how long the Coder has gone without writing anything.
+
+        Only called for CODER role — other roles read extensively by design.
+        """
         if self._turns_without_write < self.max_readonly_turns // 2:
             return 0.0, ""
 
-        # Scale: half of max = 0.4, at max = 0.8, beyond = 1.0
         score = min(
-            0.4 + 0.6 * (self._turns_without_write - self.max_readonly_turns // 2) /
-            max(1, self.max_readonly_turns // 2),
+            0.4 + 0.6 * (
+                self._turns_without_write - self.max_readonly_turns // 2
+            ) / max(1, self.max_readonly_turns // 2),
             1.0
         )
         reason = (
             f"{self._turns_without_write} turns without a write "
-            f"during {self.phase.name} phase."
+            f"(Coder role — expected to be producing output)."
         )
         return score, reason
 

@@ -63,6 +63,10 @@ class MatrixMouseConfig(BaseSettings):
         default="qwen3.5:4b",
         description="Model for code generation and implementation tasks.",
     )
+    writer_model: str = Field(
+        default="qwen3.5:4b",
+        description="Model for prose generation tasks. (Not for source code).",
+    )
     planner_model: str = Field(
         default="qwen3.5:4b",
         description="Model for planning, design, and architectural decisions.",
@@ -74,6 +78,14 @@ class MatrixMouseConfig(BaseSettings):
     summarizer_model: str = Field(
         default="qwen3.5:4b",
         description="Model for context summarisation. Should be small and fast.",
+    )
+    agent_max_turns: int = Field(
+        default=50,
+        description=(
+            "Maximum turns an agent may take on a single task before the "
+            "task is moved to BLOCKED_BY_HUMAN. The operator can extend, "
+            "respec, or cancel via the turn-limit response endpoint."
+        ),
     )
 
     # --- Coder cascade ---
@@ -91,6 +103,10 @@ class MatrixMouseConfig(BaseSettings):
         default=False,
         description="Enable extended thinking for the coder model. Increases quality but uses more context.",
     )
+    writer_think: bool = Field(
+        default=False,
+        description="Enable extended thinking for the writer model. Increases quality but uses more context.",
+    )
     planner_think: bool = Field(
         default=False,
         description="Enable extended thinking for the planner model.",
@@ -106,6 +122,10 @@ class MatrixMouseConfig(BaseSettings):
     coder_stream: bool = Field(
         default=True,
         description="Stream coder model output token by token. Disable if the model misbehaves with streaming.",
+    )
+    writer_think: bool = Field(
+        default=True,
+        description="Stream writer model output token by token. Disable if the model misbehaves with streaming.",
     )
     planner_stream: bool = Field(
         default=True,
@@ -186,6 +206,10 @@ class MatrixMouseConfig(BaseSettings):
     web_ui_url: str = Field(
         default="",
         description="Public URL of the MatrixMouse web UI, e.g. https://mm.example.com. Used to add a link to ntfy notifications.",
+    )
+    clarification_grace_period_minutes: int = Field(
+        default=10,
+        description="Number of minutes to wait after a request_clarification for human input. After this time elapses, the scheduler moves on to another task.",
     )
 
     # --- Server ---

@@ -175,6 +175,7 @@ class TaskCreateRequest(BaseModel):
     title: str
     description: str = ""
     repo: list[str] = []
+    role: str = "coder"
     target_files: list[str] = []
     importance: float = 0.5
     urgency: float = 0.5
@@ -199,6 +200,15 @@ class RepoAddRequest(BaseModel):
 class ConfigPatchRequest(BaseModel):
     values: dict[str, Any]
 
+class TurnLimitResponseRequest(BaseModel):
+    action: str          # "extend" | "respec" | "cancel"
+    note: str = ""       # required for respec, optional for extend/cancel
+    extend_by: int = 0   # only used when action="extend", 0 means use config default
+
+class DecompositionConfirmRequest(BaseModel):
+    confirmation_id: str
+    confirmed: bool
+    reason: str = ""     # required when confirmed=False
 
 # ---------------------------------------------------------------------------
 # Health
@@ -242,7 +252,7 @@ async def list_tasks(
     if repo:
         tasks = [t for t in tasks if repo in t.repo]
 
-    tasks.sort(key=lambda t: t.priority_score(), reverse=True)
+    tasks.sort(key=lambda t: t.priority_score())  # ascending: lower score = higher priority
 
     return {
         "tasks": [t.to_dict() for t in tasks],
@@ -279,8 +289,7 @@ async def create_task(body: TaskCreateRequest):
     Create a new task and add it to the queue.
     Notifies the orchestrator immediately via the condition variable.
     """
-    from matrixmouse.orchestrator import Task, TaskStatus
-    from matrixmouse.phases import Phase
+    from matrixmouse.task import Task, TaskStatus, AgentRole
 
     queue = _require_queue()
 
@@ -290,16 +299,28 @@ async def create_task(body: TaskCreateRequest):
     importance = max(0.0, min(1.0, body.importance))
     urgency    = max(0.0, min(1.0, body.urgency))
 
+    try:
+        role_enum = AgentRole(body.role.lower())
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role '{body.role}'. Valid: coder, writer."
+        )
+    if role_enum in (AgentRole.MANAGER, AgentRole.CRITIC):
+        raise HTTPException(
+            status_code=400,
+            detail="Tasks cannot be assigned manager or critic role via the API."
+        )
+
     task = Task(
         title=body.title.strip(),
         description=body.description.strip(),
         repo=body.repo,
-        phase=Phase.DESIGN,
-        status=TaskStatus.PENDING,
+        role=role_enum,
+        status=TaskStatus.READY,
         target_files=body.target_files,
         importance=importance,
         urgency=urgency,
-        source="local",
     )
     queue.add(task)
     notify_task_available()
@@ -353,7 +374,7 @@ async def cancel_task(task_id: str):
     if task.status.is_terminal:
         return {"ok": True, "message": f"Task already {task.status.value}."}
 
-    from matrixmouse.orchestrator import TaskStatus
+    from matrixmouse.task import TaskStatus
     task.status = TaskStatus.CANCELLED
     task.completed_at = datetime.now(timezone.utc).isoformat()
     queue.update(task)
@@ -537,6 +558,171 @@ async def interject(body: InterjectionRequest):
     scope = f"repo='{body.repo}'" if body.repo else "workspace-wide"
     logger.info("Interjection received via API (%s): %s", scope, msg[:80])
     return {"ok": True}
+
+
+@app.post("/tasks/{task_id}/turn-limit-response")
+async def turn_limit_response(task_id: str, body: TurnLimitResponseRequest):
+    """
+    Respond to a turn limit notification for a blocked task.
+
+    Called by the UI confirmation modal when a task reaches its turn limit.
+    Actions:
+        extend  — grant additional turns. extend_by defaults to agent_max_turns.
+        respec  — append the note as a user message and reset the turn count.
+                  The note field is required for respec.
+        cancel  — mark the task CANCELLED.
+
+    The task must be in BLOCKED_BY_HUMAN status with a turn-limit reason.
+    """
+    from matrixmouse.task import TaskStatus
+
+    queue = _require_queue()
+    task = queue.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+
+    if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN "
+                   f"(current status: {task.status.value})."
+        )
+
+    action = body.action.lower()
+
+    if action == "extend":
+        default_turns = getattr(_config, "agent_max_turns", 50) if _config else 50
+        extension = body.extend_by if body.extend_by > 0 else default_turns
+        task.turn_limit = getattr(task, "turn_limit", 0) + extension
+        task.status = TaskStatus.READY
+        if body.note:
+            task.context_messages.append({
+                "role": "user",
+                "content": f"[Operator note on turn limit extension]: {body.note}",
+            })
+        queue.update(task)
+        notify_task_available()
+        logger.info(
+            "Turn limit extended by %d for task [%s].", extension, task_id
+        )
+        return {
+            "ok": True,
+            "action": "extend",
+            "new_turn_limit": task.turn_limit,
+            "task_id": task_id,
+        }
+
+    elif action == "respec":
+        if not body.note.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="note is required for respec action."
+            )
+        task.context_messages.append({
+            "role": "user",
+            "content": (
+                f"[Operator respec — please re-read and adjust your approach]:\n"
+                f"{body.note.strip()}"
+            ),
+        })
+        # Reset turn count by clearing turn_limit — orchestrator will use
+        # config default again. Persisted turns_taken is in LoopResult only,
+        # not on the task, so returning to READY is sufficient.
+        task.turn_limit = 0
+        task.status = TaskStatus.READY
+        queue.update(task)
+        notify_task_available()
+        logger.info("Task [%s] respec'd and returned to READY.", task_id)
+        return {
+            "ok": True,
+            "action": "respec",
+            "task_id": task_id,
+        }
+
+    elif action == "cancel":
+        task.status = TaskStatus.CANCELLED
+        task.completed_at = datetime.now(timezone.utc).isoformat()
+        if body.note:
+            task.notes = (task.notes + f"\n[Cancelled]: {body.note}").strip()
+        queue.update(task)
+        logger.info("Task [%s] cancelled via turn-limit response.", task_id)
+        return {
+            "ok": True,
+            "action": "cancel",
+            "task_id": task_id,
+        }
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid action '{action}'. Valid: extend, respec, cancel."
+        )
+
+
+@app.post("/tasks/{task_id}/decomposition-confirm")
+async def decomposition_confirm(task_id: str, body: DecompositionConfirmRequest):
+    """
+    Respond to a decomposition depth limit confirmation request.
+
+    Called by the UI confirmation modal when the Manager tries to split
+    a task that has reached decomposition_depth_limit.
+
+    If confirmed=True, grants one additional depth confirmation on the
+    task's branch (decomposition_confirmed_depth += 1) and injects an
+    approval message into the Manager's context so it can proceed.
+
+    If confirmed=False, injects a denial message so the Manager knows
+    not to split further on this branch.
+
+    The confirmation_id must match the one emitted in the
+    decomposition_confirmation_required event.
+    """
+    queue = _require_queue()
+    task = queue.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+
+    if body.confirmed:
+        task.decomposition_confirmed_depth += 1
+        queue.update(task)
+
+        # Find the active Manager task and inject the confirmation
+        _inject_decomposition_response(
+            queue=queue,
+            confirmation_id=body.confirmation_id,
+            approved=True,
+            reason=body.reason,
+        )
+        logger.info(
+            "Decomposition confirmed for task [%s] "
+            "(confirmed_depth now %d).",
+            task_id, task.decomposition_confirmed_depth,
+        )
+        return {
+            "ok": True,
+            "confirmed": True,
+            "decomposition_confirmed_depth": task.decomposition_confirmed_depth,
+        }
+    else:
+        if not body.reason.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="reason is required when confirmed=False."
+            )
+        _inject_decomposition_response(
+            queue=queue,
+            confirmation_id=body.confirmation_id,
+            approved=False,
+            reason=body.reason,
+        )
+        logger.info(
+            "Decomposition denied for task [%s]. Reason: %s",
+            task_id, body.reason,
+        )
+        return {
+            "ok": True,
+            "confirmed": False,
+        }
 
 
 @app.post("/stop")
@@ -1093,3 +1279,75 @@ def _record_testrunner_hash(dockerfile_path: Path) -> None:
         hash_file.write_text(_sha256(dockerfile_path))
     except OSError as e:
         logger.warning("Failed to record testrunner hash: %s", e)
+
+
+def _inject_decomposition_response(
+    queue,
+    confirmation_id: str,
+    approved: bool,
+    reason: str,
+) -> None:
+    """
+    Inject a decomposition confirmation response into the active Manager task.
+
+    Finds the RUNNING or READY Manager task and appends a user message
+    so the Manager knows whether to proceed with the split or not.
+
+    Args:
+        queue:           The TaskQueue.
+        confirmation_id: The confirmation ID from the original event.
+        approved:        Whether the operator approved the split.
+        reason:          Operator's reason (required on denial).
+    """
+    from matrixmouse.task import AgentRole, TaskStatus
+
+    manager_tasks = [
+        t for t in queue.active_tasks()
+        if t.role == AgentRole.MANAGER
+        and t.status in (TaskStatus.RUNNING, TaskStatus.READY,
+                         TaskStatus.BLOCKED_BY_HUMAN)
+    ]
+
+    if not manager_tasks:
+        logger.warning(
+            "No active Manager task found to inject decomposition response "
+            "(confirmation_id=%s).", confirmation_id,
+        )
+        return
+
+    # Inject into the most recently started Manager task
+    manager_task = sorted(
+        manager_tasks,
+        key=lambda t: t.started_at or "",
+        reverse=True,
+    )[0]
+
+    if approved:
+        content = (
+            f"[Decomposition confirmed — confirmation_id={confirmation_id}]\n"
+            f"The operator has approved splitting further at this depth. "
+            f"You may proceed with the split you proposed."
+            + (f"\nOperator note: {reason}" if reason else "")
+        )
+    else:
+        content = (
+            f"[Decomposition denied — confirmation_id={confirmation_id}]\n"
+            f"The operator has denied further splitting at this depth.\n"
+            f"Reason: {reason}\n"
+            f"Do not split this branch further. Adjust task descriptions "
+            f"or scoping within the existing depth instead."
+        )
+
+    manager_task.context_messages.append({
+        "role": "user",
+        "content": content,
+    })
+
+    try:
+        queue.update(manager_task)
+        notify_task_available()
+    except Exception as e:
+        logger.warning(
+            "Failed to inject decomposition response into Manager task [%s]: %s",
+            manager_task.id, e,
+        )

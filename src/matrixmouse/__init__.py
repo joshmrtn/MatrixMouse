@@ -5,7 +5,7 @@ Modules:
     main: The entry point. Initializes all subsystems at startup.
     init: Handles repo initialization.
     config: Configuration loader. Handles default, global, and local configs.
-    orchestrator: Task and phase manager. The outermost control loop.
+    orchestrator: Task manager. The outermost control loop.
     loop: The inner loop that drives a single agent role for a single task.
     context: Context management. Keeping message history within safe limits.
     router: Manages model selection by task and role and handles escalation.

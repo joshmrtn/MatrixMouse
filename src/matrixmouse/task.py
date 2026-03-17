@@ -90,6 +90,8 @@ class Task:
                                     — number of human confirmation events granted
                                       on this branch's decomposition depth
         time_slice_started          — Unix timestamp when status became RUNNING
+        turn_limit                  — Per-task turn limit override. 0 means use 
+                                      config.agent_max_turns.
         preempt                     — transient flag set by orchestrator to preempt
                                       the currently running task
         wip_commit_hash             — hash of last real (non-WIP) commit at task
@@ -135,6 +137,7 @@ class Task:
     importance: float = 0.5
     urgency: float = 0.5
     time_slice_started: Optional[float] = None
+    turn_limit: int = field(default=0)
     # preempt is transient, not persisted to disk.
     preempt: bool = field(default = False)
 
@@ -230,6 +233,7 @@ class Task:
             "importance":                   self.importance,
             "urgency":                      self.urgency,
             "time_slice_started":           self.time_slice_started,
+            "turn_limit":                   self.turn_limit,
             "blocked_by":                   self.blocked_by,
             "blocking":                     self.blocking,
             "wip_commit_hash":              self.wip_commit_hash,
@@ -285,6 +289,7 @@ class Task:
             importance=data.get("importance", 0.5),
             urgency=data.get("urgency", 0.5),
             time_slice_started=data.get("time_slice_started"),
+            turn_limit=data.get("turn_limit", 0),
             blocked_by=data.get("blocked_by", []),
             blocking=data.get("blocking", []),
             wip_commit_hash=data.get("wip_commit_hash"),
