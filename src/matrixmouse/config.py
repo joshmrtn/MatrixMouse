@@ -285,6 +285,10 @@ class MatrixMouseConfig(BaseSettings):
         default="0 9 * * *",
         description="Cron expression for the Manager's daily review task. Default: 9am daily.",
     )
+    manager_review_upcoming_tasks: int = Field(
+        default=20,
+        description="Maximum number of upcoming tasks the Manager will review during daily review. Default 20."
+    )
 
     # --- Decomposition ---
     decomposition_depth_limit: int = Field(

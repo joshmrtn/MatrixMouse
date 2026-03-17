@@ -15,6 +15,8 @@ Responsible for:
     - Maintaining live status for the API to serve
     - Time slice tracking: checking for slice expiry and preemption after
       each inference call, yielding control back to the scheduler when due
+    - Daily Manager review injection based on configured schedule
+    - Stale clarification detection via scheduler callback
 
 Do not add inference logic here. That belongs to loop.py.
 Do not add model selection logic here. That belongs to router.py.
@@ -39,6 +41,7 @@ from matrixmouse.scheduling import Scheduler
 from matrixmouse.stuck import StuckDetector
 from matrixmouse.task import AgentRole, Task, TaskStatus, TaskQueue
 from matrixmouse.tools._safety import reconfigure_for_task
+from matrixmouse import workspace_state
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +125,7 @@ def _fetch_diff_for_task(task: Task) -> str:
     """
     Fetch the git diff for a task against its wip_commit_hash.
 
-    Returns an empty string if the diff cannot be retrieved — the
-    Critic will note the absence and use get_git_diff directly.
+    Returns an empty string if the diff cannot be retrieved.
 
     Args:
         task: The task to fetch a diff for.
@@ -141,6 +143,184 @@ def _fetch_diff_for_task(task: Task) -> str:
             "Failed to fetch diff for task [%s]: %s", task.id, e
         )
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Manager review schedule helpers
+# ---------------------------------------------------------------------------
+
+def _review_is_due(
+    schedule: str,
+    last_review_at: Optional[datetime],
+) -> bool:
+    """
+    Return True if a Manager review is due based on the cron schedule
+    and the last review timestamp.
+
+    Uses a simple cron evaluation: parses the schedule string and checks
+    whether enough time has passed since the last review. Falls back to
+    True (always due) if the schedule cannot be parsed, ensuring reviews
+    are not silently skipped on misconfiguration.
+
+    Args:
+        schedule:       Cron expression string (e.g. "0 9 * * *").
+        last_review_at: UTC datetime of the last completed review, or
+                        None if no review has been run yet.
+
+    Returns:
+        bool: True if a review should be injected now.
+    """
+    if last_review_at is None:
+        # No review has ever run — schedule one immediately
+        return True
+
+    try:
+        from croniter import croniter
+        now = datetime.now(timezone.utc)
+        cron = croniter(schedule, last_review_at)
+        next_due = cron.get_next(datetime)
+        return now >= next_due
+    except Exception as e:
+        logger.warning(
+            "Failed to parse manager_review_schedule %r: %s. "
+            "Treating review as due.",
+            schedule, e,
+        )
+        return True
+
+
+def _build_review_task(
+    queue: TaskQueue,
+    state: dict,
+    config: MatrixMouseConfig,
+) -> Task:
+    """
+    Build a Manager review task with front-loaded context.
+
+    The task description includes:
+        - Tasks completed since the last review (summaries)
+        - All currently BLOCKED tasks with their blocking reasons
+        - Up to N READY tasks by priority (upcoming work)
+        - The summary from the previous review cycle
+
+    Args:
+        queue:  The workspace TaskQueue.
+        state:  Loaded workspace state dict.
+        config: Active config (used for upcoming task count limit).
+
+    Returns:
+        Task: A READY Manager task with preempt=True.
+    """
+    now = datetime.now(timezone.utc)
+    last_review_at = workspace_state.get_last_review_at(state)
+
+    all_tasks = queue.all_tasks()
+    completed = queue.completed_ids()
+
+    # Recently completed tasks
+    recently_completed = []
+    for t in all_tasks:
+        if t.status != TaskStatus.COMPLETE:
+            continue
+        if last_review_at and t.completed_at:
+            try:
+                completed_dt = datetime.fromisoformat(t.completed_at)
+                if completed_dt.tzinfo is None:
+                    completed_dt = completed_dt.replace(tzinfo=timezone.utc)
+                if completed_dt < last_review_at:
+                    continue
+            except (ValueError, TypeError):
+                pass
+        recently_completed.append(t)
+
+    # Blocked tasks
+    blocked_tasks = [
+        t for t in all_tasks if t.status.is_blocked
+    ]
+
+    # Upcoming READY tasks — top N by priority
+    upcoming_limit = config.manager_review_upcoming_tasks
+    ready_tasks = sorted(
+        [t for t in all_tasks
+         if t.status == TaskStatus.READY and t.is_ready(completed)],
+        key=lambda t: t.priority_score(),
+    )[:upcoming_limit]
+
+    # Previous review summary
+    prev_summary = state.get("last_review_summary", "")
+
+    # Build description
+    sections = [
+        "You are conducting a scheduled Manager review.",
+        "",
+    ]
+
+    if prev_summary:
+        sections += [
+            "--- PREVIOUS REVIEW SUMMARY ---",
+            prev_summary,
+            "--- END PREVIOUS REVIEW SUMMARY ---",
+            "",
+        ]
+
+    sections += [
+        f"--- RECENTLY COMPLETED TASKS ({len(recently_completed)}) ---",
+    ]
+    for t in recently_completed:
+        sections.append(
+            f"[{t.id}] {t.title} | completed: {t.completed_at or 'unknown'}"
+        )
+        if t.last_review_summary:
+            sections.append(f"  Summary: {t.last_review_summary[:200]}")
+    if not recently_completed:
+        sections.append("  (none)")
+    sections.append("")
+
+    sections += [
+        f"--- BLOCKED TASKS ({len(blocked_tasks)}) ---",
+    ]
+    for t in blocked_tasks:
+        sections.append(
+            f"[{t.id}] {t.title} | status: {t.status.value}"
+        )
+        if t.pending_question:
+            sections.append(f"  Pending question: {t.pending_question}")
+        if t.notes:
+            last_note = t.notes.splitlines()[-1]
+            sections.append(f"  Notes: {last_note}")
+    if not blocked_tasks:
+        sections.append("  (none)")
+    sections.append("")
+
+    sections += [
+        f"--- UPCOMING READY TASKS (top {len(ready_tasks)}) ---",
+    ]
+    for t in ready_tasks:
+        sections.append(
+            f"[{t.id}] ({t.role.value}) {t.title} | "
+            f"score: {t.priority_score():.3f}"
+        )
+    if not ready_tasks:
+        sections.append("  (none)")
+    sections.append("")
+
+    sections.append(
+        "Use get_task_info, list_tasks, update_task, split_task as needed. "
+        "Call declare_complete with a detailed summary when your review is done."
+    )
+
+    description = "\n".join(sections)
+
+    task = Task(
+        title="[Manager Review] Scheduled review",
+        description=description,
+        role=AgentRole.MANAGER,
+        repo=[],
+        importance=0.2,   # low score = high priority (P1)
+        urgency=0.2,
+    )
+    task.preempt = True
+    return task
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +351,20 @@ class Orchestrator:
     creates a Critic review task, and blocks the original task on it.
     The task is only marked COMPLETE after the Critic calls approve().
     Manager tasks skip Critic review and go directly to COMPLETE.
+
+    Daily review injection
+    ----------------------
+    At the top of each scheduling cycle the orchestrator checks whether
+    a Manager review is due (based on manager_review_schedule cron string
+    and last_manager_review_at in workspace state). If due, a review task
+    is created and injected with preempt=True so it takes priority.
+
+    Stale clarification handling
+    ----------------------------
+    The scheduler calls _handle_stale_clarification() when it detects a
+    BLOCKED_BY_HUMAN task with an unanswered pending_question older than
+    clarification_timeout_minutes. The orchestrator creates a low-priority
+    Manager task and records it in workspace state to prevent duplicates.
     """
 
     _IDLE_TIMEOUT = 300  # 5 minutes
@@ -187,7 +381,15 @@ class Orchestrator:
 
         self.queue = TaskQueue(paths.tasks_file)
         self._router = Router(config)
-        self._scheduler = Scheduler(config)
+
+        # Load workspace state before constructing the scheduler so the
+        # stale clarification callback has access to it immediately.
+        self._ws_state = workspace_state.load(paths.workspace_state_file)
+
+        self._scheduler = Scheduler(
+            config,
+            stale_clarification_callback=self._handle_stale_clarification,
+        )
 
         self._status: dict = {
             "task":             None,
@@ -227,9 +429,10 @@ class Orchestrator:
 
         Each iteration:
             1. Reload tasks from disk (picks up API-created tasks)
-            2. Ask the scheduler for the next task
-            3. If a task is ready — run it
-            4. If nothing is ready — wait on the condition variable
+            2. Check whether a Manager review is due — inject if so
+            3. Ask the scheduler for the next task
+            4. If a task is ready — run it
+            5. If nothing is ready — wait on the condition variable
         """
         import matrixmouse.api as api_module
         condition = api_module.get_task_condition()
@@ -246,6 +449,9 @@ class Orchestrator:
                 logger.error("Failed to reload task queue: %s", e)
                 self._wait_on_condition(condition)
                 continue
+
+            # --- Daily review injection ---
+            self._maybe_inject_manager_review()
 
             decision = self._scheduler.next(self.queue)
 
@@ -293,6 +499,168 @@ class Orchestrator:
             self._update_status(idle=True, task=None, role=None)
 
     # -----------------------------------------------------------------------
+    # Daily review injection
+    # -----------------------------------------------------------------------
+
+    def _maybe_inject_manager_review(self) -> None:
+        """
+        Inject a Manager review task if the schedule says one is due.
+
+        Checks workspace state for last_manager_review_at and evaluates
+        the manager_review_schedule cron expression. If due and no review
+        task is already pending, creates a preempting Manager review task.
+
+        No-op if manager_review_schedule is empty or unset.
+        """
+        schedule = self.config.manager_review_schedule
+        if not schedule:
+            return
+
+        last_review_at = workspace_state.get_last_review_at(self._ws_state)
+
+        if not _review_is_due(schedule, last_review_at):
+            return
+
+        # Check if a review task is already pending or running to avoid
+        # injecting duplicates if the previous review hasn't completed yet.
+        existing_review = next(
+            (
+                t for t in self.queue.active_tasks()
+                if t.role == AgentRole.MANAGER
+                and t.title.startswith("[Manager Review]")
+                and not t.status.is_terminal
+            ),
+            None,
+        )
+        if existing_review:
+            logger.debug(
+                "Manager review already active [%s] — skipping injection.",
+                existing_review.id,
+            )
+            return
+
+        try:
+            review_task = _build_review_task(
+                self.queue, self._ws_state, self.config
+            )
+            self.queue.add(review_task)
+            logger.info(
+                "Manager review task [%s] injected (schedule: %s).",
+                review_task.id, schedule,
+            )
+        except Exception as e:
+            logger.error("Failed to inject Manager review task: %s", e)
+
+    def _on_manager_review_complete(self, task: Task, summary: str) -> None:
+        """
+        Update workspace state when a Manager review task completes.
+
+        Records the completion timestamp and the review summary so the
+        next review cycle can front-load it as context.
+
+        Args:
+            task:    The completed Manager review task.
+            summary: The completion summary from declare_complete.
+        """
+        workspace_state.set_last_review_at(self._ws_state)
+        self._ws_state["last_review_summary"] = summary
+        workspace_state.save(self.paths.workspace_state_file, self._ws_state)
+        logger.info(
+            "Manager review complete. last_manager_review_at updated."
+        )
+
+    # -----------------------------------------------------------------------
+    # Stale clarification handling
+    # -----------------------------------------------------------------------
+
+    def _handle_stale_clarification(
+        self,
+        task_id: str,
+        question: str,
+        blocked_since: str,
+    ) -> None:
+        """
+        Scheduler callback: create a Manager task to handle a stale
+        clarification question.
+
+        Checks workspace state to avoid creating duplicate Manager tasks
+        for the same blocked task. Records the created task ID in
+        workspace state.
+
+        Args:
+            task_id:       ID of the BLOCKED_BY_HUMAN task.
+            question:      The unanswered clarification question.
+            blocked_since: ISO timestamp when the task was blocked.
+        """
+        # Check for existing stale clarification task in workspace state
+        existing_manager_task_id = workspace_state.get_stale_clarification_task(
+            self._ws_state, task_id
+        )
+        if existing_manager_task_id:
+            # Verify the task still exists and is non-terminal
+            existing = self.queue.get(existing_manager_task_id)
+            if existing and not existing.status.is_terminal:
+                logger.debug(
+                    "Stale clarification Manager task [%s] already exists "
+                    "for task [%s] — skipping.",
+                    existing_manager_task_id, task_id,
+                )
+                return
+            # Task completed or was cancelled — clear the record
+            workspace_state.clear_stale_clarification_task(
+                self._ws_state, task_id
+            )
+            workspace_state.save(self.paths.workspace_state_file, self._ws_state)
+
+        blocked_task = self.queue.get(task_id)
+        if blocked_task is None:
+            logger.warning(
+                "Stale clarification: task [%s] not found in queue.", task_id
+            )
+            return
+
+        description = (
+            f"A task has been waiting for a clarification answer for too long.\n\n"
+            f"Blocked task ID: {task_id}\n"
+            f"Blocked task title: {blocked_task.title}\n"
+            f"Blocked since: {blocked_since}\n"
+            f"Repo: {', '.join(blocked_task.repo) if blocked_task.repo else '(none)'}\n"
+            f"\nUnanswered question:\n{question}\n\n"
+            f"If you can answer this question from available context (git log, "
+            f"files, task descriptions), update the blocked task's description "
+            f"with the answer using update_task, then unblock it by removing the "
+            f"clarification block via update_task(remove_blocked_by=[]). "
+            f"If you cannot answer it, flag it for the human operator using "
+            f"request_clarification with a summary of what you tried."
+        )
+
+        manager_task = Task(
+            title=f"[Stale Clarification] Answer question for task {task_id}",
+            description=description,
+            role=AgentRole.MANAGER,
+            repo=blocked_task.repo,
+            importance=0.6,   # lower priority than reviews but above normal work
+            urgency=0.5,
+        )
+
+        try:
+            self.queue.add(manager_task)
+            workspace_state.register_stale_clarification_task(
+                self._ws_state, task_id, manager_task.id
+            )
+            workspace_state.save(self.paths.workspace_state_file, self._ws_state)
+            logger.info(
+                "Stale clarification Manager task [%s] created for "
+                "blocked task [%s].",
+                manager_task.id, task_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to create stale clarification Manager task "
+                "for task [%s]: %s", task_id, e,
+            )
+
+    # -----------------------------------------------------------------------
     # Task execution
     # -----------------------------------------------------------------------
 
@@ -319,14 +687,12 @@ class Orchestrator:
         reconfigure_for_task(task.repo, self.paths.workspace_root)
 
         run_result = self._run_agent(task, agent, messages)
-        result  = run_result.loop_result
+        result   = run_result.loop_result
         detector = run_result.detector
 
         # --- Yield (time slice expired or preemption) ---
         if result.exit_reason == LoopExitReason.YIELD:
-            logger.info(
-                "Task [%s] yielding. Returning to READY.", task.id
-            )
+            logger.info("Task [%s] yielding. Returning to READY.", task.id)
             self.queue.mark_ready(task.id)
             return
 
@@ -336,16 +702,14 @@ class Orchestrator:
             return
 
         # --- Escalate (Coder cascade) ---
-        # TODO: currently escalates recursively; make this iterative for concurrency when multi-threaded model is applied
+        # TODO: make iterative for concurrency when multi-threaded model is applied
         if result.exit_reason == LoopExitReason.ESCALATE:
             if task.role == AgentRole.CODER:
                 escalated, new_model = self._router.escalate(detector)
                 if escalated:
                     logger.info(
-                        "Task [%s] escalating to %s.",
-                        task.id, new_model,
+                        "Task [%s] escalating to %s.", task.id, new_model,
                     )
-                    # Build handoff messages and re-enter immediately
                     handoff_messages = self._router.build_handoff(
                         detector, result.messages
                     )
@@ -353,7 +717,6 @@ class Orchestrator:
                     self.queue.update(task)
                     self._run_task(task)
                     return
-            # At ceiling or non-escalatable role
             logger.warning(
                 "Task [%s] at cascade ceiling or non-escalatable role — "
                 "human needed.", task.id,
@@ -364,7 +727,7 @@ class Orchestrator:
             )
             return
 
-        # --- Max turns ---
+        # --- Turn limit ---
         if result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED:
             self._handle_turn_limit(task, result)
             return
@@ -381,18 +744,6 @@ class Orchestrator:
     ) -> RunResult:
         """
         Construct and run the AgentLoop for a task.
-
-        Wires all subsystems (task tools, comms, memory, context
-        manager, persist, yield check) and runs the loop to completion
-        or yield.
-
-        Args:
-            task:     The task being executed.
-            agent:    The concrete BaseAgent instance for this task's role.
-            messages: The starting message list (fresh or resumed).
-
-        Returns:
-            RunResult with the loop outcome and stuck detector state.
         """
         from matrixmouse.tools import task_tools, tools_for_role_list
         from matrixmouse.tools import comms_tools
@@ -477,27 +828,20 @@ class Orchestrator:
         Handle a COMPLETE exit from the agent loop.
 
         For Coder and Writer tasks: intercept and create a Critic review
-        task that blocks the original task. The original task will only
-        be marked COMPLETE after the Critic calls approve().
+        task that blocks the original task.
 
-        For Manager tasks: mark COMPLETE directly. Manager review
-        summaries are stored in last_review_summary for the next cycle.
+        For Manager tasks: mark COMPLETE directly. If this is a scheduled
+        review task, update workspace state with the completion timestamp
+        and summary.
 
-        For Critic tasks: the approve()/deny() tools handle task state
-        directly in task_tools.py. By the time the loop exits COMPLETE
-        here, approve() has already marked the reviewed task and this
-        Critic task COMPLETE. Nothing further to do.
-
-        Args:
-            task:   The task whose loop exited with COMPLETE.
-            result: The LoopResult from the agent loop.
+        For Critic tasks: approve()/deny() in task_tools already updated
+        all task states — nothing further to do here.
         """
         if task.role in (AgentRole.CODER, AgentRole.WRITER):
             self._create_critic_review(task, result)
             return
 
         if task.role == AgentRole.MANAGER:
-            # Store review summary for the next review cycle
             if result.completion_summary:
                 task.last_review_summary = result.completion_summary
                 try:
@@ -509,17 +853,19 @@ class Orchestrator:
                     )
             self.queue.mark_complete(task.id)
             self._notify_task_complete(task)
+
+            # If this was a scheduled review task, update workspace state
+            if task.title.startswith("[Manager Review]"):
+                self._on_manager_review_complete(
+                    task, result.completion_summary or ""
+                )
             logger.info("Manager task [%s] complete.", task.id)
             return
 
         if task.role == AgentRole.CRITIC:
-            # approve()/deny() in task_tools already updated task states.
-            # The Critic task itself was marked COMPLETE there.
-            # Just log and update status.
             logger.info("Critic task [%s] complete.", task.id)
             return
 
-        # Unknown role — mark complete and log
         logger.warning(
             "Task [%s] has unknown role %r — marking complete directly.",
             task.id, task.role,
@@ -530,14 +876,6 @@ class Orchestrator:
     def _create_critic_review(self, task: Task, result: LoopResult) -> None:
         """
         Create a Critic review task for a completed Coder or Writer task.
-
-        The original task is set to BLOCKED_BY_TASK until the Critic
-        approves or denies. The Critic task is given the reviewed task's
-        full context, diff, and definition of done as its description.
-
-        Args:
-            task:   The Coder/Writer task that called declare_complete.
-            result: The LoopResult containing the completion summary.
         """
         diff = _fetch_diff_for_task(task)
         critic_description = _build_critic_description(task, diff)
@@ -564,7 +902,6 @@ class Orchestrator:
             self._notify_task_complete(task)
             return
 
-        # Block the original task on the Critic review
         task.blocked_by.append(critic_task.id)
         task.status = TaskStatus.BLOCKED_BY_TASK
         try:
@@ -591,6 +928,91 @@ class Orchestrator:
                 })
         except Exception as e:
             logger.warning("Failed to emit critic_review_created event: %s", e)
+
+    # -----------------------------------------------------------------------
+    # Turn limit handling
+    # -----------------------------------------------------------------------
+
+    def _handle_turn_limit(self, task: Task, result: LoopResult) -> None:
+        """
+        Handle a task that has reached its turn limit.
+
+        For Critic tasks, emits a Critic-specific event with the three-option
+        modal data (approve task / give Critic more turns / block task).
+
+        For all other roles, emits the standard turn_limit_reached event
+        with extend/respec/cancel options.
+        """
+        self.queue.mark_blocked_by_human(
+            task.id,
+            reason=f"Turn limit reached ({result.turns_taken} turns).",
+        )
+        self._update_status(blocked=True)
+
+        logger.warning(
+            "Turn limit reached — Task [%s] %s | %d turns | Role: %s",
+            task.id, task.title, result.turns_taken, task.role.value,
+        )
+
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.notify_blocked(
+                    f"Task [{task.id}] hit turn limit "
+                    f"({result.turns_taken} turns): {task.title}"
+                )
+
+                if task.role == AgentRole.CRITIC:
+                    # Critic-specific modal: three options
+                    # 1. Approve the reviewed task (skip further Critic review)
+                    # 2. Give the Critic more turns
+                    # 3. Block the reviewed task for human resolution
+                    reviewed_task_id = task.reviews_task_id or ""
+                    m.emit("critic_turn_limit_reached", {
+                        "critic_task_id":   task.id,
+                        "critic_task_title": task.title,
+                        "reviewed_task_id": reviewed_task_id,
+                        "turns_taken":      result.turns_taken,
+                        "critic_max_turns": self.config.critic_max_turns,
+                        "choices": [
+                            {
+                                "value": "approve_task",
+                                "label": "Approve task",
+                                "description": (
+                                    "Mark the reviewed task as complete. "
+                                    "No further Critic review."
+                                ),
+                            },
+                            {
+                                "value": "extend_critic",
+                                "label": "Give Critic more turns",
+                                "description": (
+                                    f"Allow the Critic another "
+                                    f"{self.config.critic_max_turns} "
+                                    f"turns to complete its review."
+                                ),
+                            },
+                            {
+                                "value": "block_task",
+                                "label": "Block for human review",
+                                "description": (
+                                    "Cancel the Critic review and move the "
+                                    "task to BLOCKED_BY_HUMAN for manual resolution."
+                                ),
+                            },
+                        ],
+                    })
+                else:
+                    m.emit("turn_limit_reached", {
+                        "task_id":     task.id,
+                        "task_title":  task.title,
+                        "role":        task.role.value,
+                        "turns_taken": result.turns_taken,
+                        "turn_limit":  task.turn_limit or self.config.agent_max_turns,
+                    })
+        except Exception as e:
+            logger.warning("Failed to send turn limit notification: %s", e)
 
     # -----------------------------------------------------------------------
     # Time slice and preemption
@@ -628,13 +1050,6 @@ class Orchestrator:
         """
         Load persisted context_messages for a resuming task, or build
         fresh initial messages via the agent for a new task.
-
-        Args:
-            task:  The task being executed.
-            agent: The concrete BaseAgent instance for this task's role.
-
-        Returns:
-            list: Message list ready to pass to AgentLoop.
         """
         if task.context_messages:
             logger.debug(
@@ -715,42 +1130,3 @@ class Orchestrator:
             "importance_weight": getattr(self.config, "priority_importance_weight", 0.6),
             "urgency_weight":    getattr(self.config, "priority_urgency_weight",    0.4),
         }
-
-    def _handle_turn_limit(self, task: Task, result: LoopResult) -> None:
-        """
-        Handle a task that has reached its turn limit.
-
-        Moves the task to BLOCKED_BY_HUMAN and emits a turn_limit_reached
-        event so the UI can display the confirmation modal. The operator
-        can then extend, respec, or cancel via POST /tasks/{id}/turn-limit-response.
-        """
-        self.queue.mark_blocked_by_human(
-            task.id,
-            reason=f"Turn limit reached ({result.turns_taken} turns).",
-        )
-        self._update_status(blocked=True)
-
-        logger.warning(
-            "Turn limit reached — Task [%s] %s | %d turns | Role: %s",
-            task.id, task.title, result.turns_taken, task.role.value,
-        )
-
-        try:
-            from matrixmouse import comms as comms_module
-            m = comms_module.get_manager()
-            if m:
-                m.notify_blocked(
-                    f"Task [{task.id}] hit turn limit ({result.turns_taken} turns): "
-                    f"{task.title}"
-                )
-                m.emit("turn_limit_reached", {
-                    "task_id":     task.id,
-                    "task_title":  task.title,
-                    "role":        task.role.value,
-                    "turns_taken": result.turns_taken,
-                    "turn_limit":  task.turn_limit or getattr(
-                        self.config, "agent_max_turns", 50
-                    ),
-                })
-        except Exception as e:
-            logger.warning("Failed to send turn limit notification: %s", e)
