@@ -455,6 +455,9 @@ class MatrixMousePaths:
                 AGENT_NOTES.md              workspace-level agent notes
                                             (used by future workspace-scoped tasks
                                             e.g. Project Manager agent)
+                workspace_state.json        orchestrator-level persistent state 
+                                            (last_manager_review_at, stale clarification 
+                                            task registry)
                 <repo_name>/                per-repo runtime state (not in git)
                     AGENT_NOTES.md          repo-scoped agent working memory
                     agent.log               repo-scoped session log
@@ -509,6 +512,11 @@ class MatrixMousePaths:
         For repo-scoped notes, use repo_paths(repo_name).agent_notes.
         """
         return self.mm_dir / "AGENT_NOTES.md"
+
+    @property
+    def workspace_state_file(self) -> Path:
+        """<workspace_root>/.matrixmouse/workspace_state.json"""
+        return self.mm_dir / "workspace_state.json"
 
     def repo_paths(self, repo_name: str) -> "RepoPaths":
         """
