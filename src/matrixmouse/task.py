@@ -102,6 +102,14 @@ class Task:
                                       context when the next review task is created
         context_messages            — full conversation history; persisted after
                                       every inference call (not just phase transitions)
+        last_modified               — ISO timestamp updated on every queue.update()
+                                      call. Tracks task throughput and used for
+                                      stale clarification detection. Falls back
+                                      to created_at on load if absent.
+        pending_question            — clarification question currently awaiting
+                                      human response. Set by request_clarification(),
+                                      cleared when answered. Empty string means
+                                      no pending question.
 
     Removed vs the previous model:
         phase                       — replaced by role
@@ -163,6 +171,10 @@ class Task:
     )
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    last_modified: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    pending_question: str = field(default="") # request_clarification questions land here
 
     # -----------------------------------------------------------------------
     # Priority
@@ -245,6 +257,8 @@ class Task:
             "created_at":                   self.created_at,
             "started_at":                   self.started_at,
             "completed_at":                 self.completed_at,
+            "last_modified":                self.last_modified,
+            "pending_question":             self.pending_question,
         }
 
     @classmethod
@@ -303,6 +317,11 @@ class Task:
             ),
             started_at=data.get("started_at"),
             completed_at=data.get("completed_at"),
+            last_modified=data.get(
+                "last_modified",
+                data.get("created_at", datetime.now(timezone.utc).isoformat())
+                ),
+            pending_question=data.get("pending_question", ""),
         )
 
 
@@ -406,6 +425,7 @@ class TaskQueue:
     def update(self, task: Task) -> None:
         if task.id not in self._tasks:
             raise KeyError(f"Task {task.id!r} not found.")
+        task.last_modified = datetime.now(timezone.utc).isoformat()
         self._tasks[task.id] = task
         self._save()
 

@@ -40,6 +40,15 @@ down by scheduler_adaptive_step_minutes to keep switch overhead within
 target bounds (scheduler_adaptive_min_pct / scheduler_adaptive_max_pct
 of the slice length).
 
+Stale clarification detection
+------------------------------
+On every call to next(), the scheduler scans BLOCKED_BY_HUMAN tasks
+for unanswered clarification questions older than
+clarification_timeout_minutes. For each stale question found, it calls
+the provided stale_clarification_callback so the orchestrator can create
+a Manager task to handle it. The callback is optional — if not provided,
+stale detection is skipped.
+
 Priority score convention
 -------------------------
 Lower score == higher priority (0.0 = most urgent).
@@ -53,6 +62,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -106,17 +117,37 @@ class Scheduler:
     _slice_overrides        Per-level slice minute overrides set by the
                             adaptive heuristic. Starts empty; config values
                             are used when no override is present.
+    _last_served_level      Last queue level served. Used for TODO round-robin
+                            cycling (see _select_from_queues).
     """
 
     _EMA_ALPHA = 0.2          # smoothing factor for switch time EMA
     _EMA_INITIAL = 30.0       # initial EMA value in seconds (conservative)
 
-    def __init__(self, config: "MatrixMouseConfig"):
+    def __init__(
+        self,
+        config: "MatrixMouseConfig",
+        stale_clarification_callback: Optional[Callable[[str, str, str], None]] = None,
+    ):
+        """
+        Args:
+            config: Active MatrixMouseConfig.
+            stale_clarification_callback:
+                Called when a stale clarification question is detected.
+                Signature: callback(task_id, question, blocked_since)
+                    task_id:       ID of the BLOCKED_BY_HUMAN task.
+                    question:      The clarification question text extracted
+                                   from the task's notes.
+                    blocked_since: ISO timestamp when the task was blocked.
+                The orchestrator uses this to create a Manager task.
+                If None, stale clarification detection is skipped.
+        """
         self.config = config
+        self._stale_cb = stale_clarification_callback
         self._current_queue_level: int = P1
         self._switch_ema: float = self._EMA_INITIAL
-        self._slice_overrides: dict[int, float] = {}  # level -> minutes
-        self._last_served_level: int = P1 # TODO: persist across restarts via workspace state
+        self._slice_overrides: dict[int, float] = {}
+        self._last_served_level: int = P1
 
     # -----------------------------------------------------------------------
     # Public interface
@@ -127,11 +158,12 @@ class Scheduler:
         Select the next task to run.
 
         Call order:
-            1. Check for preempting tasks (Manager review, interjections).
+            1. Stale clarification check — scan BLOCKED_BY_HUMAN tasks.
+            2. Check for preempting tasks (Manager review, interjections).
                If found, return immediately regardless of current queue state.
-            2. Check whether the current task's time slice has expired.
-               If not expired, return task=None (keep running current task).
-            3. Walk queue levels from P1 downward, returning the first
+            3. Check whether the current task's time slice has expired.
+               If not expired, return the current task (keep running).
+            4. Walk queue levels from P1 downward, returning the first
                non-empty level that has a ready task.
 
         Returns SchedulingDecision with task=None if nothing is ready.
@@ -140,6 +172,9 @@ class Scheduler:
 
         all_active = queue.active_tasks()
         completed  = queue.completed_ids()
+
+        # --- Stale clarification check ---
+        self._check_stale_clarifications(all_active)
 
         ready = [
             t for t in all_active
@@ -185,8 +220,6 @@ class Scheduler:
         if running:
             current = running[0]
             if current.time_slice_started is None:
-                # Inconsistent state — running but no slice recorded.
-                # Treat as expired and fall through to select next task.
                 logger.warning(
                     "Task [%s] is RUNNING but has no time_slice_started — "
                     "treating slice as expired.",
@@ -213,6 +246,7 @@ class Scheduler:
                         "(%.1f min, limit %.0f min, P%d).",
                         current.id, elapsed, limit, level,
                     )
+
         # --- Select next task from queue levels ---
         chosen, level = self._select_from_queues(ready)
         self._last_served_level = level
@@ -309,6 +343,75 @@ class Scheduler:
         return "\n".join(lines)
 
     # -----------------------------------------------------------------------
+    # Stale clarification detection
+    # -----------------------------------------------------------------------
+
+        
+    def _check_stale_clarifications(self, all_active: list) -> None:
+        """
+        Scan BLOCKED_BY_HUMAN tasks for unanswered clarification questions
+        older than clarification_timeout_minutes.
+
+        Uses task.pending_question rather than string-matching notes —
+        this field is set atomically by request_clarification() and cleared
+        when the human answers, so there is no ambiguity about whether a
+        question is pending.
+
+        For each stale question found, calls _stale_cb(task_id, question,
+        blocked_since) so the orchestrator can create a Manager task.
+        Deduplication is handled by the orchestrator via workspace_state.json
+        — the callback is responsible for checking before creating.
+
+        Skipped entirely if no callback is registered.
+
+        Args:
+            all_active: List of active (non-terminal) tasks.
+        """
+        if self._stale_cb is None:
+            return
+
+        from matrixmouse.task import TaskStatus
+
+        timeout_minutes = getattr(
+            self.config, "clarification_timeout_minutes", 60
+        )
+        now = datetime.now(timezone.utc)
+
+        for task in all_active:
+            if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+                continue
+            if not task.pending_question:
+                continue
+
+            blocked_since = _parse_blocked_since(task)
+            if blocked_since is None:
+                continue
+
+            elapsed_minutes = (now - blocked_since).total_seconds() / 60.0
+            if elapsed_minutes < timeout_minutes:
+                continue
+
+            logger.info(
+                "Stale clarification detected for task [%s] "
+                "(blocked %.0f min, timeout %.0f min): %s",
+                task.id, elapsed_minutes, timeout_minutes,
+                task.pending_question[:60],
+            )
+
+            try:
+                self._stale_cb(
+                    task.id,
+                    task.pending_question,
+                    blocked_since.isoformat(),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Stale clarification callback failed for task [%s]: %s",
+                    task.id, e,
+                )
+
+
+    # -----------------------------------------------------------------------
     # Queue level assignment
     # -----------------------------------------------------------------------
 
@@ -331,13 +434,10 @@ class Scheduler:
         Walk P1 → P2 → P3. Return the highest-priority task from the
         first non-empty level, and the level it came from.
 
-        Round-robin within each level is approximated by sorting on
-        priority score — tasks with equal scores get served in FIFO
-        order via Python's stable sort.
-
-        TODO: Implement true round-robin cycling using _last_served_level so 
-        higher queues don't perpetually starve lower ones when P1 always has 
-        tasks. Current greedy approach is acceptable when task volume is low
+        TODO: Implement true round-robin cycling using _last_served_level so
+        higher queues don't perpetually starve lower ones when P1 always has
+        tasks. Current greedy approach is acceptable for early development
+        where task volumes are low.
         """
         kwargs = self._scoring_kwargs()
 
@@ -429,3 +529,33 @@ class Scheduler:
             "importance_weight":  getattr(self.config, "priority_importance_weight",  0.6),
             "urgency_weight":     getattr(self.config, "priority_urgency_weight",     0.4),
         }
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for stale clarification detection
+# ---------------------------------------------------------------------------
+
+def _parse_blocked_since(task: "Task") -> "datetime | None":
+    """
+    Determine when a BLOCKED_BY_HUMAN task was blocked.
+
+    Uses last_modified or falls back to started_at or created_at. 
+
+    Returns timezone-aware UTC datetime, or None if unparseable.
+
+    Args:
+        task: The blocked task.
+
+    Returns:
+        datetime or None.
+    """
+    raw = task.last_modified or task.started_at or task.created_at
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None

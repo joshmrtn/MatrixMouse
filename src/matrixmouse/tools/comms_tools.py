@@ -88,6 +88,15 @@ def request_clarification(question: str) -> str:
             active_task_id,
             reason=f"Awaiting clarification: {question[:120]}",
         )
+        # Store the question on the task. Cleared when question is answered.
+        try:
+            task_obj = queue.get(active_task_id)
+            if task_obj:
+                task_obj.pending_question = question.strip()
+                queue.update(task_obj)
+        except Exception as e:
+                logger.warning("Failed to store pending_question on task [%s]: %s",
+                                active_task_id, e)
     except Exception as e:
         logger.warning(
             "Failed to mark task [%s] blocked: %s", active_task_id, e
