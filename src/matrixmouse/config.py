@@ -71,7 +71,7 @@ class MatrixMouseConfig(BaseSettings):
         default="qwen3.5:4b",
         description="Model for planning, design, and architectural decisions.",
     )
-    judge_model: str = Field(
+    critic_model: str = Field(
         default="qwen3.5:4b",
         description="Model for critique, review, and stuck detection.",
     )
@@ -111,9 +111,9 @@ class MatrixMouseConfig(BaseSettings):
         default=False,
         description="Enable extended thinking for the planner model.",
     )
-    judge_think: bool = Field(
+    critic_think: bool = Field(
         default=False,
-        description="Enable extended thinking for the judge model.",
+        description="Enable extended thinking for the critic model.",
     )
     summarizer_think: bool = Field(
         default=False,
@@ -131,9 +131,9 @@ class MatrixMouseConfig(BaseSettings):
         default=True,
         description="Stream planner model output token by token.",
     )
-    judge_stream: bool = Field(
+    critic_stream: bool = Field(
         default=True,
-        description="Stream judge model output token by token.",
+        description="Stream critic model output token by token.",
     )
     summarizer_stream: bool = Field(
         default=True,
