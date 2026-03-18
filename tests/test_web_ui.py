@@ -181,9 +181,9 @@ class TestSettingsPanel:
     def test_panel(self, html): assert 'id="settings-panel"' in html
     def test_settings_sidebar(self, html): assert 'id="settings-sidebar"' in html
     def test_model_keys(self, html):
-        assert "coder_model" in html and "planner_model" in html
+        assert "coder_model" in html and "manager_model" in html
     def test_thinking_keys(self, html):
-        for key in ["coder_think", "planner_think", "judge_think"]:
+        for key in ["coder_think", "manager_think", "critic_think"]:
             assert key in html
     def test_repo_nav_injection(self, html): assert 'id="settings-repo-nav"' in html
     def test_save_bar(self, html): assert 'id="settings-save-bar"' in html

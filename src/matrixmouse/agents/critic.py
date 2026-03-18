@@ -23,7 +23,7 @@ The Critic should aim to decide in 1-3 turns for straightforward tasks
 and use remaining turns only for complex reviews requiring deeper
 inspection.
 
-Model: planner_model (same as Manager — requires strong reasoning)
+Model: critic_model (requires strong reasoning)
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class CriticAgent(BaseAgent):
     """
     Review and quality gate agent.
 
-    Runs on planner_model. Has read-only access to files, git tools,
+    Runs on critic_model. Has read-only access to files, git tools,
     code introspection tools, navigation tools, and task info.
     The only mutating tools available are approve() and deny().
 

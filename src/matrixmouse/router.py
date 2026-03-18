@@ -12,10 +12,10 @@ Responsibilities:
     - Providing the role-filtered tool list for each agent
 
 Role-to-model mapping:
-    MANAGER  → config.planner_model  (largest, most capable)
+    MANAGER  → config.manager_model  (largest, most capable)
     CODER    → config.coder_cascade  (escalating ladder)
     WRITER   → config.writer_model   (defaults to coder_model)
-    CRITIC   → config.planner_model  (same as Manager — strong reasoning)
+    CRITIC   → config.critic_model   (strong reasoning)
     internal summarization → config.summarizer_model (not agent-facing)
 
 Cascade ladder:
@@ -84,10 +84,11 @@ class Router:
         self._successful_cycles = 0
 
         logger.info(
-            "Router initialised. Cascade: %s. Planner: %s. "
-            "Writer: %s. Summarizer: %s.",
+            "Router initialised. Cascade: %s. Manager: %s. "
+            "Critic: %s. Writer: %s. Summarizer: %s.",
             self._cascade,
-            config.planner_model,
+            config.manager_model,
+            config.critic_model,
             config.writer_model,
             config.summarizer_model,
         )
@@ -100,11 +101,11 @@ class Router:
         """
         Return the model to use for a given agent role.
 
-        MANAGER and CRITIC use planner_model — both require strong
-        reasoning and benefit from the largest configured model.
+        MANAGER uses manager_model and CRITIC uses critic_model — both 
+        require strong reasoning and benefit from the largest configured 
+        model.
         CODER uses the current cascade tier.
-        WRITER uses writer_model, defaulting to coder_model if not
-        separately configured.
+        WRITER uses writer_model
 
         Args:
             role: The AgentRole of the running agent.
@@ -112,8 +113,11 @@ class Router:
         Returns:
             str: Model name string for passing to the inference backend.
         """
-        if role in (AgentRole.MANAGER, AgentRole.CRITIC):
-            return self.config.planner_model
+        if role == AgentRole.MANAGER:
+            return self.config.manager_model
+        
+        if role == AgentRole.CRITIC:
+            return self.config.critic_model
 
         if role == AgentRole.CODER:
             return self._current_model()
@@ -143,8 +147,11 @@ class Router:
         Returns:
             bool: True if streaming should be enabled.
         """
-        if role in (AgentRole.MANAGER, AgentRole.CRITIC):
-            return self.config.planner_stream
+        if role == AgentRole.MANAGER:
+            return self.config.manager_stream
+        
+        if role == AgentRole.CRITIC:
+            return self.config.critic_stream
 
         if role == AgentRole.CODER:
             return self.config.coder_stream
@@ -168,8 +175,11 @@ class Router:
         Returns:
             bool: True if extended thinking should be enabled.
         """
-        if role in (AgentRole.MANAGER, AgentRole.CRITIC):
-            return self.config.planner_think
+        if role == AgentRole.MANAGER:
+            return self.config.manager_think
+        
+        if role == AgentRole.CRITIC:
+            return self.config.critic_think
 
         if role == AgentRole.CODER:
             return self.config.coder_think

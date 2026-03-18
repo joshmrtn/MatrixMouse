@@ -286,9 +286,9 @@ def validate_models(config: MatrixMouseConfig) -> None:
     """
     models_to_check = {
         "coder":      (config.coder_model,       True),
-        "planner":    (config.planner_model,     True),
-        "critic":     (config.planner_model,     True),   # critic uses planner_model
-        "writer":     (config.writer_model),     True),
+        "manager":    (config.manager_model,     True),
+        "critic":     (config.critic_model,     True), 
+        "writer":     (config.writer_model,     True),
         "summarizer": (config.summarizer_model,  False),
     }
     # Deduplicate — same model may serve multiple roles

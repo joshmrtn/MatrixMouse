@@ -21,7 +21,7 @@ Responsibilities:
 The Manager does not write code or modify files directly. Its output
 is a well-structured task graph that Coder and Writer agents execute.
 
-Model: planner_model (largest, most capable configured model)
+Model: manager_model (largest, most capable configured model)
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ class ManagerAgent(BaseAgent):
     """
     Top-level orchestration agent.
 
-    Runs on the planner_model. Has exclusive write access to the task
+    Runs on the manager_model. Has exclusive write access to the task
     graph. Does not write files or commit code.
 
     Two operating modes, determined by the task description:
