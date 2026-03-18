@@ -136,7 +136,10 @@ def get_last_review_at(state: dict) -> Optional[datetime]:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw)
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except (ValueError, TypeError) as e:
         logger.warning(
             "Could not parse last_manager_review_at %r: %s. Treating as None.",
