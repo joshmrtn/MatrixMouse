@@ -196,7 +196,7 @@ class Scheduler:
             )
 
         # --- Preemption check ---
-        preempting = [t for t in ready if getattr(t, "preempt", False)]
+        preempting = [t for t in ready if t.preempt]
         if preempting:
             chosen = min(preempting, key=lambda t: t.priority_score(
                 **self._scoring_kwargs()
@@ -284,7 +284,7 @@ class Scheduler:
         Call this after every context switch completes.
         No-op if adaptive scheduling is disabled.
         """
-        if not getattr(self.config, "scheduler_adaptive", False):
+        if not self.config.scheduler_adaptive:
             return
         self._switch_ema = (
             self._EMA_ALPHA * seconds
@@ -372,9 +372,7 @@ class Scheduler:
 
         from matrixmouse.task import TaskStatus
 
-        timeout_minutes = getattr(
-            self.config, "clarification_timeout_minutes", 60
-        )
+        timeout_minutes = self.config.clarification_timeout_minutes
         now = datetime.now(timezone.utc)
 
         for task in all_active:
@@ -419,8 +417,8 @@ class Scheduler:
         """Assign a task to P1, P2, or P3 based on its priority score."""
         kwargs = self._scoring_kwargs()
         score  = task.priority_score(**kwargs)
-        p1_thresh = getattr(self.config, "scheduler_p1_threshold", 0.35)
-        p2_thresh = getattr(self.config, "scheduler_p2_threshold", 0.65)
+        p1_thresh = self.config.scheduler_p1_threshold
+        p2_thresh = self.config.scheduler_p2_threshold
         if score < p1_thresh:
             return P1
         if score < p2_thresh:
@@ -458,9 +456,9 @@ class Scheduler:
         if level in self._slice_overrides:
             return self._slice_overrides[level]
         defaults = {
-            P1: getattr(self.config, "scheduler_p1_slice_minutes", 120.0),
-            P2: getattr(self.config, "scheduler_p2_slice_minutes", 90.0),
-            P3: getattr(self.config, "scheduler_p3_slice_minutes", 60.0),
+            P1: self.config.scheduler_p1_slice_minutes,
+            P2: self.config.scheduler_p2_slice_minutes,
+            P3: self.config.scheduler_p3_slice_minutes,
         }
         return defaults.get(level, 60.0)
 
@@ -486,10 +484,10 @@ class Scheduler:
 
         Floor: scheduler_adaptive_min_slice_minutes (default 30).
         """
-        step     = getattr(self.config, "scheduler_adaptive_step_minutes", 10.0)
-        min_pct  = getattr(self.config, "scheduler_adaptive_min_pct",  0.05)
-        max_pct  = getattr(self.config, "scheduler_adaptive_max_pct",  0.15)
-        floor    = getattr(self.config, "scheduler_adaptive_min_slice_minutes", 30.0)
+        step     = self.config.scheduler_adaptive_step_minutes
+        min_pct  = self.config.scheduler_adaptive_min_pct
+        max_pct  = self.config.scheduler_adaptive_max_pct
+        floor    = self.config.scheduler_adaptive_min_slice_minutes
 
         switch_minutes = self._switch_ema / 60.0
 
@@ -524,10 +522,10 @@ class Scheduler:
         Returns hardcoded defaults if config keys are absent.
         """
         return {
-            "aging_rate":         getattr(self.config, "priority_aging_rate",        0.01),
-            "max_aging_bonus":    getattr(self.config, "priority_max_aging_bonus",    0.3),
-            "importance_weight":  getattr(self.config, "priority_importance_weight",  0.6),
-            "urgency_weight":     getattr(self.config, "priority_urgency_weight",     0.4),
+            "aging_rate":         self.config.priority_aging_rate,
+            "max_aging_bonus":    self.config.priority_max_aging_bonus,
+            "importance_weight":  self.config.priority_importance_weight,
+            "urgency_weight":     self.config.priority_urgency_weight,
         }
 
 
