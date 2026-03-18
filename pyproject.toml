@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "matrixmouse"
-version = "0.2.3"
+version = "0.2.4"
 authors = [
   { name="Josh Martin", email="" },
 ]
@@ -19,6 +19,7 @@ dependencies = [
     "tomli-w>=1.0",
     "uvicorn[standard]>=0.41.0",
     "PyGithub>=2.0",
+    "croniter>=6.2.2",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
