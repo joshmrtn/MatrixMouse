@@ -295,8 +295,8 @@ else
 
 # --- Models ---
 # coder_model     = "qwen3.5:4b"
-# planner_model   = "qwen3.5:4b"
-# judge_model     = "qwen3.5:4b"
+# manager_model   = "qwen3.5:4b"
+# critic_model     = "qwen3.5:4b"
 # summarizer_model = "qwen3.5:4b"
 # coder_cascade   = ["qwen3.5:4b", "qwen3.5:9b", "qwen3.5:27b"]
 
@@ -458,16 +458,16 @@ echo "Models must support tool calling. Check available: ollama list"
 echo ""
 
 _cur_coder=$(read_toml "$CONFIG_FILE" "coder_model")
-_cur_planner=$(read_toml "$CONFIG_FILE" "planner_model")
-_cur_judge=$(read_toml "$CONFIG_FILE" "judge_model")
+_cur_manager=$(read_toml "$CONFIG_FILE" "manager_model")
+_cur_critic=$(read_toml "$CONFIG_FILE" "critic_model")
 _cur_summarizer=$(read_toml "$CONFIG_FILE" "summarizer_model")
 
 prompt_required CODER_MODEL      "Coder model (implementation)" \
     "${_cur_coder:-qwen3.5:4b}"
-prompt_required PLANNER_MODEL    "Planner model (design/task management)" \
-    "${_cur_planner:-qwen3.5:9b}"
-prompt_required JUDGE_MODEL      "Judge model (critique/decision making)" \
-    "${_cur_judge:-qwen3.5:9b}"
+prompt_required MANAGER_MODEL    "Manager model (design/task management)" \
+    "${_cur_manager:-qwen3.5:9b}"
+prompt_required CRITIC_MODEL      "Critic model (critique/decision making)" \
+    "${_cur_critic:-qwen3.5:9b}"
 prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" \
     "${_cur_summarizer:-qwen3.5:4b}"
 
@@ -526,8 +526,8 @@ if [ "$CONFIG_EXISTS" = false ]; then
 # Repo-specific overrides: <repo>/.matrixmouse/config.toml
 
 coder_model      = "$CODER_MODEL"
-planner_model    = "$PLANNER_MODEL"
-judge_model      = "$JUDGE_MODEL"
+manager_model    = "$MANAGER_MODEL"
+critic_model      = "$CRITIC_MODEL"
 summarizer_model = "$SUMMARIZER_MODEL"
 $CASCADE_LINE
 
@@ -551,8 +551,8 @@ else
     # Reinstall — upsert individual keys, never clobber
     # coder_cascade is skipped — edit manually if needed (multi-line array safe)
     upsert_toml "$CONFIG_FILE" "coder_model"      "$CODER_MODEL"
-    upsert_toml "$CONFIG_FILE" "planner_model"    "$PLANNER_MODEL"
-    upsert_toml "$CONFIG_FILE" "judge_model"      "$JUDGE_MODEL"
+    upsert_toml "$CONFIG_FILE" "manager_model"    "$MANAGER_MODEL"
+    upsert_toml "$CONFIG_FILE" "critic_model"      "$CRITIC_MODEL"
     upsert_toml "$CONFIG_FILE" "summarizer_model" "$SUMMARIZER_MODEL"
     upsert_toml "$CONFIG_FILE" "agent_git_name"   "$AGENT_GIT_NAME"
     upsert_toml "$CONFIG_FILE" "agent_git_email"  "$AGENT_GIT_EMAIL"
@@ -750,8 +750,8 @@ echo -e "${BOLD}Next steps:${RESET}"
 echo ""
 echo "  1. Pull your models:"
 echo "       ollama pull $CODER_MODEL"
-echo "       ollama pull $PLANNER_MODEL"
-echo "       ollama pull $JUDGE_MODEL"
+echo "       ollama pull $MANAGER_MODEL"
+echo "       ollama pull $CRITIC_MODEL"
 echo "       ollama pull $SUMMARIZER_MODEL"
 echo ""
 echo "  2. Add a repo:"

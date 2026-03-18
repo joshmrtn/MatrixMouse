@@ -5,22 +5,24 @@ Tests for matrixmouse.router — Router.
 
 Coverage:
     model_for_role:
-        - MANAGER returns planner_model
-        - CRITIC returns planner_model
+        - MANAGER returns manager_model
+        - CRITIC returns critic_model
         - CODER returns first cascade tier by default
         - WRITER returns writer_model
         - WRITER falls back to coder_model when writer_model absent
         - Unknown role falls back to coder_model with warning
 
     stream_for_role:
-        - MANAGER/CRITIC return planner_stream
+        - MANAGER returns manager_stream
+        - CRITIC returns critic_stream
         - CODER returns coder_stream
-        - WRITER returns writer_stream, falls back to coder_stream
+        - WRITER returns writer_stream
 
     think_for_role:
-        - MANAGER/CRITIC return planner_think
+        - MANAGER returns manager_think
+        - CRITIC returns critic_think
         - CODER returns coder_think
-        - WRITER returns writer_think, falls back to coder_think
+        - WRITER returns writer_think
 
     Cascade:
         - Single-tier cascade when coder_cascade empty
@@ -63,31 +65,20 @@ from matrixmouse.task import AgentRole
 
 def make_config(**kwargs) -> MagicMock:
     cfg = MagicMock()
-    cfg.planner_model    = kwargs.get("planner_model",    "planner-model")
+    cfg.manager_model    = kwargs.get("manager_model",    "manager-model")
+    cfg.critic_model     = kwargs.get("critic_model",     "critic-model")
     cfg.coder_model      = kwargs.get("coder_model",      "coder-model")
     cfg.summarizer_model = kwargs.get("summarizer_model", "summarizer-model")
     cfg.coder_cascade    = kwargs.get("coder_cascade",    ["coder-model"])
-    cfg.planner_stream   = kwargs.get("planner_stream",   True)
+    cfg.manager_stream   = kwargs.get("manager_stream",   True)
+    cfg.critic_stream    = kwargs.get("critic_stream",    True)
     cfg.coder_stream     = kwargs.get("coder_stream",     True)
-    cfg.planner_think    = kwargs.get("planner_think",    False)
+    cfg.manager_think    = kwargs.get("manager_think",    False)
+    cfg.critic_think     = kwargs.get("critic_think",     False)
     cfg.coder_think      = kwargs.get("coder_think",      False)
-
-    # writer_model / writer_stream / writer_think via getattr fallback
-    if "writer_model" in kwargs:
-        cfg.writer_model = kwargs["writer_model"]
-    else:
-        del cfg.writer_model   # ensure getattr fallback is tested
-
-    if "writer_stream" in kwargs:
-        cfg.writer_stream = kwargs["writer_stream"]
-    else:
-        del cfg.writer_stream
-
-    if "writer_think" in kwargs:
-        cfg.writer_think = kwargs["writer_think"]
-    else:
-        del cfg.writer_think
-
+    cfg.writer_model     = kwargs.get("writer_model",     "coder-model")
+    cfg.writer_stream    = kwargs.get("writer_stream",    True)
+    cfg.writer_think     = kwargs.get("writer_think",     False)
     return cfg
 
 
@@ -113,12 +104,12 @@ def make_detector(reason="repeated tool call", role=AgentRole.CODER):
 # ---------------------------------------------------------------------------
 
 class TestModelForRole:
-    def test_manager_returns_planner_model(self):
-        r = make_router(planner_model="big-model")
+    def test_manager_returns_manager_model(self):
+        r = make_router(manager_model="big-model")
         assert r.model_for_role(AgentRole.MANAGER) == "big-model"
 
-    def test_critic_returns_planner_model(self):
-        r = make_router(planner_model="big-model")
+    def test_critic_returns_critic_model(self):
+        r = make_router(critic_model="big-model")
         assert r.model_for_role(AgentRole.CRITIC) == "big-model"
 
     def test_coder_returns_first_cascade_tier(self):
@@ -128,11 +119,6 @@ class TestModelForRole:
     def test_writer_returns_writer_model_when_set(self):
         r = make_router(writer_model="writer-model")
         assert r.model_for_role(AgentRole.WRITER) == "writer-model"
-
-    def test_writer_falls_back_to_coder_model(self):
-        # writer_model not set — should fall back to coder_model
-        r = make_router(coder_model="coder-model")
-        assert r.model_for_role(AgentRole.WRITER) == "coder-model"
 
     def test_unknown_role_falls_back_to_coder_model(self):
         r = make_router(coder_model="coder-model")
@@ -146,12 +132,12 @@ class TestModelForRole:
 # ---------------------------------------------------------------------------
 
 class TestStreamForRole:
-    def test_manager_returns_planner_stream(self):
-        r = make_router(planner_stream=False)
+    def test_manager_returns_manager_stream(self):
+        r = make_router(manager_stream=False)
         assert r.stream_for_role(AgentRole.MANAGER) is False
 
-    def test_critic_returns_planner_stream(self):
-        r = make_router(planner_stream=True)
+    def test_critic_returns_critic_stream(self):
+        r = make_router(critic_stream=True)
         assert r.stream_for_role(AgentRole.CRITIC) is True
 
     def test_coder_returns_coder_stream(self):
@@ -161,10 +147,6 @@ class TestStreamForRole:
     def test_writer_returns_writer_stream_when_set(self):
         r = make_router(writer_stream=False)
         assert r.stream_for_role(AgentRole.WRITER) is False
-
-    def test_writer_falls_back_to_coder_stream(self):
-        r = make_router(coder_stream=True)
-        assert r.stream_for_role(AgentRole.WRITER) is True
 
     def test_unknown_role_returns_true(self):
         r = make_router()
@@ -176,12 +158,12 @@ class TestStreamForRole:
 # ---------------------------------------------------------------------------
 
 class TestThinkForRole:
-    def test_manager_returns_planner_think(self):
-        r = make_router(planner_think=True)
+    def test_manager_returns_manager_think(self):
+        r = make_router(manager_think=True)
         assert r.think_for_role(AgentRole.MANAGER) is True
 
-    def test_critic_returns_planner_think(self):
-        r = make_router(planner_think=False)
+    def test_critic_returns_critic_think(self):
+        r = make_router(critic_think=False)
         assert r.think_for_role(AgentRole.CRITIC) is False
 
     def test_coder_returns_coder_think(self):
@@ -190,10 +172,6 @@ class TestThinkForRole:
 
     def test_writer_returns_writer_think_when_set(self):
         r = make_router(writer_think=True)
-        assert r.think_for_role(AgentRole.WRITER) is True
-
-    def test_writer_falls_back_to_coder_think(self):
-        r = make_router(coder_think=True)
         assert r.think_for_role(AgentRole.WRITER) is True
 
     def test_unknown_role_returns_false(self):

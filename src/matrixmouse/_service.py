@@ -107,7 +107,7 @@ def _stop_ollama_models() -> None:
     """
     Unload all configured models from Ollama VRAM.
 
-    Uses the config model fields (coder_model, planner_model, etc.) rather
+    Uses the config model fields (coder_model, manager_model, etc.) rather
     than `ollama ps` so we don't accidentally stop unrelated models running
     on the same machine.
 
@@ -120,13 +120,15 @@ def _stop_ollama_models() -> None:
 
     # Collect all unique model names across all roles
     model_fields = [
-        getattr(_config, "coder_model",   None),
-        getattr(_config, "planner_model", None),
-        getattr(_config, "summarizer_model",    None),
+        getattr(_config, "coder_model",      None),
+        getattr(_config, "manager_model",    None),
+        getattr(_config, "summarizer_model", None),
+        getattr(_config, "critic_model",     None), 
+        getattr(_config, "writer_model",     None),
     ]
 
     # coder_cascade is a list — flatten it
-    cascade = getattr(_config, "coder_cascade", None) or []
+    cascade = _config.coder_cascade or []
     if isinstance(cascade, str):
         cascade = [m.strip() for m in cascade.split(",") if m.strip()]
     model_fields.extend(cascade)

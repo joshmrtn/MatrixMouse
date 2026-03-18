@@ -210,6 +210,22 @@ class DecompositionConfirmRequest(BaseModel):
     confirmed: bool
     reason: str = ""     # required when confirmed=False
 
+class WorkspaceInterjectionRequest(BaseModel):
+    message: str
+
+class RepoInterjectionRequest(BaseModel):
+    message: str
+
+class TaskInterjectionRequest(BaseModel):
+    message: str
+
+class TaskAnswerRequest(BaseModel):
+    message: str
+
+class CriticReviewResponseRequest(BaseModel):
+    action: str          # "approve_task" | "extend_critic" | "block_task"
+    feedback: str = ""   # optional feedback appended to reviewed task context
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -544,6 +560,8 @@ async def interject(body: InterjectionRequest):
     Inject a human message into the agent loop.
     If repo is set, the message is scoped to that repo's context.
     Without repo, the message is workspace-wide.
+
+    DEPRECATED: TODO: Remove this endpoint in favor of the new interject surface
     """
     from matrixmouse import comms as comms_module
     m = comms_module.get_manager()
@@ -591,9 +609,9 @@ async def turn_limit_response(task_id: str, body: TurnLimitResponseRequest):
     action = body.action.lower()
 
     if action == "extend":
-        default_turns = getattr(_config, "agent_max_turns", 50) if _config else 50
+        default_turns = _config.agent_max_turns if _config else 50
         extension = body.extend_by if body.extend_by > 0 else default_turns
-        task.turn_limit = getattr(task, "turn_limit", 0) + extension
+        task.turn_limit = task.turn_limit + extension
         task.status = TaskStatus.READY
         if body.note:
             task.context_messages.append({
@@ -724,6 +742,365 @@ async def decomposition_confirm(task_id: str, body: DecompositionConfirmRequest)
             "confirmed": False,
         }
 
+# ---------------------------------------------------------------------------
+# Interjection routing
+# ---------------------------------------------------------------------------
+
+@app.post("/interject/workspace", status_code=201)
+async def interject_workspace(body: WorkspaceInterjectionRequest):
+    """
+    Send a workspace-scoped message directly to the Manager agent.
+
+    Creates a Manager task with preempt=True so it is picked up at the
+    next inference boundary. Use this for cross-repo concerns, project-level
+    direction, or any message not scoped to a specific repo or task.
+
+    The Manager interprets the message and creates tasks or adjusts the
+    task graph as appropriate.
+    """
+    from matrixmouse.task import AgentRole, Task, TaskStatus
+
+    queue = _require_queue()
+    msg = body.message.strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    task = _build_interjection_task(
+        message=msg,
+        repo=[],
+        title_prefix="[Interjection]",
+    )
+    queue.add(task)
+    notify_task_available()
+
+    logger.info(
+        "Workspace interjection received — Manager task [%s] created.",
+        task.id,
+    )
+    return {"ok": True, "manager_task_id": task.id}
+
+
+@app.post("/interject/repo/{repo_name}", status_code=201)
+async def interject_repo(repo_name: str, body: RepoInterjectionRequest):
+    """
+    Send a repo-scoped message to the Manager agent.
+
+    Creates a Manager task with preempt=True scoped to the named repo.
+    Use this to direct the Manager's attention to a specific repository —
+    for example, to request a refactor, report a bug, or ask a question
+    about ongoing work in that repo.
+
+    The Manager interprets the message in the context of the repo and
+    creates tasks or adjusts the task graph as appropriate.
+    """
+    from matrixmouse.task import AgentRole, Task, TaskStatus
+
+    queue = _require_queue()
+    msg = body.message.strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    if not repo_name.strip():
+        raise HTTPException(status_code=400, detail="repo_name cannot be empty.")
+
+    task = _build_interjection_task(
+        message=msg,
+        repo=[repo_name],
+        title_prefix=f"[Interjection/{repo_name}]",
+    )
+    queue.add(task)
+    notify_task_available()
+
+    logger.info(
+        "Repo interjection received for '%s' — Manager task [%s] created.",
+        repo_name, task.id,
+    )
+    return {"ok": True, "manager_task_id": task.id, "repo": repo_name}
+
+
+@app.post("/tasks/{task_id}/interject")
+async def interject_task(task_id: str, body: TaskInterjectionRequest):
+    """
+    Send a message directly to a specific task's agent.
+
+    Appends the message to the task's context_messages so the implementing
+    agent sees it on its next turn. Does not affect scheduling — the message
+    is picked up naturally when the task next gets a time slice.
+
+    Use this to provide mid-task guidance, correct a mistake you notice
+    in the streaming output, or supply additional context the agent asked
+    for informally.
+
+    For answering a formal clarification question (where the task is
+    BLOCKED_BY_HUMAN), use POST /tasks/{task_id}/answer instead.
+    """
+    queue = _require_queue()
+    task = queue.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+
+    if task.status.is_terminal:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task '{task_id}' is {task.status.value} — cannot interject."
+        )
+
+    msg = body.message.strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    task.context_messages.append({
+        "role": "user",
+        "content": (
+            f"[Human operator note — please incorporate before continuing]: {msg}"
+        ),
+    })
+    queue.update(task)
+
+    logger.info(
+        "Task interjection received for [%s]: %s", task_id, msg[:80]
+    )
+    return {"ok": True, "task_id": task_id}
+
+
+@app.post("/tasks/{task_id}/answer")
+async def answer_task(task_id: str, body: TaskAnswerRequest):
+    """
+    Answer a clarification question for a blocked task.
+
+    Appends the answer to the task's context_messages, clears the
+    pending_question field, and unblocks the task (sets status to READY)
+    if it is currently BLOCKED_BY_HUMAN.
+
+    Also cancels any stale clarification Manager task that was created
+    automatically for this task, since the human has now answered directly.
+
+    Use this when a task is blocked waiting for your input. For general
+    mid-task guidance on a running task, use POST /tasks/{task_id}/interject.
+    """
+    from matrixmouse.task import TaskStatus
+    from matrixmouse import workspace_state as ws
+
+    queue = _require_queue()
+    task = queue.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+
+    msg = body.message.strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    task.context_messages.append({
+        "role": "user",
+        "content": msg,
+    })
+
+    # Clear the pending question — it has been answered
+    task.pending_question = ""
+
+    # Unblock the task if it was blocked waiting for human input
+    was_blocked = task.status == TaskStatus.BLOCKED_BY_HUMAN
+    if was_blocked:
+        task.status = TaskStatus.READY
+
+    queue.update(task)
+
+    # Cancel any stale clarification Manager task created for this task
+    workspace = _require_workspace()
+    state_file = workspace / ".matrixmouse" / "workspace_state.json"
+    try:
+        state = ws.load(state_file)
+        stale_manager_task_id = ws.get_stale_clarification_task(state, task_id)
+        if stale_manager_task_id:
+            stale_task = queue.get(stale_manager_task_id)
+            if stale_task and not stale_task.status.is_terminal:
+                from matrixmouse.task import TaskStatus as TS
+                stale_task.status = TS.CANCELLED
+                from datetime import datetime, timezone
+                stale_task.completed_at = datetime.now(timezone.utc).isoformat()
+                queue.update(stale_task)
+                logger.info(
+                    "Cancelled stale clarification Manager task [%s] "
+                    "after direct answer for task [%s].",
+                    stale_manager_task_id, task_id,
+                )
+            ws.clear_stale_clarification_task(state, task_id)
+            ws.save(state_file, state)
+    except Exception as e:
+        logger.warning(
+            "Failed to cancel stale clarification task for [%s]: %s",
+            task_id, e,
+        )
+
+    if was_blocked:
+        notify_task_available()
+
+    logger.info(
+        "Answer received for task [%s]%s: %s",
+        task_id,
+        " (unblocked)" if was_blocked else "",
+        msg[:80],
+    )
+    return {
+        "ok":          True,
+        "task_id":     task_id,
+        "unblocked":   was_blocked,
+    }
+
+
+@app.post("/tasks/{task_id}/critic-review-response")
+async def critic_review_response(task_id: str, body: CriticReviewResponseRequest):
+    """
+    Respond to a Critic turn-limit escalation.
+
+    Called by the UI confirmation modal when a Critic task hits
+    critic_max_turns without reaching a decision.
+
+    task_id is the Critic task ID (not the reviewed task).
+
+    Actions:
+        approve_task   — Mark the reviewed task COMPLETE directly, bypassing
+                         further Critic review. The Critic task is cancelled.
+                         Optional feedback is appended to the reviewed task.
+        extend_critic  — Give the Critic another critic_max_turns turns.
+                         The Critic task returns to READY. Optional feedback
+                         is appended to the Critic task's context.
+        block_task     — Cancel the Critic task and move the reviewed task
+                         to BLOCKED_BY_HUMAN for manual resolution. Optional
+                         feedback is appended to the reviewed task's notes.
+
+    The Critic task must be in BLOCKED_BY_HUMAN status.
+    """
+    from matrixmouse.task import TaskStatus
+    from datetime import datetime, timezone
+
+    queue = _require_queue()
+    critic_task = queue.get(task_id)
+    if critic_task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+
+    if critic_task.status != TaskStatus.BLOCKED_BY_HUMAN:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Task '{task_id}' is not BLOCKED_BY_HUMAN "
+                f"(current status: {critic_task.status.value})."
+            )
+        )
+
+    if not critic_task.reviews_task_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task '{task_id}' has no reviews_task_id — not a Critic task."
+        )
+
+    reviewed_task = queue.get(critic_task.reviews_task_id)
+    if reviewed_task is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Reviewed task '{critic_task.reviews_task_id}' not found."
+            )
+        )
+
+    action = body.action.lower()
+    feedback = body.feedback.strip()
+
+    if action == "approve_task":
+        # Append feedback to reviewed task if provided
+        if feedback:
+            reviewed_task.context_messages.append({
+                "role": "user",
+                "content": (
+                    f"[Human operator approval note]: {feedback}"
+                ),
+            })
+
+        # Remove Critic task from reviewed task's blocked_by
+        if task_id in reviewed_task.blocked_by:
+            reviewed_task.blocked_by.remove(task_id)
+
+        reviewed_task.status = TaskStatus.COMPLETE
+        reviewed_task.completed_at = datetime.now(timezone.utc).isoformat()
+        queue.update(reviewed_task)
+        queue._unblock_dependents(reviewed_task.id)
+
+        # Cancel the Critic task
+        critic_task.status = TaskStatus.CANCELLED
+        critic_task.completed_at = datetime.now(timezone.utc).isoformat()
+        queue.update(critic_task)
+
+        notify_task_available()
+        logger.info(
+            "Critic [%s] — operator approved reviewed task [%s] directly.",
+            task_id, reviewed_task.id,
+        )
+        return {
+            "ok":     True,
+            "action": "approve_task",
+            "reviewed_task_id": reviewed_task.id,
+        }
+
+    elif action == "extend_critic":
+        # Reset the Critic's turn limit and return to READY
+        critic_task.turn_limit = (
+            critic_task.turn_limit
+            + (_config.critic_max_turns if _config else 5)
+        )
+        critic_task.status = TaskStatus.READY
+        if feedback:
+            critic_task.context_messages.append({
+                "role": "user",
+                "content": (
+                    f"[Human operator note on Critic review extension]: {feedback}"
+                ),
+            })
+        queue.update(critic_task)
+        notify_task_available()
+        logger.info(
+            "Critic [%s] — operator extended turn limit to %d.",
+            task_id, critic_task.turn_limit,
+        )
+        return {
+            "ok":            True,
+            "action":        "extend_critic",
+            "new_turn_limit": critic_task.turn_limit,
+        }
+
+    elif action == "block_task":
+        # Cancel the Critic task
+        critic_task.status = TaskStatus.CANCELLED
+        critic_task.completed_at = datetime.now(timezone.utc).isoformat()
+        queue.update(critic_task)
+
+        # Move reviewed task to BLOCKED_BY_HUMAN
+        if task_id in reviewed_task.blocked_by:
+            reviewed_task.blocked_by.remove(task_id)
+        reviewed_task.status = TaskStatus.BLOCKED_BY_HUMAN
+        if feedback:
+            reviewed_task.notes = (
+                reviewed_task.notes + f"\n[Critic review blocked]: {feedback}"
+            ).strip()
+        queue.update(reviewed_task)
+
+        logger.info(
+            "Critic [%s] — operator blocked reviewed task [%s] for manual review.",
+            task_id, reviewed_task.id,
+        )
+        return {
+            "ok":               True,
+            "action":           "block_task",
+            "reviewed_task_id": reviewed_task.id,
+        }
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid action '{action}'. "
+                f"Valid: approve_task, extend_critic, block_task."
+            )
+        )
 
 @app.post("/stop")
 async def soft_stop():
@@ -1351,3 +1728,48 @@ def _inject_decomposition_response(
             "Failed to inject decomposition response into Manager task [%s]: %s",
             manager_task.id, e,
         )
+
+def _build_interjection_task(
+    message: str,
+    repo: list[str],
+    title_prefix: str,
+) -> "Task":
+    """
+    Build a Manager task from a human interjection message.
+
+    The task is created with preempt=True so the scheduler picks it up
+    at the next inference boundary, ahead of normal READY tasks.
+
+    Args:
+        message:      The human's message, already stripped.
+        repo:         Repo scope. Empty list for workspace-wide.
+        title_prefix: Prefix for the task title (e.g. '[Interjection]').
+
+    Returns:
+        Task: A READY, preempting Manager task. Not yet added to the queue.
+    """
+    from matrixmouse.task import AgentRole, Task, TaskStatus
+
+    # Truncate long messages for the title
+    title_body = message[:60] + "..." if len(message) > 60 else message
+    title = f"{title_prefix} {title_body}"
+
+    description = (
+        f"A human operator has sent a message requiring your attention.\n\n"
+        f"Message:\n{message}\n\n"
+        f"Interpret the intent, gather context if needed, and take appropriate "
+        f"action: create tasks, update existing tasks, answer questions, or "
+        f"request clarification if the intent is ambiguous. "
+        f"Call declare_complete with a summary of what you did."
+    )
+
+    task = Task(
+        title=title,
+        description=description,
+        role=AgentRole.MANAGER,
+        repo=repo,
+        importance=0.1,   # very high priority (low score)
+        urgency=0.1,
+    )
+    task.preempt = True
+    return task

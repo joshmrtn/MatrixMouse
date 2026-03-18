@@ -38,6 +38,17 @@ Coverage:
         - Returns "No blocked tasks." when none blocked
         - Lists BLOCKED_BY_HUMAN tasks
         - Lists BLOCKED_BY_TASK tasks with their blockers
+
+    Stale clarification detection:
+        - Skips detection if callback not registered
+        - Callback not called when no pending question
+        - Callback not called for non-blocked task
+        - Callback called only when past the timeout period
+        - Callback receives Task info (id, question text, blocked since)
+        - Callback called exactly once per each stale task
+        - Callback exception should not propogate
+        - Stale detection fires during scheduler.next()
+        - Timeout respected from config
 """
 
 import time
@@ -145,7 +156,9 @@ class TestTaskSelection:
         low = make_task(importance=0.1, urgency=0.1, title="low")
         q = make_queue_with_tasks([low, high])
         decision = s.next(q)
-        assert decision.task.title == "high"
+        decision_task = decision.task
+        assert decision_task is not None
+        assert decision_task.title == "high"
 
     def test_skips_blocked_by_task(self):
         s = Scheduler(make_config())
@@ -198,7 +211,9 @@ class TestTaskSelection:
         p2_task = make_task(importance=0.5, urgency=0.5, title="p2")  # score ≈ 0.5
         q = make_queue_with_tasks([p2_task, p1_task])
         decision = s.next(q)
-        assert decision.task.title == "p1"
+        decision_task = decision.task
+        assert decision_task is not None
+        assert decision_task.title == "p1"
         assert decision.queue_level == P1
 
     def test_p2_selected_before_p3(self):
@@ -207,7 +222,9 @@ class TestTaskSelection:
         p3_task = make_task(importance=0.0, urgency=0.0, title="p3")  # score ≈ 1.0
         q = make_queue_with_tasks([p3_task, p2_task])
         decision = s.next(q)
-        assert decision.task.title == "p2"
+        decision_task = decision.task
+        assert decision_task is not None
+        assert decision_task.title == "p2"
         assert decision.queue_level == P2
 
     def test_decision_includes_candidate_count(self):
@@ -237,7 +254,9 @@ class TestPreemption:
         preempt = make_task(importance=0.0, urgency=0.0, title="preempt", preempt=True)
         q = make_queue_with_tasks([normal, preempt])
         decision = s.next(q)
-        assert decision.task.title == "preempt"
+        decision_task = decision.task
+        assert decision_task is not None
+        assert decision_task.title == "preempt"
 
     def test_preemption_flag_set_in_decision(self):
         s = Scheduler(make_config())
@@ -260,7 +279,9 @@ class TestPreemption:
         # Neither has preempt=True
         q = make_queue_with_tasks([t2, t1])
         decision = s.next(q)
-        assert decision.task.title == "high"
+        decision_task = decision.task
+        assert decision_task is not None
+        assert decision_task.title == "high"
         assert decision.preempted is False
 
 
@@ -382,3 +403,157 @@ class TestReportBlocked:
         report = s.report_blocked(q)
         assert "blocked task" in report
         assert "Blocked by dependencies" in report
+
+# ---------------------------------------------------------------------------
+# Stale clarification detection
+# ---------------------------------------------------------------------------
+
+
+class TestStaleClarificationDetection:
+    def _make_scheduler(self, callback=None, timeout_minutes=60):
+        cfg = make_config()
+        cfg.clarification_timeout_minutes = timeout_minutes
+        return Scheduler(cfg, stale_clarification_callback=callback)
+
+    def _make_blocked_task(
+        self,
+        question="Which approach?",
+        minutes_ago=90,
+        status=TaskStatus.BLOCKED_BY_HUMAN,
+    ) -> Task:
+        from datetime import datetime, timezone, timedelta
+        task = make_task(status=status)
+        task.pending_question = question
+        blocked_time = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        task.last_modified = blocked_time.isoformat()
+        task.started_at = blocked_time.isoformat()
+        task.created_at = blocked_time.isoformat()
+        return task
+
+    def test_callback_not_called_when_none(self):
+        """No callback registered — detection should be skipped silently."""
+        s = self._make_scheduler(callback=None)
+        task = self._make_blocked_task()
+        # Should not raise
+        s._check_stale_clarifications([task])
+
+    def test_callback_not_called_when_no_pending_question(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        task = make_task(status=TaskStatus.BLOCKED_BY_HUMAN)
+        task.pending_question = ""
+        s._check_stale_clarifications([task])
+        callback.assert_not_called()
+
+    def test_callback_not_called_for_non_blocked_task(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        task = self._make_blocked_task(minutes_ago=120)
+        task.status = TaskStatus.READY  # not blocked
+        s._check_stale_clarifications([task])
+        callback.assert_not_called()
+
+    def test_callback_not_called_within_timeout(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        # Only 30 minutes old — within 60 minute timeout
+        task = self._make_blocked_task(minutes_ago=30)
+        s._check_stale_clarifications([task])
+        callback.assert_not_called()
+
+    def test_callback_called_when_stale(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        # 90 minutes old — past 60 minute timeout
+        task = self._make_blocked_task(minutes_ago=90,
+                                       question="Which module to use?")
+        s._check_stale_clarifications([task])
+        callback.assert_called_once()
+
+    def test_callback_receives_task_id(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        task = self._make_blocked_task(minutes_ago=90)
+        s._check_stale_clarifications([task])
+        called_task_id = callback.call_args[0][0]
+        assert called_task_id == task.id
+
+    def test_callback_receives_question_text(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        task = self._make_blocked_task(
+            minutes_ago=90, question="What is the expected output?"
+        )
+        s._check_stale_clarifications([task])
+        called_question = callback.call_args[0][1]
+        assert called_question == "What is the expected output?"
+
+    def test_callback_receives_blocked_since_iso_string(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        task = self._make_blocked_task(minutes_ago=90)
+        s._check_stale_clarifications([task])
+        called_blocked_since = callback.call_args[0][2]
+        # Must be parseable ISO string
+        from datetime import datetime
+        dt = datetime.fromisoformat(called_blocked_since)
+        assert dt is not None
+
+    def test_callback_called_once_per_stale_task(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        task = self._make_blocked_task(minutes_ago=90)
+        # Call twice — should fire on both since deduplication is
+        # handled by orchestrator via workspace state, not scheduler
+        s._check_stale_clarifications([task])
+        s._check_stale_clarifications([task])
+        assert callback.call_count == 2
+
+    def test_multiple_stale_tasks_each_trigger_callback(self):
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        tasks = [self._make_blocked_task(minutes_ago=90) for _ in range(3)]
+        s._check_stale_clarifications(tasks)
+        assert callback.call_count == 3
+
+    def test_callback_exception_does_not_propagate(self):
+        def bad_callback(task_id, question, blocked_since):
+            raise RuntimeError("callback error")
+
+        s = self._make_scheduler(callback=bad_callback, timeout_minutes=60)
+        task = self._make_blocked_task(minutes_ago=90)
+        # Should not raise
+        s._check_stale_clarifications([task])
+
+    def test_stale_detection_fires_during_next(self):
+        """Stale detection is called as part of scheduler.next()."""
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=60)
+        stale = self._make_blocked_task(minutes_ago=90)
+        q = make_queue_with_tasks([stale])
+        s.next(q)
+        callback.assert_called_once()
+
+    def test_no_stale_detection_without_callback(self):
+        """Scheduler with no callback skips detection entirely."""
+        s = Scheduler(make_config())  # no callback
+        stale = self._make_blocked_task(minutes_ago=999)
+        q = make_queue_with_tasks([stale])
+        # Should not raise even with very stale task
+        s.next(q)
+
+    def test_timeout_respected_from_config(self):
+        """A 10-minute timeout fires for a task blocked 15 minutes."""
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=10)
+        task = self._make_blocked_task(minutes_ago=15)
+        s._check_stale_clarifications([task])
+        callback.assert_called_once()
+
+    def test_timeout_respected_from_config_not_fired(self):
+        """A 120-minute timeout does not fire for a task blocked 90 minutes."""
+        callback = MagicMock()
+        s = self._make_scheduler(callback=callback, timeout_minutes=120)
+        task = self._make_blocked_task(minutes_ago=90)
+        s._check_stale_clarifications([task])
+        callback.assert_not_called()

@@ -125,7 +125,7 @@ class AgentLoop:
             _max = (
                 self._task_turn_limit
                 if self._task_turn_limit > 0
-                else getattr(self.config, "agent_max_turns", 50)
+                else self.config.agent_max_turns
             )
             if self._turns >= _max:
                 logger.warning("Turn limit (%d) reached. Exiting loop.", _max)

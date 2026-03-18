@@ -125,7 +125,7 @@ class TestKill:
         assert client.get("/estop").json()["engaged"] is True
 
     def test_503_without_workspace(self):
-        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock())
+        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock()) # type: ignore[arg-type]
         assert TestClient(app, raise_server_exceptions=False).post("/kill").status_code == 503
 
 
@@ -145,7 +145,7 @@ class TestEstopReset:
         assert client.get("/estop").json()["engaged"] is False
 
     def test_503_without_workspace(self):
-        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock())
+        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock()) # type: ignore[arg-type]
         assert TestClient(app, raise_server_exceptions=False).post("/estop/reset").status_code == 503
 
 
@@ -561,3 +561,499 @@ class TestDecompositionConfirm:
         r = client.post("/tasks/nonexistent/decomposition-confirm",
                         json={"confirmation_id": "x", "confirmed": True})
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for interjection/answer tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def queue_workspace_with_state(tmp_path):
+    """Workspace with TaskQueue and workspace_state.json wired in."""
+    ws = tmp_path / "workspace"
+    (ws / ".matrixmouse").mkdir(parents=True)
+    tasks_file = ws / ".matrixmouse" / "tasks.json"
+    tasks_file.write_text("[]")
+    q = TaskQueue(tasks_file)
+    cfg = MagicMock()
+    cfg.agent_max_turns = 50
+    cfg.critic_max_turns = 5
+    configure(queue=q, status={}, workspace_root=ws, config=cfg)
+    return ws, q
+
+
+@pytest.fixture
+def state_client(queue_workspace_with_state):
+    ws, q = queue_workspace_with_state
+    return TestClient(app, raise_server_exceptions=False), q, ws
+
+
+# ---------------------------------------------------------------------------
+# POST /interject/workspace
+# ---------------------------------------------------------------------------
+
+class TestInterjectionWorkspace:
+    def test_creates_manager_task(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/workspace",
+                        json={"message": "Please review the architecture."})
+        assert r.status_code == 201
+        manager_tasks = [t for t in q.all_tasks()
+                         if t.role == AgentRole.MANAGER]
+        assert len(manager_tasks) == 1
+
+    def test_returns_manager_task_id(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/workspace",
+                        json={"message": "Rethink the approach."})
+        assert r.json()["ok"] is True
+        task_id = r.json()["manager_task_id"]
+        assert q.get(task_id) is not None
+
+    def test_created_task_has_preempt_true(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/workspace",
+                        json={"message": "Urgent direction change."})
+        task_id = r.json()["manager_task_id"]
+        task = q.get(task_id)
+        assert task is not None
+        assert task.preempt is True
+
+    def test_created_task_contains_message(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/workspace",
+                        json={"message": "Switch to a different database."})
+        task_id = r.json()["manager_task_id"]
+        task = q.get(task_id)
+        assert task is not None
+        assert "Switch to a different database." in task.description
+
+    def test_empty_message_returns_400(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/workspace", json={"message": ""})
+        assert r.status_code == 400
+
+    def test_task_has_no_repo_scope(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/workspace",
+                        json={"message": "Global direction."})
+        task_id = r.json()["manager_task_id"]
+        task = q.get(task_id)
+        assert task is not None
+        assert task.repo == []
+
+
+# ---------------------------------------------------------------------------
+# POST /interject/repo/{repo_name}
+# ---------------------------------------------------------------------------
+
+class TestInterjectionRepo:
+    def test_creates_manager_task_scoped_to_repo(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/repo/my-repo",
+                        json={"message": "Refactor the parser."})
+        assert r.status_code == 201
+        task_id = r.json()["manager_task_id"]
+        task = q.get(task_id)
+        assert task is not None
+        assert "my-repo" in task.repo
+
+    def test_returns_repo_in_response(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/repo/special-repo",
+                        json={"message": "Fix the login flow."})
+        assert r.json()["repo"] == "special-repo"
+
+    def test_created_task_has_preempt_true(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/repo/my-repo",
+                        json={"message": "Urgent fix needed."})
+        task_id = r.json()["manager_task_id"]
+        task = q.get(task_id)
+        assert task is not None
+        assert task.preempt is True
+
+    def test_created_task_contains_message(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/repo/my-repo",
+                        json={"message": "Use async handlers everywhere."})
+        task_id = r.json()["manager_task_id"]
+        task = q.get(task_id)
+        assert task is not None
+        assert "Use async handlers everywhere." in task.description
+
+    def test_empty_message_returns_400(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/repo/my-repo", json={"message": ""})
+        assert r.status_code == 400
+
+    def test_task_role_is_manager(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/interject/repo/my-repo",
+                        json={"message": "Add rate limiting."})
+        task_id = r.json()["manager_task_id"]
+        task = q.get(task_id)
+        assert task is not None
+        assert task.role == AgentRole.MANAGER
+
+
+# ---------------------------------------------------------------------------
+# POST /tasks/{task_id}/interject
+# ---------------------------------------------------------------------------
+
+class TestTaskInterject:
+    def test_appends_message_to_context(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"])
+        q.add(task)
+        r = client.post(f"/tasks/{task.id}/interject",
+                        json={"message": "Use the second approach."})
+        assert r.status_code == 200
+        updated = q.get(task.id)
+        assert updated is not None
+        assert any("Use the second approach." in m.get("content", "")
+                   for m in updated.context_messages)
+
+    def test_message_has_operator_prefix(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"])
+        q.add(task)
+        client.post(f"/tasks/{task.id}/interject",
+                    json={"message": "Change the approach."})
+        updated = q.get(task.id)
+        assert updated is not None
+        msg = next(m for m in updated.context_messages
+                   if "Change the approach." in m.get("content", ""))
+        assert "operator" in msg["content"].lower() or \
+               "Human" in msg["content"]
+
+    def test_message_role_is_user(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"])
+        q.add(task)
+        client.post(f"/tasks/{task.id}/interject",
+                    json={"message": "Note this."})
+        updated = q.get(task.id)
+        assert updated is not None
+        assert any(m.get("role") == "user"
+                   for m in updated.context_messages)
+
+    def test_does_not_change_task_status(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"],
+                    status=TaskStatus.RUNNING)
+        q.add(task)
+        client.post(f"/tasks/{task.id}/interject",
+                    json={"message": "Keep going."})
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.RUNNING
+
+    def test_empty_message_returns_400(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"])
+        q.add(task)
+        r = client.post(f"/tasks/{task.id}/interject",
+                        json={"message": ""})
+        assert r.status_code == 400
+
+    def test_terminal_task_returns_400(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"],
+                    status=TaskStatus.COMPLETE)
+        q.add(task)
+        r = client.post(f"/tasks/{task.id}/interject",
+                        json={"message": "Too late."})
+        assert r.status_code == 400
+
+    def test_404_for_unknown_task(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/tasks/nonexistent/interject",
+                        json={"message": "Hello."})
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /tasks/{task_id}/answer
+# ---------------------------------------------------------------------------
+
+class TestTaskAnswer:
+    def test_appends_answer_to_context(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"],
+                    status=TaskStatus.BLOCKED_BY_HUMAN)
+        task.pending_question = "Which approach?"
+        q.add(task)
+        client.post(f"/tasks/{task.id}/answer",
+                    json={"message": "Use the iterative approach."})
+        updated = q.get(task.id)
+        assert updated is not None
+        assert any("Use the iterative approach." in m.get("content", "")
+                   for m in updated.context_messages)
+
+    def test_unblocks_blocked_by_human_task(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"],
+                    status=TaskStatus.BLOCKED_BY_HUMAN)
+        task.pending_question = "Which approach?"
+        q.add(task)
+        r = client.post(f"/tasks/{task.id}/answer",
+                        json={"message": "Use approach B."})
+        assert r.json()["unblocked"] is True
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.READY
+
+    def test_clears_pending_question(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"],
+                    status=TaskStatus.BLOCKED_BY_HUMAN)
+        task.pending_question = "What format?"
+        q.add(task)
+        client.post(f"/tasks/{task.id}/answer",
+                    json={"message": "Use JSON."})
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.pending_question == ""
+
+    def test_does_not_unblock_running_task(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"],
+                    status=TaskStatus.RUNNING)
+        q.add(task)
+        r = client.post(f"/tasks/{task.id}/answer",
+                        json={"message": "Additional context."})
+        assert r.json()["unblocked"] is False
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.RUNNING
+
+    def test_cancels_stale_clarification_manager_task(self, state_client):
+        client, q, ws = state_client
+        from matrixmouse import workspace_state as wss
+
+        # Set up blocked task
+        task = Task(title="blocked", description="d",
+                    role=AgentRole.CODER, repo=["r"],
+                    status=TaskStatus.BLOCKED_BY_HUMAN)
+        task.pending_question = "Which approach?"
+        q.add(task)
+
+        # Set up stale Manager task
+        mgr_task = Task(title="[Stale Clarification] ...",
+                        description="d", role=AgentRole.MANAGER, repo=["r"])
+        q.add(mgr_task)
+
+        # Register in workspace state
+        state_file = ws / ".matrixmouse" / "workspace_state.json"
+        state = wss.load(state_file)
+        wss.register_stale_clarification_task(state, task.id, mgr_task.id)
+        wss.save(state_file, state)
+
+        client.post(f"/tasks/{task.id}/answer",
+                    json={"message": "Use approach B."})
+
+        updated_mgr = q.get(mgr_task.id)
+        assert updated_mgr is not None
+        assert updated_mgr.status == TaskStatus.CANCELLED
+
+    def test_empty_message_returns_400(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CODER, repo=["r"])
+        q.add(task)
+        r = client.post(f"/tasks/{task.id}/answer",
+                        json={"message": ""})
+        assert r.status_code == 400
+
+    def test_404_for_unknown_task(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/tasks/nonexistent/answer",
+                        json={"message": "Hello."})
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /tasks/{task_id}/critic-review-response
+# ---------------------------------------------------------------------------
+
+class TestCriticReviewResponse:
+    def _setup_critic_review(self, q):
+        reviewed = Task(title="reviewed", description="d",
+                        role=AgentRole.CODER, repo=["r"],
+                        status=TaskStatus.BLOCKED_BY_TASK)
+        critic = Task(title="[Critic Review] reviewed",
+                      description="d", role=AgentRole.CRITIC, repo=["r"],
+                      status=TaskStatus.BLOCKED_BY_HUMAN)
+        critic.reviews_task_id = reviewed.id
+        reviewed.blocked_by = [critic.id]
+        q.add(reviewed)
+        q.add(critic)
+        return reviewed, critic
+
+    def test_approve_task_marks_reviewed_complete(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        r = client.post(f"/tasks/{critic.id}/critic-review-response",
+                        json={"action": "approve_task"})
+        assert r.status_code == 200
+        updated = q.get(reviewed.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.COMPLETE
+
+    def test_approve_task_cancels_critic(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        client.post(f"/tasks/{critic.id}/critic-review-response",
+                    json={"action": "approve_task"})
+        updated_critic = q.get(critic.id)
+        assert updated_critic is not None
+        assert updated_critic.status == TaskStatus.CANCELLED
+
+    def test_approve_task_appends_feedback_when_provided(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        client.post(f"/tasks/{critic.id}/critic-review-response",
+                    json={"action": "approve_task",
+                          "feedback": "Great work, minor style issues noted."})
+        updated = q.get(reviewed.id)
+        assert updated is not None
+        assert any("Great work, minor style issues noted." in
+                   m.get("content", "")
+                   for m in updated.context_messages)
+
+    def test_extend_critic_returns_critic_to_ready(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        r = client.post(f"/tasks/{critic.id}/critic-review-response",
+                        json={"action": "extend_critic"})
+        assert r.status_code == 200
+        updated_critic = q.get(critic.id)
+        assert updated_critic is not None
+        assert updated_critic.status == TaskStatus.READY
+
+    def test_extend_critic_increases_turn_limit(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        r = client.post(f"/tasks/{critic.id}/critic-review-response",
+                        json={"action": "extend_critic"})
+        updated_critic = q.get(critic.id)
+        assert updated_critic is not None
+        assert updated_critic.turn_limit > 0
+
+    def test_extend_critic_appends_feedback_when_provided(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        client.post(f"/tasks/{critic.id}/critic-review-response",
+                    json={"action": "extend_critic",
+                          "feedback": "Focus on error handling."})
+        updated_critic = q.get(critic.id)
+        assert updated_critic is not None
+        assert any("Focus on error handling." in m.get("content", "")
+                   for m in updated_critic.context_messages)
+
+    def test_block_task_cancels_critic(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        r = client.post(f"/tasks/{critic.id}/critic-review-response",
+                        json={"action": "block_task"})
+        assert r.status_code == 200
+        updated_critic = q.get(critic.id)
+        assert updated_critic is not None
+        assert updated_critic.status == TaskStatus.CANCELLED
+
+    def test_block_task_moves_reviewed_to_blocked_by_human(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        client.post(f"/tasks/{critic.id}/critic-review-response",
+                    json={"action": "block_task"})
+        updated = q.get(reviewed.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.BLOCKED_BY_HUMAN
+
+    def test_block_task_appends_feedback_to_notes(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        client.post(f"/tasks/{critic.id}/critic-review-response",
+                    json={"action": "block_task",
+                          "feedback": "Needs complete rewrite."})
+        updated = q.get(reviewed.id)
+        assert updated is not None
+        assert "Needs complete rewrite." in updated.notes
+
+    def test_invalid_action_returns_400(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        r = client.post(f"/tasks/{critic.id}/critic-review-response",
+                        json={"action": "invalid"})
+        assert r.status_code == 400
+
+    def test_requires_blocked_by_human_status(self, state_client):
+        client, q, ws = state_client
+        reviewed, critic = self._setup_critic_review(q)
+        critic.status = TaskStatus.READY
+        q.update(critic)
+        r = client.post(f"/tasks/{critic.id}/critic-review-response",
+                        json={"action": "approve_task"})
+        assert r.status_code == 400
+
+    def test_requires_reviews_task_id(self, state_client):
+        client, q, ws = state_client
+        task = Task(title="t", description="d",
+                    role=AgentRole.CRITIC, repo=["r"],
+                    status=TaskStatus.BLOCKED_BY_HUMAN)
+        q.add(task)
+        r = client.post(f"/tasks/{task.id}/critic-review-response",
+                        json={"action": "approve_task"})
+        assert r.status_code == 400
+
+    def test_404_for_unknown_task(self, state_client):
+        client, q, ws = state_client
+        r = client.post("/tasks/nonexistent/critic-review-response",
+                        json={"action": "approve_task"})
+        assert r.status_code == 404
+
+    def test_404_when_reviewed_task_missing(self, state_client):
+        client, q, ws = state_client
+        critic = Task(title="critic", description="d",
+                      role=AgentRole.CRITIC, repo=["r"],
+                      status=TaskStatus.BLOCKED_BY_HUMAN)
+        critic.reviews_task_id = "nonexistent-reviewed-task"
+        q.add(critic)
+        r = client.post(f"/tasks/{critic.id}/critic-review-response",
+                        json={"action": "approve_task"})
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Deprecated POST /interject
+# TODO: Remove these when we remove POST /interject soon
+# ---------------------------------------------------------------------------
+
+class TestDeprecatedInterject:
+    def test_still_returns_200(self, client):
+        from matrixmouse import comms as comms_module
+        mock_manager = MagicMock()
+        with patch.object(comms_module, "get_manager",
+                          return_value=mock_manager):
+            r = client.post("/interject",
+                            json={"message": "Hello."})
+        assert r.status_code == 200
+
+    def test_empty_message_returns_400(self, client):
+        from matrixmouse import comms as comms_module
+        mock_manager = MagicMock()
+        with patch.object(comms_module, "get_manager",
+                          return_value=mock_manager):
+            r = client.post("/interject", json={"message": ""})
+        assert r.status_code == 400

@@ -67,11 +67,11 @@ class MatrixMouseConfig(BaseSettings):
         default="qwen3.5:4b",
         description="Model for prose generation tasks. (Not for source code).",
     )
-    planner_model: str = Field(
+    manager_model: str = Field(
         default="qwen3.5:4b",
         description="Model for planning, design, and architectural decisions.",
     )
-    judge_model: str = Field(
+    critic_model: str = Field(
         default="qwen3.5:4b",
         description="Model for critique, review, and stuck detection.",
     )
@@ -107,13 +107,13 @@ class MatrixMouseConfig(BaseSettings):
         default=False,
         description="Enable extended thinking for the writer model. Increases quality but uses more context.",
     )
-    planner_think: bool = Field(
+    manager_think: bool = Field(
         default=False,
-        description="Enable extended thinking for the planner model.",
+        description="Enable extended thinking for the manager model.",
     )
-    judge_think: bool = Field(
+    critic_think: bool = Field(
         default=False,
-        description="Enable extended thinking for the judge model.",
+        description="Enable extended thinking for the critic model.",
     )
     summarizer_think: bool = Field(
         default=False,
@@ -123,17 +123,17 @@ class MatrixMouseConfig(BaseSettings):
         default=True,
         description="Stream coder model output token by token. Disable if the model misbehaves with streaming.",
     )
-    writer_think: bool = Field(
+    writer_stream: bool = Field(
         default=True,
         description="Stream writer model output token by token. Disable if the model misbehaves with streaming.",
     )
-    planner_stream: bool = Field(
+    manager_stream: bool = Field(
         default=True,
-        description="Stream planner model output token by token.",
+        description="Stream manager model output token by token.",
     )
-    judge_stream: bool = Field(
+    critic_stream: bool = Field(
         default=True,
-        description="Stream judge model output token by token.",
+        description="Stream critic model output token by token.",
     )
     summarizer_stream: bool = Field(
         default=True,
@@ -211,6 +211,10 @@ class MatrixMouseConfig(BaseSettings):
         default=10,
         description="Number of minutes to wait after a request_clarification for human input. After this time elapses, the scheduler moves on to another task.",
     )
+    clarification_timeout_minutes: int = Field(
+        default=60,
+        description="Minutes to wait before creating a stale clarification task for the Manager, so it can attempt to answer the question."
+    )
 
     # --- Server ---
     server_port: int = Field(
@@ -284,6 +288,10 @@ class MatrixMouseConfig(BaseSettings):
     manager_review_schedule: str = Field(
         default="0 9 * * *",
         description="Cron expression for the Manager's daily review task. Default: 9am daily.",
+    )
+    manager_review_upcoming_tasks: int = Field(
+        default=20,
+        description="Maximum number of upcoming tasks the Manager will review during daily review. Default 20."
     )
 
     # --- Decomposition ---
@@ -455,6 +463,9 @@ class MatrixMousePaths:
                 AGENT_NOTES.md              workspace-level agent notes
                                             (used by future workspace-scoped tasks
                                             e.g. Project Manager agent)
+                workspace_state.json        orchestrator-level persistent state 
+                                            (last_manager_review_at, stale clarification 
+                                            task registry)
                 <repo_name>/                per-repo runtime state (not in git)
                     AGENT_NOTES.md          repo-scoped agent working memory
                     agent.log               repo-scoped session log
@@ -509,6 +520,11 @@ class MatrixMousePaths:
         For repo-scoped notes, use repo_paths(repo_name).agent_notes.
         """
         return self.mm_dir / "AGENT_NOTES.md"
+
+    @property
+    def workspace_state_file(self) -> Path:
+        """<workspace_root>/.matrixmouse/workspace_state.json"""
+        return self.mm_dir / "workspace_state.json"
 
     def repo_paths(self, repo_name: str) -> "RepoPaths":
         """

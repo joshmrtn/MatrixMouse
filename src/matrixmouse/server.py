@@ -62,7 +62,7 @@ def start_server(config: MatrixMouseConfig, paths: MatrixMousePaths) -> None:
         from matrixmouse.api import app
         from matrixmouse import comms as comms_module
 
-        port = getattr(config, "server_port", 8080)
+        port = config.server_port
 
         _register_routes(app, comms_module)
 

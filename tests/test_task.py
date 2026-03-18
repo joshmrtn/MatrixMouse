@@ -57,15 +57,20 @@ from matrixmouse.task import (
 # ---------------------------------------------------------------------------
 
 
-def make_task(**kwargs) -> Task:
-    defaults = dict(
-        title="Test task",
-        description="Do the thing",
-        importance=0.5,
-        urgency=0.5,
+def make_task(
+    title: str = "Test task",
+    description: str = "Do the thing carefully.",
+    role: AgentRole = AgentRole.CODER,
+    repo: list[str] | None = None,
+    **kwargs,
+) -> Task:
+    return Task(
+        title=title,
+        description=description,
+        role=role,
+        repo=repo if repo is not None else ["repo"],
+        **kwargs,
     )
-    defaults.update(kwargs)
-    return Task(**defaults)
 
 
 def make_queue(tmp_path: Path) -> TaskQueue:
@@ -424,7 +429,9 @@ class TestTaskQueueStatusTransitions:
         task = make_task()
         q.add(task)
         q.mark_running(task.id)
-        assert q.get(task.id).status == TaskStatus.RUNNING
+        updated_task = q.get(task.id)
+        assert updated_task is not None
+        assert updated_task.status == TaskStatus.RUNNING
 
     def test_mark_running_sets_time_slice_started(self, tmp_path):
         q = make_queue(tmp_path)
@@ -433,7 +440,9 @@ class TestTaskQueueStatusTransitions:
         before = time.monotonic()
         q.mark_running(task.id)
         after = time.monotonic()
-        ts = q.get(task.id).time_slice_started
+        running_task = q.get(task.id)
+        assert running_task is not None
+        ts = running_task.time_slice_started
         assert ts is not None
         assert before <= ts <= after
 
@@ -443,7 +452,9 @@ class TestTaskQueueStatusTransitions:
         q.add(task)
         assert task.started_at is None
         q.mark_running(task.id)
-        assert q.get(task.id).started_at is not None
+        running_task = q.get(task.id)
+        assert running_task is not None
+        assert running_task.started_at is not None
 
     def test_mark_running_does_not_overwrite_started_at(self, tmp_path):
         q = make_queue(tmp_path)
@@ -451,7 +462,9 @@ class TestTaskQueueStatusTransitions:
         task.started_at = "2024-01-01T00:00:00+00:00"
         q.add(task)
         q.mark_running(task.id)
-        assert q.get(task.id).started_at == "2024-01-01T00:00:00+00:00"
+        running_task = q.get(task.id)
+        assert running_task is not None
+        assert running_task.started_at == "2024-01-01T00:00:00+00:00"
 
     def test_mark_ready_clears_time_slice(self, tmp_path):
         q = make_queue(tmp_path)
@@ -460,6 +473,7 @@ class TestTaskQueueStatusTransitions:
         q.mark_running(task.id)
         q.mark_ready(task.id)
         t = q.get(task.id)
+        assert t is not None
         assert t.status == TaskStatus.READY
         assert t.time_slice_started is None
 
@@ -469,6 +483,7 @@ class TestTaskQueueStatusTransitions:
         q.add(task)
         q.mark_complete(task.id)
         t = q.get(task.id)
+        assert t is not None
         assert t.status == TaskStatus.COMPLETE
         assert t.completed_at is not None
 
@@ -477,7 +492,9 @@ class TestTaskQueueStatusTransitions:
         task = make_task()
         q.add(task)
         q.mark_blocked_by_human(task.id, "needs info")
-        assert "[BLOCKED] needs info" in q.get(task.id).notes
+        blocked_task = q.get(task.id)
+        assert blocked_task is not None
+        assert "[BLOCKED] needs info" in blocked_task.notes
 
     def test_mark_complete_unblocks_dependent(self, tmp_path):
         q = make_queue(tmp_path)
@@ -488,7 +505,9 @@ class TestTaskQueueStatusTransitions:
         q.add(blocker)
         q.add(dependent)
         q.mark_complete(blocker.id)
-        assert q.get(dependent.id).status == TaskStatus.READY
+        dependent_task = q.get(dependent.id)
+        assert dependent_task is not None
+        assert dependent_task.status == TaskStatus.READY
 
 
 # ---------------------------------------------------------------------------
@@ -516,14 +535,19 @@ class TestAddSubtask:
         parent = make_task()
         q.add(parent)
         q.add_subtask(parent.id, "child", "desc")
-        assert q.get(parent.id).status == TaskStatus.BLOCKED_BY_TASK
+        task = q.get(parent.id)
+        assert task is not None
+        assert task.status == TaskStatus.BLOCKED_BY_TASK
 
     def test_subtask_id_in_parent_subtasks(self, tmp_path):
         q = make_queue(tmp_path)
         parent = make_task()
         q.add(parent)
         subtask = q.add_subtask(parent.id, "child", "desc")
-        assert subtask.id in q.get(parent.id).subtasks
+        assert subtask is not None
+        parent_task = q.get(parent.id)
+        assert parent_task is not None
+        assert subtask.id in parent_task.subtasks
 
     def test_cycle_detection_rolls_back(self, tmp_path):
         q = make_queue(tmp_path)
@@ -537,6 +561,7 @@ class TestAddSubtask:
         # The simplest approach: directly verify detect_cycles finds the cycle
         # we manually constructed.
         subtask_obj = q.get(subtask.id)
+        assert subtask_obj is not None
         subtask_obj.blocked_by = [parent.id]
         q.update(subtask_obj)
 
@@ -566,3 +591,123 @@ class TestTaskQueueReload:
         (tmp_path / "tasks.json").write_text("[]")
         q.reload()
         assert q.get(task.id) is None
+
+# ---------------------------------------------------------------------------
+# Task — last_modified and pending_question fields
+# ---------------------------------------------------------------------------
+
+class TestLastModified:
+    def test_last_modified_set_on_creation(self):
+        task = make_task()
+        assert task.last_modified is not None
+        assert isinstance(task.last_modified, str)
+
+    def test_last_modified_is_valid_iso(self):
+        from datetime import datetime
+        task = make_task()
+        dt = datetime.fromisoformat(task.last_modified)
+        assert dt is not None
+
+    def test_last_modified_updated_on_queue_update(self, tmp_path):
+        import time as time_mod
+        q = make_queue(tmp_path)
+        task = make_task()
+        q.add(task)
+        orig_task = q.get(task.id)
+        assert orig_task is not None
+        original = orig_task.last_modified
+        time_mod.sleep(0.01)
+        task.title = "updated title"
+        q.update(task)
+        updated_task = q.get(task.id)
+        assert updated_task is not None
+        assert updated_task.last_modified != original
+
+    def test_last_modified_persisted_in_to_dict(self):
+        task = make_task()
+        assert "last_modified" in task.to_dict()
+
+    def test_last_modified_restored_from_dict(self):
+        task = make_task()
+        restored = Task.from_dict(task.to_dict())
+        assert restored.last_modified == task.last_modified
+
+    def test_last_modified_falls_back_to_created_at_on_load(self):
+        task = make_task()
+        data = task.to_dict()
+        del data["last_modified"]
+        restored = Task.from_dict(data)
+        assert restored.last_modified == task.created_at
+
+    def test_last_modified_updated_by_mark_running(self, tmp_path):
+        import time as time_mod
+        q = make_queue(tmp_path)
+        task = make_task()
+        q.add(task)
+        orig_task = q.get(task.id)
+        assert orig_task is not None
+        original = orig_task.last_modified
+        time_mod.sleep(0.01)
+        q.mark_running(task.id)
+        updated_task = q.get(task.id)
+        assert updated_task is not None
+        assert updated_task.last_modified != original
+
+    def test_last_modified_updated_by_mark_complete(self, tmp_path):
+        import time as time_mod
+        q = make_queue(tmp_path)
+        task = make_task()
+        q.add(task)
+        orig_task = q.get(task.id)
+        assert orig_task is not None
+        original = orig_task.last_modified
+        time_mod.sleep(0.01)
+        q.mark_complete(task.id)
+        updated_task = q.get(task.id)
+        assert updated_task is not None
+        assert updated_task.last_modified != original
+
+    def test_last_modified_updated_by_mark_blocked_by_human(self, tmp_path):
+        import time as time_mod
+        q = make_queue(tmp_path)
+        task = make_task()
+        q.add(task)
+        orig_task = q.get(task.id)
+        assert orig_task is not None
+        original = orig_task.last_modified
+        time_mod.sleep(0.01)
+        q.mark_blocked_by_human(task.id, "needs input")
+        updated_task = q.get(task.id)
+        assert updated_task is not None
+        assert updated_task.last_modified != original
+
+
+class TestPendingQuestion:
+    def test_default_pending_question_is_empty(self):
+        task = make_task()
+        assert task.pending_question == ""
+
+    def test_pending_question_persisted_in_to_dict(self):
+        task = make_task()
+        task.pending_question = "Which approach should I use?"
+        assert "pending_question" in task.to_dict()
+        assert task.to_dict()["pending_question"] == "Which approach should I use?"
+
+    def test_pending_question_restored_from_dict(self):
+        task = make_task()
+        task.pending_question = "What is the expected output format?"
+        restored = Task.from_dict(task.to_dict())
+        assert restored.pending_question == "What is the expected output format?"
+
+    def test_pending_question_defaults_empty_on_missing_key(self):
+        task = make_task()
+        data = task.to_dict()
+        del data["pending_question"]
+        restored = Task.from_dict(data)
+        assert restored.pending_question == ""
+
+    def test_pending_question_cleared_to_empty_string(self):
+        task = make_task()
+        task.pending_question = "Something"
+        task.pending_question = ""
+        assert task.pending_question == ""

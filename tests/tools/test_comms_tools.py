@@ -263,33 +263,15 @@ class TestRequestClarificationGracePeriod:
         assert q.get(task.id).status == TaskStatus.BLOCKED_BY_HUMAN
         assert "ERROR" not in result
 
-    def test_falls_back_to_10_minute_default_when_config_absent(self, tmp_path):
+    def test_zero_grace_period_returns_immediately(self, tmp_path):
+        """With grace_period=0, no polling occurs and task stays blocked."""
         task = make_task()
-        tasks_file = tmp_path / "tasks.json"
-        tasks_file.write_text("[]")
-        q = TaskQueue(tasks_file)
-        q.add(task)
-        task_tools.configure(queue=q, active_task_id=task.id, config=None)
-        comms_tools.configure(None)  # no config
-
-        import time as time_mod
-        start = time_mod.monotonic()
-        call_count = 0
-
-        def fake_monotonic():
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                return start
-            return start + 700  # past 10-minute default (600s)
-
-        with patch("matrixmouse.tools.comms_tools.time.sleep"), \
-             patch("matrixmouse.tools.comms_tools.time.monotonic",
-                   fake_monotonic), \
-             patch("matrixmouse.comms.get_manager", return_value=None):
-            result = comms_tools.request_clarification("Hello?")
-
-        # Should have attempted the grace period, then returned blocked message
+        q = setup(tmp_path, task=task, grace_minutes=0.0)
+        with patch("matrixmouse.tools.comms_tools.time.sleep") as mock_sleep, \
+            patch("matrixmouse.comms.get_manager", return_value=None):
+            result = comms_tools.request_clarification("Quick question?")
+        mock_sleep.assert_not_called()
+        assert q.get(task.id).status == TaskStatus.BLOCKED_BY_HUMAN
         assert "ERROR" not in result
 
 
