@@ -124,7 +124,7 @@ def _stop_ollama_models() -> None:
         getattr(_config, "manager_model",    None),
         getattr(_config, "summarizer_model", None),
         getattr(_config, "critic_model",     None), 
-        getattr(_config, "writer_model"      None),
+        getattr(_config, "writer_model",     None),
     ]
 
     # coder_cascade is a list — flatten it
