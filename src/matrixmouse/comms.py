@@ -163,9 +163,9 @@ class CommsManager:
             message:  Notification body.
             priority: ntfy priority: "min" | "low" | "default" | "high" | "urgent"
         """
-        url = getattr(self.config, "ntfy_url", None)
-        topic = getattr(self.config, "ntfy_topic", "matrixmouse")
-        web_ui = getattr(self.config, "web_ui_url", "")
+        url = self.config.ntfy_url or None
+        topic = self.config.ntfy_topic
+        web_ui = self.config.web_ui_url
         username = os.environ.get("NTFY_USERNAME", "")
         password = os.environ.get("NTFY_PASSWORD", "")
 

@@ -609,9 +609,9 @@ async def turn_limit_response(task_id: str, body: TurnLimitResponseRequest):
     action = body.action.lower()
 
     if action == "extend":
-        default_turns = getattr(_config, "agent_max_turns", 50) if _config else 50
+        default_turns = _config.agent_max_turns if _config else 50
         extension = body.extend_by if body.extend_by > 0 else default_turns
-        task.turn_limit = getattr(task, "turn_limit", 0) + extension
+        task.turn_limit = task.turn_limit + extension
         task.status = TaskStatus.READY
         if body.note:
             task.context_messages.append({

@@ -1029,7 +1029,7 @@ class Orchestrator:
 
         preempting = [
             t for t in self.queue.active_tasks()
-            if getattr(t, "preempt", False)
+            if t.preempt
             and t.status == TaskStatus.READY
             and t.id != task.id
         ]
@@ -1125,8 +1125,8 @@ class Orchestrator:
 
     def _scoring_kwargs(self) -> dict:
         return {
-            "aging_rate":        getattr(self.config, "priority_aging_rate",       0.01),
-            "max_aging_bonus":   getattr(self.config, "priority_max_aging_bonus",   0.3),
-            "importance_weight": getattr(self.config, "priority_importance_weight", 0.6),
-            "urgency_weight":    getattr(self.config, "priority_urgency_weight",    0.4),
+            "aging_rate":        self.config.priority_aging_rate,
+            "max_aging_bonus":   self.config.priority_max_aging_bonus,
+            "importance_weight": self.config.priority_importance_weight,
+            "urgency_weight":    self.config.priority_urgency_weight,
         }

@@ -88,7 +88,7 @@ class Router:
             "Writer: %s. Summarizer: %s.",
             self._cascade,
             config.planner_model,
-            getattr(config, "writer_model", config.coder_model),
+            config.writer_model,
             config.summarizer_model,
         )
 
@@ -119,9 +119,7 @@ class Router:
             return self._current_model()
 
         if role == AgentRole.WRITER:
-            return getattr(
-                self.config, "writer_model", self.config.coder_model
-            )
+            return self.config.writer_model
 
         # Unknown role — fall back to coder_model and log a warning
         logger.warning(
@@ -146,16 +144,13 @@ class Router:
             bool: True if streaming should be enabled.
         """
         if role in (AgentRole.MANAGER, AgentRole.CRITIC):
-            return getattr(self.config, "planner_stream", True)
+            return self.config.planner_stream
 
         if role == AgentRole.CODER:
-            return getattr(self.config, "coder_stream", True)
+            return self.config.coder_stream
 
         if role == AgentRole.WRITER:
-            return getattr(
-                self.config, "writer_stream",
-                getattr(self.config, "coder_stream", True),
-            )
+            return self.config.writer_stream
 
         return True
 
@@ -174,16 +169,13 @@ class Router:
             bool: True if extended thinking should be enabled.
         """
         if role in (AgentRole.MANAGER, AgentRole.CRITIC):
-            return getattr(self.config, "planner_think", False)
+            return self.config.planner_think
 
         if role == AgentRole.CODER:
-            return getattr(self.config, "coder_think", False)
+            return self.config.coder_think
 
         if role == AgentRole.WRITER:
-            return getattr(
-                self.config, "writer_think",
-                getattr(self.config, "coder_think", False),
-            )
+            return self.config.writer_think
 
         return False
 

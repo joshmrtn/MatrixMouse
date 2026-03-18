@@ -71,23 +71,9 @@ def make_config(**kwargs) -> MagicMock:
     cfg.coder_stream     = kwargs.get("coder_stream",     True)
     cfg.planner_think    = kwargs.get("planner_think",    False)
     cfg.coder_think      = kwargs.get("coder_think",      False)
-
-    # writer_model / writer_stream / writer_think via getattr fallback
-    if "writer_model" in kwargs:
-        cfg.writer_model = kwargs["writer_model"]
-    else:
-        del cfg.writer_model   # ensure getattr fallback is tested
-
-    if "writer_stream" in kwargs:
-        cfg.writer_stream = kwargs["writer_stream"]
-    else:
-        del cfg.writer_stream
-
-    if "writer_think" in kwargs:
-        cfg.writer_think = kwargs["writer_think"]
-    else:
-        del cfg.writer_think
-
+    cfg.writer_model     = kwargs.get("writer_model",     "coder-model")
+    cfg.writer_stream    = kwargs.get("writer_stream",    True)
+    cfg.writer_think     = kwargs.get("writer_think",     False)
     return cfg
 
 
@@ -190,10 +176,6 @@ class TestThinkForRole:
 
     def test_writer_returns_writer_think_when_set(self):
         r = make_router(writer_think=True)
-        assert r.think_for_role(AgentRole.WRITER) is True
-
-    def test_writer_falls_back_to_coder_think(self):
-        r = make_router(coder_think=True)
         assert r.think_for_role(AgentRole.WRITER) is True
 
     def test_unknown_role_returns_false(self):

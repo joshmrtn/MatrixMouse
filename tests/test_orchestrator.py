@@ -92,6 +92,8 @@ def make_config(**kwargs) -> MagicMock:
     cfg.agent_max_turns            = kwargs.get("agent_max_turns",   50)
     cfg.manager_review_schedule    = kwargs.get("schedule",          "")
     cfg.clarification_timeout_minutes = kwargs.get("timeout_minutes", 60)
+    cfg.manager_review_upcoming_tasks = kwargs.get("upcoming_tasks", 20)
+    cfg.critic_max_turns           = kwargs.get("critic_max_turns",  5)
     return cfg
 
 
@@ -458,18 +460,6 @@ class TestScoringKwargs:
         assert kwargs["importance_weight"] == 0.7
         assert kwargs["urgency_weight"]    == 0.3
 
-    def test_falls_back_to_hardcoded_defaults(self, tmp_path):
-        orch = make_orchestrator(tmp_path)
-        # Remove the attributes from the mock so getattr fallback is used
-        del orch.config.priority_aging_rate
-        del orch.config.priority_max_aging_bonus
-        del orch.config.priority_importance_weight
-        del orch.config.priority_urgency_weight
-        kwargs = orch._scoring_kwargs()
-        assert kwargs["aging_rate"]        == 0.01
-        assert kwargs["max_aging_bonus"]   == 0.3
-        assert kwargs["importance_weight"] == 0.6
-        assert kwargs["urgency_weight"]    == 0.4
 
 # ---------------------------------------------------------------------------
 # _maybe_inject_manager_review

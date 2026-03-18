@@ -275,10 +275,7 @@ def split_task(
         )
 
     # --- Depth limit check ---
-    depth_limit = (
-        getattr(_config, "decomposition_depth_limit", 3)
-        if _config is not None else 3
-    )
+    depth_limit = _config.decomposition_depth_limit if _config is not None else 3
     # decomposition_confirmed_depth tracks how many confirmation events
     # have been granted on this branch, each granting depth_limit additional levels.
     allowed_depth = depth_limit + (parent.decomposition_confirmed_depth * depth_limit)
