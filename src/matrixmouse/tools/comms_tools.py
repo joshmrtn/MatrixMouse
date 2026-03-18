@@ -126,8 +126,7 @@ def request_clarification(question: str) -> str:
     # --- Grace period: poll for an answer ---
     # TODO: in the multi-threaded model this polling needs to be async or moved to a separate thread
     grace_minutes = (
-        getattr(_config, "clarification_grace_period_minutes", 10)
-        if _config is not None else 10
+        _config.clarification_grace_period_minutes if _config is not None else 10
     )
     grace_seconds = grace_minutes * 60
     poll_interval = 5  # seconds between checks
