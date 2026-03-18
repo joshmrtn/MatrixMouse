@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import tempfile
+import copy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -63,7 +64,7 @@ def load(state_file: Path) -> dict:
     Returns:
         dict with all expected state keys present.
     """
-    state = dict(_DEFAULT_STATE)
+    state = copy.deepcopy(_DEFAULT_STATE)
 
     if not state_file.exists():
         logger.debug("No workspace state file at %s — using defaults.", state_file)
