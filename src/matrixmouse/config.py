@@ -123,7 +123,7 @@ class MatrixMouseConfig(BaseSettings):
         default=True,
         description="Stream coder model output token by token. Disable if the model misbehaves with streaming.",
     )
-    writer_think: bool = Field(
+    writer_stream: bool = Field(
         default=True,
         description="Stream writer model output token by token. Disable if the model misbehaves with streaming.",
     )
@@ -210,6 +210,10 @@ class MatrixMouseConfig(BaseSettings):
     clarification_grace_period_minutes: int = Field(
         default=10,
         description="Number of minutes to wait after a request_clarification for human input. After this time elapses, the scheduler moves on to another task.",
+    )
+    clarification_timeout_minutes: int = Field(
+        default=60,
+        description="Minutes to wait before creating a stale clarification task for the Manager, so it can attempt to answer the question."
     )
 
     # --- Server ---
