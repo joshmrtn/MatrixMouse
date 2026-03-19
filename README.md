@@ -195,6 +195,17 @@ You may also set this globally in Ollama's systemd service.
 
 - [x] Web UI
 - [x] Streaming and thinking control per role
-- [ ] Flexible task planning
-- [ ] Tool scoping per agent role
-- [ ] Expanded language support
+- [x] Flexible task planning (#5, #6)
+- [x] Tool scoping per agent role (#6)
+- [ ] Refactor task persistence (#14)
+- [ ] Branch-per-task, merge management (#8)
+- [ ] LLM backend flexibility (#10)
+- [ ] Refactor: Update CLI to current API (#16)
+- [ ] Improved UI/UX for visibility and control (#9)
+- [ ] Documentation (#17)
+- [ ] **MVP Release**, API is mostly stable now, full system works.
+- [ ] Multi-worker orchestration (#15)
+- [ ] Expanded language support (#18, #20)
+- [ ] Plugins system (#19, #21)
+- [ ] Web search tool for all agents (#22)
+- [ ] RAG pipeline (#23)
