@@ -54,9 +54,9 @@ Coverage:
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
-from matrixmouse.task import AgentRole, Task, TaskQueue, TaskStatus
+from matrixmouse.task import Task, TaskStatus
+from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.scheduling import Scheduler, P1, P2, P3
 
 
@@ -99,10 +99,12 @@ def make_task(
 
 
 def make_queue_with_tasks(tasks: list[Task]) -> MagicMock:
-    """Mock TaskQueue returning the given task list."""
+    """Mock TaskRepository returning the given task list."""
     q = MagicMock()
     q.active_tasks.return_value = list(tasks)
     q.completed_ids.return_value = set()
+    q.is_ready.return_value = True  # all tasks ready by default
+    q.get_blocked_by.return_value = []  # no blockers by default
     return q
 
 
@@ -369,19 +371,15 @@ class TestAdaptiveHeuristic:
 
 
 class TestReportBlocked:
-    def test_no_blocked_tasks_message(self, tmp_path):
+    def test_no_blocked_tasks_message(self):
         s = Scheduler(make_config())
-        tasks_file = tmp_path / "tasks.json"
-        tasks_file.write_text("[]")
-        q = TaskQueue(tasks_file)
+        q = InMemoryTaskRepository()
         q.add(make_task())
         assert s.report_blocked(q) == "No blocked tasks."
 
-    def test_lists_blocked_by_human(self, tmp_path):
+    def test_lists_blocked_by_human(self):
         s = Scheduler(make_config())
-        tasks_file = tmp_path / "tasks.json"
-        tasks_file.write_text("[]")
-        q = TaskQueue(tasks_file)
+        q = InMemoryTaskRepository()
         task = make_task(title="waiting for human")
         q.add(task)
         q.mark_blocked_by_human(task.id, "needs decision")
@@ -389,17 +387,14 @@ class TestReportBlocked:
         assert "waiting for human" in report
         assert "Blocked by human" in report
 
-    def test_lists_blocked_by_task(self, tmp_path):
+    def test_lists_blocked_by_task(self):
         s = Scheduler(make_config())
-        tasks_file = tmp_path / "tasks.json"
-        tasks_file.write_text("[]")
-        q = TaskQueue(tasks_file)
+        q = InMemoryTaskRepository()
         blocker = make_task(title="blocker")
         blocked = make_task(title="blocked task")
-        blocked.status = TaskStatus.BLOCKED_BY_TASK
-        blocked.blocked_by = [blocker.id]
         q.add(blocker)
         q.add(blocked)
+        q.add_dependency(blocker.id, blocked.id)
         report = s.report_blocked(q)
         assert "blocked task" in report
         assert "Blocked by dependencies" in report

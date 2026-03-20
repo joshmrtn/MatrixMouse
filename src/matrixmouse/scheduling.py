@@ -65,6 +65,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from matrixmouse.config import MatrixMouseConfig
+from matrixmouse.repository.task_repository import TaskRepository
+from matrixmouse.task import Task, TaskStatus
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,7 +93,7 @@ class SchedulingDecision:
     Bundles the chosen task with diagnostic information so the orchestrator
     can log why a particular task was chosen (or why nothing was).
     """
-    task: "Task | None"
+    task: Task | None
     reason: str
     queue_level: int | None           # P1 / P2 / P3, or None if no task
     candidates_considered: int
@@ -126,7 +130,7 @@ class Scheduler:
 
     def __init__(
         self,
-        config: "MatrixMouseConfig",
+        config: MatrixMouseConfig,
         stale_clarification_callback: Optional[Callable[[str, str, str], None]] = None,
     ):
         """
@@ -153,7 +157,7 @@ class Scheduler:
     # Public interface
     # -----------------------------------------------------------------------
 
-    def next(self, queue: "TaskQueue") -> SchedulingDecision:
+    def next(self, queue: TaskRepository) -> SchedulingDecision:
         """
         Select the next task to run.
 
@@ -168,17 +172,15 @@ class Scheduler:
 
         Returns SchedulingDecision with task=None if nothing is ready.
         """
-        from matrixmouse.task import TaskStatus
 
         all_active = queue.active_tasks()
-        completed  = queue.completed_ids()
 
         # --- Stale clarification check ---
         self._check_stale_clarifications(all_active)
 
         ready = [
             t for t in all_active
-            if t.status == TaskStatus.READY and t.is_ready(completed)
+            if t.status == TaskStatus.READY and queue.is_ready(t.id)
         ]
 
         if not ready:
@@ -292,7 +294,7 @@ class Scheduler:
         )
         self._maybe_adjust_slices()
 
-    def time_slice_expired(self, task: "Task") -> bool:
+    def time_slice_expired(self, task: Task) -> bool:
         """
         Return True if the task's time slice has expired.
         Convenience method for the orchestrator to call after each
@@ -305,12 +307,11 @@ class Scheduler:
         limit   = self._slice_minutes(level)
         return elapsed >= limit
 
-    def report_blocked(self, queue: "TaskQueue") -> str:
+    def report_blocked(self, queue: TaskRepository) -> str:
         """
         Return a human-readable summary of all blocked tasks.
         Used by GET /status and the web UI.
         """
-        from matrixmouse.task import TaskStatus
 
         blocked_by_task = [
             t for t in queue.active_tasks()
@@ -335,9 +336,10 @@ class Scheduler:
         if blocked_by_task:
             lines.append(f"Blocked by dependencies ({len(blocked_by_task)}):")
             for t in blocked_by_task:
+                blockers = queue.get_blocked_by(t.id)
+                blocker_ids = ", ".join(b.id for b in blockers)
                 lines.append(
-                    f"  [{t.id}] {t.title} — waiting on: "
-                    f"{', '.join(t.blocked_by)}"
+                    f"  [{t.id}] {t.title} — waiting on: {blocker_ids}"
                 )
 
         return "\n".join(lines)
@@ -370,7 +372,6 @@ class Scheduler:
         if self._stale_cb is None:
             return
 
-        from matrixmouse.task import TaskStatus
 
         timeout_minutes = self.config.clarification_timeout_minutes
         now = datetime.now(timezone.utc)
@@ -413,7 +414,7 @@ class Scheduler:
     # Queue level assignment
     # -----------------------------------------------------------------------
 
-    def _queue_level(self, task: "Task") -> int:
+    def _queue_level(self, task: Task) -> int:
         """Assign a task to P1, P2, or P3 based on its priority score."""
         kwargs = self._scoring_kwargs()
         score  = task.priority_score(**kwargs)
@@ -426,8 +427,8 @@ class Scheduler:
         return P3
 
     def _select_from_queues(
-        self, ready: "list[Task]"
-    ) -> "tuple[Task | None, int | None]":
+        self, ready: list[Task]
+    ) -> tuple[Task | None, int | None]:
         """
         Walk P1 → P2 → P3. Return the highest-priority task from the
         first non-empty level, and the level it came from.
@@ -463,7 +464,7 @@ class Scheduler:
         return defaults.get(level, 60.0)
 
     @staticmethod
-    def _elapsed_minutes(task: "Task") -> float:
+    def _elapsed_minutes(task: Task) -> float:
         """Minutes elapsed since the task's time slice started."""
         if task.time_slice_started is None:
             return 0.0
@@ -533,7 +534,7 @@ class Scheduler:
 # Module-level helpers for stale clarification detection
 # ---------------------------------------------------------------------------
 
-def _parse_blocked_since(task: "Task") -> "datetime | None":
+def _parse_blocked_since(task: Task) -> "datetime | None":
     """
     Determine when a BLOCKED_BY_HUMAN task was blocked.
 
