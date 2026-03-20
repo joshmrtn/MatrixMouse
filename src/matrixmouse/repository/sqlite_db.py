@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     reviews_task_id                 TEXT REFERENCES tasks(id),
     notes                           TEXT NOT NULL DEFAULT '',
     pending_question                TEXT NOT NULL DEFAULT '',
-    last_review_summary             TEXT NOT NULL DEFAULT '',
+    last_review_summary             TEXT,
     context_messages                TEXT NOT NULL DEFAULT '[]',
     wip_commit_hash                 TEXT NOT NULL DEFAULT '',
     branch                          TEXT NOT NULL DEFAULT '',

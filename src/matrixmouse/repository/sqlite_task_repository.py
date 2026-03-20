@@ -69,29 +69,29 @@ def _row_to_task(row) -> Task:
 def _task_to_params(task: Task) -> dict:
     return {
         "id":                            task.id,
-        "title":                         task.title,
-        "description":                   task.description,
+        "title":                         task.title or "",
+        "description":                   task.description or "",
         "status":                        task.status.value,
         "role":                          task.role.value,
-        "repo":                          json.dumps(task.repo),
-        "target_files":                  json.dumps(task.target_files),
+        "repo":                          json.dumps(task.repo or []),
+        "target_files":                  json.dumps(task.target_files or []),
         "importance":                    task.importance,
         "urgency":                       task.urgency,
-        "depth":                         task.depth,
-        "parent_task_id":                task.parent_task_id,
-        "reviews_task_id":               task.reviews_task_id,
-        "notes":                         task.notes,
-        "pending_question":              task.pending_question,
-        "last_review_summary":           task.last_review_summary,
-        "context_messages":              json.dumps(task.context_messages),
+        "depth":                         task.depth or 0,
+        "parent_task_id":                task.parent_task_id or None,
+        "reviews_task_id":               task.reviews_task_id or None,
+        "notes":                         task.notes or "",
+        "pending_question":              task.pending_question or "",
+        "last_review_summary":           task.last_review_summary or "",
+        "context_messages":              json.dumps(task.context_messages or []),
         "wip_commit_hash":               task.wip_commit_hash,
         "branch":                        task.branch,
-        "decomposition_confirmed_depth": task.decomposition_confirmed_depth,
-        "turn_limit":                    task.turn_limit,
-        "preempt":                       int(task.preempt),
+        "decomposition_confirmed_depth": task.decomposition_confirmed_depth or 0,
+        "turn_limit":                    task.turn_limit or 0,
+        "preempt":                       int(task.preempt or False),
         "time_slice_started":            task.time_slice_started,
-        "started_at":                    task.started_at,
-        "completed_at":                  task.completed_at,
+        "started_at":                    task.started_at or None,
+        "completed_at":                  task.completed_at or None,
         "created_at":                    task.created_at,
         "last_modified":                 task.last_modified,
     }
@@ -245,14 +245,21 @@ class SQLiteTaskRepository(TaskRepository):
         return {r["id"] for r in rows}
 
     def is_ready(self, task_id: str) -> bool:
-        row = self._conn().execute(
+        conn = self._conn()
+        # First check the task exists
+        exists = conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not exists:
+            return False
+        row = conn.execute(
             """
             SELECT NOT EXISTS (
                 SELECT 1
                 FROM task_dependencies td
                 JOIN tasks t ON t.id = td.blocking_task_id
                 WHERE td.blocked_task_id = ?
-                  AND t.status NOT IN (?, ?)
+                AND t.status NOT IN (?, ?)
             ) AS ready
             """,
             (task_id, *_TERMINAL),

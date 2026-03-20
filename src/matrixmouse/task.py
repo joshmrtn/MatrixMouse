@@ -132,7 +132,7 @@ class Task:
     # --- Assignment ---
     role: AgentRole = AgentRole.CODER
     repo: list[str] = field(default_factory=list)
-    branch: str = ""
+    branch: str = field(default="")
 
     # --- Task tree ---
     parent_task_id: Optional[str] = None
@@ -154,7 +154,7 @@ class Task:
     blocking: list[str] = field(default_factory=list)
 
     # --- Git ---
-    wip_commit_hash: Optional[str] = None
+    wip_commit_hash: str = field(default="")
 
     # --- Critic / review ---
     reviews_task_id: Optional[str] = None
@@ -306,7 +306,7 @@ class Task:
             turn_limit=data.get("turn_limit", 0),
             blocked_by=data.get("blocked_by", []),
             blocking=data.get("blocking", []),
-            wip_commit_hash=data.get("wip_commit_hash"),
+            wip_commit_hash=data.get("wip_commit_hash") or "",
             reviews_task_id=data.get("reviews_task_id"),
             last_review_summary=data.get("last_review_summary"),
             context_messages=data.get("context_messages", []),
