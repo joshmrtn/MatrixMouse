@@ -32,7 +32,7 @@ Coverage:
         - Creates task with CRITIC role
         - reviews_task_id set to original task id
         - Priority matches reviewed task
-        - Original task blocked_by includes critic task id
+        - Original task blocked by critic task
         - Falls back to direct complete if critic task creation fails
 
     _load_or_build_messages:
@@ -41,18 +41,68 @@ Coverage:
 
     _scoring_kwargs:
         - Returns dict with config-backed values
-        - Falls back to hardcoded defaults when config keys absent
+
+    _maybe_inject_manager_review:
+        - No injection when schedule empty
+        - Injects when no prior review
+        - Injected task has preempt=True
+        - No duplicate when review already active
+        - No injection when not due
+        - Injects when overdue
+
+    _handle_stale_clarification:
+        - Creates Manager task for stale clarification
+        - Manager task contains the question
+        - Stale task recorded in workspace state repo
+        - No duplicate when existing Manager task active
+        - Creates new task after previous completed
+        - No task created for unknown blocked task
 """
 
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call as mock_call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from matrixmouse.orchestrator import Orchestrator
-from matrixmouse.task import AgentRole, Task, TaskQueue, TaskStatus
+from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.loop import LoopResult, LoopExitReason
+from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
+from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
+
+
+# ---------------------------------------------------------------------------
+# In-memory workspace state for tests
+# ---------------------------------------------------------------------------
+
+class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
+    """Minimal in-memory WorkspaceStateRepository for orchestrator tests."""
+
+    def __init__(self):
+        self._store: dict = {}
+        self._stale: dict = {}
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def set(self, key, value):
+        self._store[key] = value
+
+    def delete(self, key):
+        self._store.pop(key, None)
+
+    def get_stale_clarification_task(self, blocked_task_id):
+        return self._stale.get(blocked_task_id)
+
+    def register_stale_clarification_task(self, blocked_task_id, manager_task_id):
+        self._stale[blocked_task_id] = manager_task_id
+
+    def clear_stale_clarification_task(self, blocked_task_id):
+        self._stale.pop(blocked_task_id, None)
+
+    def all_stale_clarification_tasks(self):
+        return dict(self._stale)
 
 
 # ---------------------------------------------------------------------------
@@ -73,45 +123,39 @@ def make_task(
         description=description,
         role=role,
         repo=repo if repo is not None else ["repo"],
+        importance=importance,
+        urgency=urgency,
         **kwargs,
     )
 
 
-def make_queue(tmp_path: Path) -> TaskQueue:
-    tasks_file = tmp_path / "tasks.json"
-    tasks_file.write_text("[]")
-    return TaskQueue(tasks_file)
-
-
 def make_config(**kwargs) -> MagicMock:
     cfg = MagicMock()
-    cfg.priority_aging_rate        = kwargs.get("aging_rate",        0.01)
-    cfg.priority_max_aging_bonus   = kwargs.get("max_aging_bonus",   0.3)
-    cfg.priority_importance_weight = kwargs.get("importance_weight", 0.6)
-    cfg.priority_urgency_weight    = kwargs.get("urgency_weight",    0.4)
-    cfg.agent_max_turns            = kwargs.get("agent_max_turns",   50)
-    cfg.manager_review_schedule    = kwargs.get("schedule",          "")
-    cfg.clarification_timeout_minutes = kwargs.get("timeout_minutes", 60)
-    cfg.manager_review_upcoming_tasks = kwargs.get("upcoming_tasks", 20)
-    cfg.critic_max_turns           = kwargs.get("critic_max_turns",  5)
+    cfg.priority_aging_rate           = kwargs.get("aging_rate",        0.01)
+    cfg.priority_max_aging_bonus      = kwargs.get("max_aging_bonus",   0.3)
+    cfg.priority_importance_weight    = kwargs.get("importance_weight", 0.6)
+    cfg.priority_urgency_weight       = kwargs.get("urgency_weight",    0.4)
+    cfg.agent_max_turns               = kwargs.get("agent_max_turns",   50)
+    cfg.manager_review_schedule       = kwargs.get("schedule",          "")
+    cfg.clarification_timeout_minutes = kwargs.get("timeout_minutes",   60)
+    cfg.manager_review_upcoming_tasks = kwargs.get("upcoming_tasks",    20)
+    cfg.critic_max_turns              = kwargs.get("critic_max_turns",  5)
     return cfg
 
 
-def make_paths(tmp_path: Path) -> MagicMock:
-    paths = MagicMock()
-    paths.workspace_root = tmp_path
-    tasks_file = tmp_path / "tasks.json"
-    tasks_file.write_text("[]")
-    paths.tasks_file = tasks_file
-    paths.workspace_state_file = tmp_path / "workspace_state.json"
-    paths.agent_notes = tmp_path / "AGENT_NOTES.md"
-    return paths
-
-
 def make_orchestrator(tmp_path: Path, **config_kwargs) -> Orchestrator:
-    config = make_config(**config_kwargs)
-    paths  = make_paths(tmp_path)
-    return Orchestrator(config=config, paths=paths)
+    config       = make_config(**config_kwargs)
+    paths        = MagicMock()
+    paths.workspace_root = tmp_path
+    paths.agent_notes    = tmp_path / "AGENT_NOTES.md"
+    queue        = InMemoryTaskRepository()
+    ws_state_repo = InMemoryWorkspaceStateRepository()
+    return Orchestrator(
+        config=config,
+        paths=paths,
+        queue=queue,
+        ws_state_repo=ws_state_repo,
+    )
 
 
 def make_loop_result(
@@ -163,14 +207,14 @@ class TestShouldYield:
         task.preempt = True
         orch.queue.add(task)
         orch._scheduler.time_slice_expired = MagicMock(return_value=False)
-        # Task's own preempt flag should not cause it to yield to itself
         assert orch._should_yield(task) is False
 
     def test_does_not_yield_when_preempting_task_not_ready(self, tmp_path):
         orch = make_orchestrator(tmp_path)
         running = make_task(title="running", status=TaskStatus.RUNNING)
-        preempting = make_task(title="preempt",
-                               status=TaskStatus.BLOCKED_BY_HUMAN)
+        preempting = make_task(
+            title="preempt", status=TaskStatus.BLOCKED_BY_HUMAN
+        )
         preempting.preempt = True
         orch.queue.add(running)
         orch.queue.add(preempting)
@@ -276,11 +320,7 @@ class TestHandleComplete:
         task = make_task(role=AgentRole.CRITIC)
         orch.queue.add(task)
         result = make_loop_result()
-        # Should not raise, should not change task status
-        # (approve/deny in task_tools already handled it)
         orch._handle_complete(task, result)
-        # Status unchanged from READY — Critic task_tools marked it COMPLETE
-        # already; orchestrator just logs
         assert orch.queue.get(task.id) is not None
 
     def test_coder_task_creates_critic_review(self, tmp_path):
@@ -292,8 +332,10 @@ class TestHandleComplete:
                    return_value=""), \
              patch("matrixmouse.comms.get_manager", return_value=None):
             orch._handle_complete(task, result)
-        all_tasks = orch.queue.all_tasks()
-        critic_tasks = [t for t in all_tasks if t.role == AgentRole.CRITIC]
+        critic_tasks = [
+            t for t in orch.queue.all_tasks()
+            if t.role == AgentRole.CRITIC
+        ]
         assert len(critic_tasks) == 1
 
     def test_writer_task_creates_critic_review(self, tmp_path):
@@ -323,7 +365,7 @@ class TestHandleComplete:
         updated = orch.queue.get(task.id)
         assert updated is not None
         assert updated.status == TaskStatus.BLOCKED_BY_TASK
-        assert len(updated.blocked_by) == 1
+        assert orch.queue.has_blockers(task.id)
 
 
 # ---------------------------------------------------------------------------
@@ -376,9 +418,9 @@ class TestCreateCriticReview:
             t for t in orch.queue.all_tasks()
             if t.role == AgentRole.CRITIC
         )
-        updated = orch.queue.get(task.id)
-        assert updated is not None
-        assert critic.id in updated.blocked_by
+        assert orch.queue.has_blockers(task.id)
+        blockers = orch.queue.get_blocked_by(task.id)
+        assert any(b.id == critic.id for b in blockers)
 
     def test_falls_back_to_direct_complete_on_queue_failure(self, tmp_path):
         orch = make_orchestrator(tmp_path)
@@ -468,7 +510,7 @@ class TestScoringKwargs:
 class TestMaybeInjectManagerReview:
     def _make_orchestrator(self, tmp_path, schedule="0 9 * * *"):
         orch = make_orchestrator(tmp_path)
-        orch.config.manager_review_schedule = schedule
+        orch.config.manager_review_schedule       = schedule
         orch.config.manager_review_upcoming_tasks = 20
         return orch
 
@@ -489,8 +531,7 @@ class TestMaybeInjectManagerReview:
     def test_injected_task_has_preempt_true(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
         orch._maybe_inject_manager_review()
-        task = orch.queue.all_tasks()[0]
-        assert task.preempt is True
+        assert orch.queue.all_tasks()[0].preempt is True
 
     def test_no_duplicate_when_review_already_active(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
@@ -505,21 +546,16 @@ class TestMaybeInjectManagerReview:
         assert len(review_tasks) == 1
 
     def test_no_injection_when_not_due(self, tmp_path):
-        from datetime import datetime, timezone
         orch = self._make_orchestrator(tmp_path, schedule="0 9 * * *")
-        # Set last review to now — next one not due for ~24 hours
-        from matrixmouse import workspace_state as ws
-        ws.set_last_review_at(orch._ws_state)
+        orch._ws_state_repo.set_last_review_at()
         orch._maybe_inject_manager_review()
         assert len(orch.queue.all_tasks()) == 0
 
     def test_injects_when_review_overdue(self, tmp_path):
         from datetime import datetime, timezone, timedelta
         orch = self._make_orchestrator(tmp_path, schedule="0 9 * * *")
-        from matrixmouse import workspace_state as ws
-        # Last review was 25 hours ago — definitely overdue
         old_dt = datetime.now(timezone.utc) - timedelta(hours=25)
-        ws.set_last_review_at(orch._ws_state, old_dt)
+        orch._ws_state_repo.set_last_review_at(old_dt)
         orch._maybe_inject_manager_review()
         review_tasks = [
             t for t in orch.queue.all_tasks()
@@ -543,13 +579,9 @@ class TestHandleStaleClarification:
         blocked = make_task(title="blocked task", role=AgentRole.CODER)
         blocked.status = TaskStatus.BLOCKED_BY_HUMAN
         orch.queue.add(blocked)
-
         orch._handle_stale_clarification(
-            blocked.id,
-            "Which algorithm should I use?",
-            "2026-01-01T00:00:00+00:00",
+            blocked.id, "Which algorithm?", "2026-01-01T00:00:00+00:00"
         )
-
         manager_tasks = [
             t for t in orch.queue.all_tasks()
             if t.role == AgentRole.MANAGER
@@ -561,13 +593,11 @@ class TestHandleStaleClarification:
         blocked = make_task()
         blocked.status = TaskStatus.BLOCKED_BY_HUMAN
         orch.queue.add(blocked)
-
         orch._handle_stale_clarification(
             blocked.id,
             "What is the expected output format?",
             "2026-01-01T00:00:00+00:00",
         )
-
         manager_task = next(
             t for t in orch.queue.all_tasks()
             if t.role == AgentRole.MANAGER
@@ -575,78 +605,54 @@ class TestHandleStaleClarification:
         assert "What is the expected output format?" in manager_task.description
 
     def test_stale_task_recorded_in_workspace_state(self, tmp_path):
-        from matrixmouse import workspace_state as ws
         orch = self._make_orchestrator(tmp_path)
         blocked = make_task()
         blocked.status = TaskStatus.BLOCKED_BY_HUMAN
         orch.queue.add(blocked)
-
         orch._handle_stale_clarification(
             blocked.id, "Question?", "2026-01-01T00:00:00+00:00"
         )
-
-        manager_task_id = ws.get_stale_clarification_task(
-            orch._ws_state, blocked.id
+        manager_task_id = orch._ws_state_repo.get_stale_clarification_task(
+            blocked.id
         )
         assert manager_task_id is not None
 
     def test_no_duplicate_when_existing_manager_task_active(self, tmp_path):
-        from matrixmouse import workspace_state as ws
         orch = self._make_orchestrator(tmp_path)
         blocked = make_task()
         blocked.status = TaskStatus.BLOCKED_BY_HUMAN
         orch.queue.add(blocked)
-
-        # First call — creates Manager task
         orch._handle_stale_clarification(
             blocked.id, "Question?", "2026-01-01T00:00:00+00:00"
         )
-        count_after_first = len([
-            t for t in orch.queue.all_tasks()
-            if t.role == AgentRole.MANAGER
-        ])
-
-        # Second call — should not create another
         orch._handle_stale_clarification(
             blocked.id, "Question?", "2026-01-01T00:00:00+00:00"
         )
-        count_after_second = len([
+        assert len([
             t for t in orch.queue.all_tasks()
             if t.role == AgentRole.MANAGER
-        ])
-
-        assert count_after_first == 1
-        assert count_after_second == 1
+        ]) == 1
 
     def test_creates_new_task_after_previous_completed(self, tmp_path):
-        from matrixmouse import workspace_state as ws
         orch = self._make_orchestrator(tmp_path)
         blocked = make_task()
         blocked.status = TaskStatus.BLOCKED_BY_HUMAN
         orch.queue.add(blocked)
-
-        # First call
         orch._handle_stale_clarification(
             blocked.id, "Question?", "2026-01-01T00:00:00+00:00"
         )
-
-        # Mark the Manager task complete
         manager_task = next(
             t for t in orch.queue.all_tasks()
             if t.role == AgentRole.MANAGER
         )
         orch.queue.mark_complete(manager_task.id)
-
-        # Second call — previous is terminal, should create a new one
         orch._handle_stale_clarification(
             blocked.id, "Question?", "2026-01-01T00:00:00+00:00"
         )
-
-        manager_tasks = [
+        assert len([
             t for t in orch.queue.all_tasks()
             if t.role == AgentRole.MANAGER
-        ]
-        assert len(manager_tasks) == 2
+        ]) == 2
 
     def test_no_task_created_for_unknown_blocked_task(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
@@ -655,45 +661,27 @@ class TestHandleStaleClarification:
         )
         assert len(orch.queue.all_tasks()) == 0
 
-    def test_workspace_state_saved_to_disk(self, tmp_path):
-        orch = self._make_orchestrator(tmp_path)
-        blocked = make_task()
-        blocked.status = TaskStatus.BLOCKED_BY_HUMAN
-        orch.queue.add(blocked)
-
-        state_file = tmp_path / "workspace_state.json"
-        assert not state_file.exists()
-
-        orch._handle_stale_clarification(
-            blocked.id, "Question?", "2026-01-01T00:00:00+00:00"
-        )
-
-        assert state_file.exists()
-
 
 # ---------------------------------------------------------------------------
-# _on_manager_review_complete (additional coverage)
+# _on_manager_review_complete
 # ---------------------------------------------------------------------------
 
-class TestOnManagerReviewCompleteOrchestrator:
-    def test_last_review_at_set_in_memory(self, tmp_path):
-        from matrixmouse import workspace_state as ws
+class TestOnManagerReviewComplete:
+    def test_last_review_at_set(self, tmp_path):
         orch = make_orchestrator(tmp_path)
-        task = make_task(role=AgentRole.MANAGER)
-        orch._on_manager_review_complete(task, "Summary.")
-        assert ws.get_last_review_at(orch._ws_state) is not None
+        orch._on_manager_review_complete("Summary.")
+        assert orch._ws_state_repo.get_last_review_at() is not None
 
-    def test_summary_stored_in_ws_state(self, tmp_path):
+    def test_summary_stored(self, tmp_path):
         orch = make_orchestrator(tmp_path)
-        task = make_task(role=AgentRole.MANAGER)
-        orch._on_manager_review_complete(task, "Tasks are healthy.")
-        assert orch._ws_state.get("last_review_summary") == "Tasks are healthy."
+        orch._on_manager_review_complete("Tasks are healthy.")
+        assert orch._ws_state_repo.get_last_review_summary() == \
+               "Tasks are healthy."
 
-    def test_handles_empty_summary_gracefully(self, tmp_path):
+    def test_handles_empty_summary(self, tmp_path):
         orch = make_orchestrator(tmp_path)
-        task = make_task(role=AgentRole.MANAGER)
-        orch._on_manager_review_complete(task, "")
-        assert orch._ws_state.get("last_review_summary") == ""
+        orch._on_manager_review_complete("")
+        assert orch._ws_state_repo.get_last_review_summary() == ""
 
     def test_handle_complete_calls_on_review_complete_for_review_task(
         self, tmp_path
@@ -705,12 +693,10 @@ class TestOnManagerReviewCompleteOrchestrator:
         )
         orch.queue.add(task)
         result = make_loop_result(summary="Review done.")
-
         with patch("matrixmouse.comms.get_manager", return_value=None), \
              patch.object(orch, "_on_manager_review_complete") as mock_review:
             orch._handle_complete(task, result)
-
-        mock_review.assert_called_once_with(task, "Review done.")
+        mock_review.assert_called_once_with("Review done.")
 
     def test_handle_complete_does_not_call_on_review_for_normal_manager(
         self, tmp_path
@@ -722,9 +708,7 @@ class TestOnManagerReviewCompleteOrchestrator:
         )
         orch.queue.add(task)
         result = make_loop_result(summary="Done.")
-
         with patch("matrixmouse.comms.get_manager", return_value=None), \
              patch.object(orch, "_on_manager_review_complete") as mock_review:
             orch._handle_complete(task, result)
-
         mock_review.assert_not_called()
