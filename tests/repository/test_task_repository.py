@@ -165,6 +165,40 @@ class TestAdd:
         with pytest.raises(ValueError):
             repo.add(task)
 
+    def test_roundtrip_preserves_all_fields(self, repo):
+        task = Task(
+            title="roundtrip test",
+            description="full field verification",
+            role=AgentRole.WRITER,
+            repo=["repo-a", "repo-b"],
+            target_files=["src/foo.py", "src/bar.py"],
+            importance=0.8,
+            urgency=0.3,
+            depth=2,
+            notes="some notes here",
+            pending_question="which approach?",
+            context_messages=[{"role": "user", "content": "hello"}],
+            turn_limit=25,
+            preempt=True,
+        )
+        repo.add(task)
+        retrieved = repo.get(task.id)
+        assert retrieved is not None
+        assert retrieved.title == task.title
+        assert retrieved.description == task.description
+        assert retrieved.role == task.role
+        assert retrieved.repo == task.repo
+        assert retrieved.target_files == task.target_files
+        assert retrieved.importance == task.importance
+        assert retrieved.urgency == task.urgency
+        assert retrieved.depth == task.depth
+        assert retrieved.notes == task.notes
+        assert retrieved.pending_question == task.pending_question
+        assert retrieved.context_messages == task.context_messages
+        assert retrieved.turn_limit == task.turn_limit
+        assert retrieved.preempt == task.preempt
+        assert retrieved.created_at == task.created_at
+
 
 # ---------------------------------------------------------------------------
 # get
@@ -333,6 +367,16 @@ class TestReadiness:
         repo.add(blocked)
         repo.add_dependency(blocker.id, blocked.id)
         assert repo.has_blockers(blocked.id) is False
+
+    def test_is_ready_true_after_blocker_deleted(self, repo):
+        """A deleted blocker should not prevent a task from being ready."""
+        blocker = make_task(title="blocker")
+        blocked = make_task(title="blocked")
+        repo.add(blocker)
+        repo.add(blocked)
+        repo.add_dependency(blocker.id, blocked.id)
+        repo.delete(blocker.id)
+        assert repo.is_ready(blocked.id) is True
 
 
 # ---------------------------------------------------------------------------
@@ -677,3 +721,177 @@ class TestAddSubtask:
         with pytest.raises(KeyError):
             repo.add_subtask("nonexistent", "child", "desc")
             
+# ---------------------------------------------------------------------------
+# Concurrency — SQLite only
+# ---------------------------------------------------------------------------
+
+class TestConcurrency:
+    """
+    Concurrency tests for SQLiteTaskRepository only.
+
+    The in-memory implementation is not thread-safe by design — it is
+    for single-threaded test use only. These tests verify that WAL mode
+    and BEGIN IMMEDIATE transactions prevent data corruption under
+    concurrent access.
+    """
+
+    @pytest.fixture
+    def sqlite_repo(self, tmp_path) -> SQLiteTaskRepository:
+        db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
+        return SQLiteTaskRepository(db_path)
+
+    def test_concurrent_adds_do_not_corrupt(self, sqlite_repo):
+        """Multiple threads adding tasks simultaneously produce no errors
+        and all tasks are persisted."""
+        import threading
+        errors = []
+
+        def add_tasks(thread_id: int) -> None:
+            try:
+                for i in range(20):
+                    task = make_task(title=f"task-{thread_id}-{i}")
+                    sqlite_repo.add(task)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=add_tasks, args=(n,))
+            for n in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Concurrent add errors: {errors}"
+        assert len(sqlite_repo.all_tasks()) == 80
+
+    def test_concurrent_updates_do_not_corrupt(self, sqlite_repo):
+        """Multiple threads updating the same task simultaneously
+        do not corrupt its state."""
+        import threading
+        task = make_task(title="shared task")
+        sqlite_repo.add(task)
+        errors = []
+
+        def update_notes(thread_id: int) -> None:
+            try:
+                for i in range(10):
+                    t = sqlite_repo.get(task.id)
+                    if t:
+                        t.notes = f"thread-{thread_id}-iteration-{i}"
+                        sqlite_repo.update(t)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=update_notes, args=(n,))
+            for n in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Concurrent update errors: {errors}"
+        # Task still exists and has a valid state
+        result = sqlite_repo.get(task.id)
+        assert result is not None
+        assert result.title == "shared task"
+
+    def test_concurrent_reads_never_block_each_other(self, sqlite_repo):
+        """WAL mode allows concurrent readers without blocking."""
+        import threading
+        for i in range(10):
+            sqlite_repo.add(make_task(title=f"task-{i}"))
+
+        errors = []
+        read_counts = []
+
+        def read_all() -> None:
+            try:
+                tasks = sqlite_repo.all_tasks()
+                read_counts.append(len(tasks))
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=read_all) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Concurrent read errors: {errors}"
+        assert all(c == 10 for c in read_counts)
+
+    def test_concurrent_mark_complete_unblocking(self, sqlite_repo):
+        """Concurrent completions of tasks with shared dependents
+        do not produce duplicate unblocking or corrupt status."""
+        import threading
+
+        # Create two independent tasks that both block a shared dependent
+        b1 = make_task(title="blocker1")
+        b2 = make_task(title="blocker2")
+        dependent = make_task(
+            title="dependent", status=TaskStatus.BLOCKED_BY_TASK
+        )
+        sqlite_repo.add(b1)
+        sqlite_repo.add(b2)
+        sqlite_repo.add(dependent)
+        sqlite_repo.add_dependency(b1.id, dependent.id)
+        sqlite_repo.add_dependency(b2.id, dependent.id)
+
+        errors = []
+
+        def complete(task_id: str) -> None:
+            try:
+                sqlite_repo.mark_complete(task_id)
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=complete, args=(b1.id,))
+        t2 = threading.Thread(target=complete, args=(b2.id,))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"Concurrent complete errors: {errors}"
+        # Dependent should be READY — both blockers completed
+        result = sqlite_repo.get(dependent.id)
+        assert result is not None
+        assert result.status == TaskStatus.READY
+        # No remaining blockers
+        assert not sqlite_repo.has_blockers(dependent.id)
+
+class TestMarkCompleteAtomicity:
+    """
+    Verify that mark_complete's multi-step transaction is atomic.
+    If any step fails, no partial state should be committed.
+    """
+
+    @pytest.fixture
+    def sqlite_repo(self, tmp_path) -> SQLiteTaskRepository:
+        db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
+        return SQLiteTaskRepository(db_path)
+
+    def test_mark_complete_unknown_id_leaves_no_partial_state(
+        self, sqlite_repo
+    ):
+        """Completing a nonexistent task raises KeyError and
+        no dependency rows are modified."""
+        blocker = make_task(title="blocker")
+        blocked = make_task(
+            title="blocked", status=TaskStatus.BLOCKED_BY_TASK
+        )
+        sqlite_repo.add(blocker)
+        sqlite_repo.add(blocked)
+        sqlite_repo.add_dependency(blocker.id, blocked.id)
+
+        with pytest.raises(KeyError):
+            sqlite_repo.mark_complete("nonexistent")
+
+        # Dependency edges still intact
+        assert sqlite_repo.has_blockers(blocked.id)
+        # Blocked task status unchanged
+        assert sqlite_repo.get(blocked.id).status == TaskStatus.BLOCKED_BY_TASK
