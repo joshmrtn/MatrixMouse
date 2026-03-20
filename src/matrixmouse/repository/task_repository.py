@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from matrixmouse.task import Task
+from matrixmouse.task import AgentRole, Task
 
 
 class TaskRepository(ABC):
@@ -288,16 +288,18 @@ class TaskRepository(ABC):
         parent_id: str,
         title: str,
         description: str,
+        role: "AgentRole | None" = None,
+        repo: "list[str] | None" = None,
+        importance: float | None = None,
+        urgency: float | None = None,
         **kwargs,
     ) -> Task:
         """
         Create a subtask under the given parent and persist both atomically.
 
-        The subtask is created with:
-            - depth = parent.depth + 1
-            - parent_task_id = parent_id
-            - repo, importance, urgency inherited from parent unless
-              overridden via kwargs
+        The subtask inherits role, repo, importance, and urgency from the
+        parent unless explicitly overridden. depth is always parent.depth + 1.
+        parent_task_id is always set to parent_id.
 
         The parent task is updated atomically in the same transaction:
             - status set to BLOCKED_BY_TASK
@@ -310,7 +312,11 @@ class TaskRepository(ABC):
             parent_id:   ID of the parent task.
             title:       Title of the new subtask.
             description: Description of the new subtask.
-            **kwargs:    Additional Task fields to override on the subtask.
+            role:        Agent role. Defaults to parent's role.
+            repo:        Repo scope. Defaults to parent's repo.
+            importance:  Priority importance. Defaults to parent's importance.
+            urgency:     Priority urgency. Defaults to parent's urgency.
+            **kwargs:    Additional Task fields for edge cases.
 
         Returns:
             The newly created subtask.
