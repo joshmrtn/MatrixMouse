@@ -482,6 +482,14 @@ class TestDependencyMutations:
         with pytest.raises(KeyError):
             repo.add_dependency(task.id, "nonexistent")
 
+    def test_add_dependency_blocks_dependent(self, repo):
+        blocker = make_task(title="blocker")
+        blocked = make_task(title="blocked")
+        repo.add(blocker)
+        repo.add(blocked)
+        repo.add_dependency(blocker.id, blocked.id)
+        assert repo.get(blocked.id).status == TaskStatus.BLOCKED_BY_TASK
+
 
 # ---------------------------------------------------------------------------
 # Named state transitions

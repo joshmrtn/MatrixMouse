@@ -171,12 +171,13 @@ class InMemoryTaskRepository(TaskRepository):
         for tid in (blocking_task_id, blocked_task_id):
             if tid not in self._tasks:
                 raise KeyError(f"Task '{tid}' not found.")
-        self._blocked_by.setdefault(blocked_task_id, set()).add(
-            blocking_task_id
-        )
-        self._blocking.setdefault(blocking_task_id, set()).add(
-            blocked_task_id
-        )
+        self._blocked_by.setdefault(blocked_task_id, set()).add(blocking_task_id)
+        self._blocking.setdefault(blocking_task_id, set()).add(blocked_task_id)
+        # Transition blocked task to BLOCKED_BY_TASK if not terminal
+        blocked_task = self._tasks[blocked_task_id]
+        if blocked_task.status not in _TERMINAL:
+            blocked_task.status = TaskStatus.BLOCKED_BY_TASK
+            blocked_task.last_modified = _now_iso()
 
     def remove_dependency(
         self,

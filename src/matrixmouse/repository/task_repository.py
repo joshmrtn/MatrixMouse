@@ -189,10 +189,13 @@ class TaskRepository(ABC):
         blocked_task_id: str,
     ) -> None:
         """
-        Record that blocked_task_id is blocked by blocking_task_id.
+        Record that blocked_task_id is blocked by blocking_task_id, 
+        and transition blocked_task_id to BLOCKED_BY_TASK status.
+
+        Both operations are atomic — either both succeed or neither does.
+        If the dependency already exists, this is a no-op. 
 
         Callers are responsible for cycle detection before calling this.
-        If the dependency already exists, this is a no-op.
 
         Raises:
             KeyError: If either task does not exist.

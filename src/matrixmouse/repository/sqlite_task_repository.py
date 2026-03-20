@@ -325,6 +325,7 @@ class SQLiteTaskRepository(TaskRepository):
         for tid in (blocking_task_id, blocked_task_id):
             if not self.get(tid):
                 raise KeyError(f"Task '{tid}' not found.")
+        now = _now_iso()
         conn = self._conn()
         with conn:
             conn.execute(
@@ -334,6 +335,21 @@ class SQLiteTaskRepository(TaskRepository):
                 VALUES (?, ?)
                 """,
                 (blocking_task_id, blocked_task_id),
+            )
+            conn.execute(
+                """
+                UPDATE tasks SET
+                    status        = ?,
+                    last_modified = ?
+                WHERE id = ?
+                AND status NOT IN (?, ?)
+                """,
+                (
+                    TaskStatus.BLOCKED_BY_TASK.value,
+                    now,
+                    blocked_task_id,
+                    *_TERMINAL,
+                ),
             )
 
     def remove_dependency(
