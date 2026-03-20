@@ -120,11 +120,11 @@ def _stop_ollama_models() -> None:
 
     # Collect all unique model names across all roles
     model_fields = [
-        getattr(_config, "coder_model",      None),
-        getattr(_config, "manager_model",    None),
-        getattr(_config, "summarizer_model", None),
-        getattr(_config, "critic_model",     None), 
-        getattr(_config, "writer_model",     None),
+        _config.coder_model,
+        _config.manager_model,
+        _config.summarizer_model,
+        _config.critic_model,
+        _config.writer_model,
     ]
 
     # coder_cascade is a list — flatten it
@@ -387,7 +387,7 @@ def main() -> None:
         start_server(_config, paths)
         logger.info(
             "Web server started on port %d",
-            getattr(_config, "server_port", 8080),
+            _config.server_port,
         )
 
         # --- Run forever ---
