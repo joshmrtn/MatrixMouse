@@ -418,6 +418,7 @@ class Orchestrator:
             status=self._status,
             workspace_root=self.paths.workspace_root,
             config=self.config,
+            ws_state_repo=self._ws_state_repo,
         )
 
     # -----------------------------------------------------------------------

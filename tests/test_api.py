@@ -16,7 +16,9 @@ from matrixmouse.api import (
     app, configure, clear_stop_requested, is_stop_requested, is_paused,
     _stop_requested, _orchestrator_paused,
 )
-from matrixmouse.task import AgentRole, Task, TaskStatus, TaskQueue
+from matrixmouse.task import AgentRole, Task, TaskStatus
+from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
+from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +34,7 @@ def reset_flags():
 def workspace(tmp_path):
     ws = tmp_path / "workspace"
     (ws / ".matrixmouse").mkdir(parents=True)
-    configure(queue=MagicMock(), status={}, workspace_root=ws, config=MagicMock())
+    configure(queue=MagicMock(), status={}, workspace_root=ws, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository())
     return ws
 
 
@@ -41,21 +43,45 @@ def client(workspace):
     return TestClient(app, raise_server_exceptions=False)
 
 
+class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
+    def __init__(self):
+        self._store: dict = {}
+        self._stale: dict = {}
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def set(self, key, value):
+        self._store[key] = value
+
+    def delete(self, key):
+        self._store.pop(key, None)
+
+    def get_stale_clarification_task(self, blocked_task_id):
+        return self._stale.get(blocked_task_id)
+
+    def register_stale_clarification_task(self, blocked_task_id, manager_task_id):
+        self._stale[blocked_task_id] = manager_task_id
+
+    def clear_stale_clarification_task(self, blocked_task_id):
+        self._stale.pop(blocked_task_id, None)
+
+    def all_stale_clarification_tasks(self):
+        return dict(self._stale)
+
 # ---------------------------------------------------------------------------
 # Fixtures for task-related tests
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def queue_workspace(tmp_path):
-    """Workspace with a real TaskQueue wired into the API."""
+    """Workspace with a real InMemoryTaskRepository wired into the API."""
     ws = tmp_path / "workspace"
     (ws / ".matrixmouse").mkdir(parents=True)
-    tasks_file = ws / ".matrixmouse" / "tasks.json"
-    tasks_file.write_text("[]")
-    q = TaskQueue(tasks_file)
+    q = InMemoryTaskRepository()
     cfg = MagicMock()
     cfg.agent_max_turns = 50
-    configure(queue=q, status={}, workspace_root=ws, config=cfg)
+    configure(queue=q, status={}, workspace_root=ws, config=cfg, ws_state_repo=InMemoryWorkspaceStateRepository())
     return ws, q
 
 
@@ -125,7 +151,7 @@ class TestKill:
         assert client.get("/estop").json()["engaged"] is True
 
     def test_503_without_workspace(self):
-        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock()) # type: ignore[arg-type]
+        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository) # type: ignore[arg-type]
         assert TestClient(app, raise_server_exceptions=False).post("/kill").status_code == 503
 
 
@@ -145,7 +171,7 @@ class TestEstopReset:
         assert client.get("/estop").json()["engaged"] is False
 
     def test_503_without_workspace(self):
-        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock()) # type: ignore[arg-type]
+        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository()) # type: ignore[arg-type]
         assert TestClient(app, raise_server_exceptions=False).post("/estop/reset").status_code == 503
 
 
@@ -569,23 +595,25 @@ class TestDecompositionConfirm:
 
 @pytest.fixture
 def queue_workspace_with_state(tmp_path):
-    """Workspace with TaskQueue and workspace_state.json wired in."""
+    """Workspace with InMemoryTaskRepository and workspace state wired in."""
     ws = tmp_path / "workspace"
     (ws / ".matrixmouse").mkdir(parents=True)
-    tasks_file = ws / ".matrixmouse" / "tasks.json"
-    tasks_file.write_text("[]")
-    q = TaskQueue(tasks_file)
+    q = InMemoryTaskRepository()
+    ws_state_repo = InMemoryWorkspaceStateRepository()
     cfg = MagicMock()
     cfg.agent_max_turns = 50
     cfg.critic_max_turns = 5
-    configure(queue=q, status={}, workspace_root=ws, config=cfg)
-    return ws, q
+    configure(
+        queue=q, status={}, workspace_root=ws,
+        config=cfg, ws_state_repo=ws_state_repo
+    )
+    return ws, q, ws_state_repo
 
 
 @pytest.fixture
 def state_client(queue_workspace_with_state):
-    ws, q = queue_workspace_with_state
-    return TestClient(app, raise_server_exceptions=False), q, ws
+    ws, q, ws_state_repo = queue_workspace_with_state
+    return TestClient(app, raise_server_exceptions=False), q, ws, ws_state_repo
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +622,7 @@ def state_client(queue_workspace_with_state):
 
 class TestInterjectionWorkspace:
     def test_creates_manager_task(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/workspace",
                         json={"message": "Please review the architecture."})
         assert r.status_code == 201
@@ -603,7 +631,7 @@ class TestInterjectionWorkspace:
         assert len(manager_tasks) == 1
 
     def test_returns_manager_task_id(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/workspace",
                         json={"message": "Rethink the approach."})
         assert r.json()["ok"] is True
@@ -611,7 +639,7 @@ class TestInterjectionWorkspace:
         assert q.get(task_id) is not None
 
     def test_created_task_has_preempt_true(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/workspace",
                         json={"message": "Urgent direction change."})
         task_id = r.json()["manager_task_id"]
@@ -620,7 +648,7 @@ class TestInterjectionWorkspace:
         assert task.preempt is True
 
     def test_created_task_contains_message(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/workspace",
                         json={"message": "Switch to a different database."})
         task_id = r.json()["manager_task_id"]
@@ -629,12 +657,12 @@ class TestInterjectionWorkspace:
         assert "Switch to a different database." in task.description
 
     def test_empty_message_returns_400(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/workspace", json={"message": ""})
         assert r.status_code == 400
 
     def test_task_has_no_repo_scope(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/workspace",
                         json={"message": "Global direction."})
         task_id = r.json()["manager_task_id"]
@@ -649,7 +677,7 @@ class TestInterjectionWorkspace:
 
 class TestInterjectionRepo:
     def test_creates_manager_task_scoped_to_repo(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/repo/my-repo",
                         json={"message": "Refactor the parser."})
         assert r.status_code == 201
@@ -659,13 +687,13 @@ class TestInterjectionRepo:
         assert "my-repo" in task.repo
 
     def test_returns_repo_in_response(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/repo/special-repo",
                         json={"message": "Fix the login flow."})
         assert r.json()["repo"] == "special-repo"
 
     def test_created_task_has_preempt_true(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/repo/my-repo",
                         json={"message": "Urgent fix needed."})
         task_id = r.json()["manager_task_id"]
@@ -674,7 +702,7 @@ class TestInterjectionRepo:
         assert task.preempt is True
 
     def test_created_task_contains_message(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/repo/my-repo",
                         json={"message": "Use async handlers everywhere."})
         task_id = r.json()["manager_task_id"]
@@ -683,12 +711,12 @@ class TestInterjectionRepo:
         assert "Use async handlers everywhere." in task.description
 
     def test_empty_message_returns_400(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/repo/my-repo", json={"message": ""})
         assert r.status_code == 400
 
     def test_task_role_is_manager(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/interject/repo/my-repo",
                         json={"message": "Add rate limiting."})
         task_id = r.json()["manager_task_id"]
@@ -703,7 +731,7 @@ class TestInterjectionRepo:
 
 class TestTaskInterject:
     def test_appends_message_to_context(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"])
         q.add(task)
@@ -716,7 +744,7 @@ class TestTaskInterject:
                    for m in updated.context_messages)
 
     def test_message_has_operator_prefix(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"])
         q.add(task)
@@ -730,7 +758,7 @@ class TestTaskInterject:
                "Human" in msg["content"]
 
     def test_message_role_is_user(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"])
         q.add(task)
@@ -742,7 +770,7 @@ class TestTaskInterject:
                    for m in updated.context_messages)
 
     def test_does_not_change_task_status(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.RUNNING)
@@ -754,7 +782,7 @@ class TestTaskInterject:
         assert updated.status == TaskStatus.RUNNING
 
     def test_empty_message_returns_400(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"])
         q.add(task)
@@ -763,7 +791,7 @@ class TestTaskInterject:
         assert r.status_code == 400
 
     def test_terminal_task_returns_400(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.COMPLETE)
@@ -773,7 +801,7 @@ class TestTaskInterject:
         assert r.status_code == 400
 
     def test_404_for_unknown_task(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/tasks/nonexistent/interject",
                         json={"message": "Hello."})
         assert r.status_code == 404
@@ -785,7 +813,7 @@ class TestTaskInterject:
 
 class TestTaskAnswer:
     def test_appends_answer_to_context(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.BLOCKED_BY_HUMAN)
@@ -799,7 +827,7 @@ class TestTaskAnswer:
                    for m in updated.context_messages)
 
     def test_unblocks_blocked_by_human_task(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.BLOCKED_BY_HUMAN)
@@ -813,7 +841,7 @@ class TestTaskAnswer:
         assert updated.status == TaskStatus.READY
 
     def test_clears_pending_question(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.BLOCKED_BY_HUMAN)
@@ -826,7 +854,7 @@ class TestTaskAnswer:
         assert updated.pending_question == ""
 
     def test_does_not_unblock_running_task(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.RUNNING)
@@ -839,26 +867,19 @@ class TestTaskAnswer:
         assert updated.status == TaskStatus.RUNNING
 
     def test_cancels_stale_clarification_manager_task(self, state_client):
-        client, q, ws = state_client
-        from matrixmouse import workspace_state as wss
+        client, q, ws, ws_state_repo = state_client
 
-        # Set up blocked task
         task = Task(title="blocked", description="d",
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.BLOCKED_BY_HUMAN)
         task.pending_question = "Which approach?"
         q.add(task)
 
-        # Set up stale Manager task
         mgr_task = Task(title="[Stale Clarification] ...",
                         description="d", role=AgentRole.MANAGER, repo=["r"])
         q.add(mgr_task)
 
-        # Register in workspace state
-        state_file = ws / ".matrixmouse" / "workspace_state.json"
-        state = wss.load(state_file)
-        wss.register_stale_clarification_task(state, task.id, mgr_task.id)
-        wss.save(state_file, state)
+        ws_state_repo.register_stale_clarification_task(task.id, mgr_task.id)
 
         client.post(f"/tasks/{task.id}/answer",
                     json={"message": "Use approach B."})
@@ -868,7 +889,7 @@ class TestTaskAnswer:
         assert updated_mgr.status == TaskStatus.CANCELLED
 
     def test_empty_message_returns_400(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CODER, repo=["r"])
         q.add(task)
@@ -877,7 +898,7 @@ class TestTaskAnswer:
         assert r.status_code == 400
 
     def test_404_for_unknown_task(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/tasks/nonexistent/answer",
                         json={"message": "Hello."})
         assert r.status_code == 404
@@ -890,19 +911,18 @@ class TestTaskAnswer:
 class TestCriticReviewResponse:
     def _setup_critic_review(self, q):
         reviewed = Task(title="reviewed", description="d",
-                        role=AgentRole.CODER, repo=["r"],
-                        status=TaskStatus.BLOCKED_BY_TASK)
+                        role=AgentRole.CODER, repo=["r"])
         critic = Task(title="[Critic Review] reviewed",
-                      description="d", role=AgentRole.CRITIC, repo=["r"],
-                      status=TaskStatus.BLOCKED_BY_HUMAN)
+                    description="d", role=AgentRole.CRITIC, repo=["r"],
+                    status=TaskStatus.BLOCKED_BY_HUMAN)
         critic.reviews_task_id = reviewed.id
-        reviewed.blocked_by = [critic.id]
         q.add(reviewed)
         q.add(critic)
+        q.add_dependency(critic.id, reviewed.id)
         return reviewed, critic
 
     def test_approve_task_marks_reviewed_complete(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         r = client.post(f"/tasks/{critic.id}/critic-review-response",
                         json={"action": "approve_task"})
@@ -912,7 +932,7 @@ class TestCriticReviewResponse:
         assert updated.status == TaskStatus.COMPLETE
 
     def test_approve_task_cancels_critic(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         client.post(f"/tasks/{critic.id}/critic-review-response",
                     json={"action": "approve_task"})
@@ -921,7 +941,7 @@ class TestCriticReviewResponse:
         assert updated_critic.status == TaskStatus.CANCELLED
 
     def test_approve_task_appends_feedback_when_provided(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         client.post(f"/tasks/{critic.id}/critic-review-response",
                     json={"action": "approve_task",
@@ -933,7 +953,7 @@ class TestCriticReviewResponse:
                    for m in updated.context_messages)
 
     def test_extend_critic_returns_critic_to_ready(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         r = client.post(f"/tasks/{critic.id}/critic-review-response",
                         json={"action": "extend_critic"})
@@ -943,7 +963,7 @@ class TestCriticReviewResponse:
         assert updated_critic.status == TaskStatus.READY
 
     def test_extend_critic_increases_turn_limit(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         r = client.post(f"/tasks/{critic.id}/critic-review-response",
                         json={"action": "extend_critic"})
@@ -952,7 +972,7 @@ class TestCriticReviewResponse:
         assert updated_critic.turn_limit > 0
 
     def test_extend_critic_appends_feedback_when_provided(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         client.post(f"/tasks/{critic.id}/critic-review-response",
                     json={"action": "extend_critic",
@@ -963,7 +983,7 @@ class TestCriticReviewResponse:
                    for m in updated_critic.context_messages)
 
     def test_block_task_cancels_critic(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         r = client.post(f"/tasks/{critic.id}/critic-review-response",
                         json={"action": "block_task"})
@@ -973,7 +993,7 @@ class TestCriticReviewResponse:
         assert updated_critic.status == TaskStatus.CANCELLED
 
     def test_block_task_moves_reviewed_to_blocked_by_human(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         client.post(f"/tasks/{critic.id}/critic-review-response",
                     json={"action": "block_task"})
@@ -982,7 +1002,7 @@ class TestCriticReviewResponse:
         assert updated.status == TaskStatus.BLOCKED_BY_HUMAN
 
     def test_block_task_appends_feedback_to_notes(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         client.post(f"/tasks/{critic.id}/critic-review-response",
                     json={"action": "block_task",
@@ -992,14 +1012,14 @@ class TestCriticReviewResponse:
         assert "Needs complete rewrite." in updated.notes
 
     def test_invalid_action_returns_400(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         r = client.post(f"/tasks/{critic.id}/critic-review-response",
                         json={"action": "invalid"})
         assert r.status_code == 400
 
     def test_requires_blocked_by_human_status(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
         critic.status = TaskStatus.READY
         q.update(critic)
@@ -1008,7 +1028,7 @@ class TestCriticReviewResponse:
         assert r.status_code == 400
 
     def test_requires_reviews_task_id(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         task = Task(title="t", description="d",
                     role=AgentRole.CRITIC, repo=["r"],
                     status=TaskStatus.BLOCKED_BY_HUMAN)
@@ -1018,13 +1038,13 @@ class TestCriticReviewResponse:
         assert r.status_code == 400
 
     def test_404_for_unknown_task(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         r = client.post("/tasks/nonexistent/critic-review-response",
                         json={"action": "approve_task"})
         assert r.status_code == 404
 
     def test_404_when_reviewed_task_missing(self, state_client):
-        client, q, ws = state_client
+        client, q, ws, ws_state_repo = state_client
         critic = Task(title="critic", description="d",
                       role=AgentRole.CRITIC, repo=["r"],
                       status=TaskStatus.BLOCKED_BY_HUMAN)

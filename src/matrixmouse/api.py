@@ -75,6 +75,10 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from matrixmouse.repository.task_repository import TaskRepository
+from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
+from matrixmouse.task import Task
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -124,10 +128,11 @@ def clear_stop_requested() -> None:
 # Module-level state — injected at startup by the orchestrator
 # ---------------------------------------------------------------------------
 
-_queue: Any = None           # TaskQueue
+_queue: TaskRepository       # TaskRepository
 _status: dict = {}           # live agent status dict (mutated by orchestrator)
 _workspace_root: Path | None = None
 _config: Any = None          # MatrixMouseConfig
+_ws_state_repo: WorkspaceStateRepository | None = None
 
 
 def configure(
@@ -135,16 +140,18 @@ def configure(
     status: dict,
     workspace_root: Path,
     config: Any,
+    ws_state_repo: WorkspaceStateRepository,
 ) -> None:
     """
     Inject runtime state into the API module.
     Called once at startup before uvicorn starts.
     """
-    global _queue, _status, _workspace_root, _config
+    global _queue, _status, _workspace_root, _config, _ws_state_repo
     _queue = queue
     _status = status
     _workspace_root = workspace_root
     _config = config
+    _ws_state_repo = ws_state_repo
     logger.info("API module configured. Workspace: %s", workspace_root)
 
 
@@ -390,10 +397,7 @@ async def cancel_task(task_id: str):
     if task.status.is_terminal:
         return {"ok": True, "message": f"Task already {task.status.value}."}
 
-    from matrixmouse.task import TaskStatus
-    task.status = TaskStatus.CANCELLED
-    task.completed_at = datetime.now(timezone.utc).isoformat()
-    queue.update(task)
+    queue.mark_cancelled(task.id)
 
     logger.info("Task cancelled via API: [%s] %s", task.id, task.title)
     return {"ok": True, "id": task_id}
@@ -879,7 +883,6 @@ async def answer_task(task_id: str, body: TaskAnswerRequest):
     mid-task guidance on a running task, use POST /tasks/{task_id}/interject.
     """
     from matrixmouse.task import TaskStatus
-    from matrixmouse import workspace_state as ws
 
     queue = _require_queue()
     task = queue.get(task_id)
@@ -895,10 +898,8 @@ async def answer_task(task_id: str, body: TaskAnswerRequest):
         "content": msg,
     })
 
-    # Clear the pending question — it has been answered
     task.pending_question = ""
 
-    # Unblock the task if it was blocked waiting for human input
     was_blocked = task.status == TaskStatus.BLOCKED_BY_HUMAN
     if was_blocked:
         task.status = TaskStatus.READY
@@ -906,31 +907,26 @@ async def answer_task(task_id: str, body: TaskAnswerRequest):
     queue.update(task)
 
     # Cancel any stale clarification Manager task created for this task
-    workspace = _require_workspace()
-    state_file = workspace / ".matrixmouse" / "workspace_state.json"
-    try:
-        state = ws.load(state_file)
-        stale_manager_task_id = ws.get_stale_clarification_task(state, task_id)
-        if stale_manager_task_id:
-            stale_task = queue.get(stale_manager_task_id)
-            if stale_task and not stale_task.status.is_terminal:
-                from matrixmouse.task import TaskStatus as TS
-                stale_task.status = TS.CANCELLED
-                from datetime import datetime, timezone
-                stale_task.completed_at = datetime.now(timezone.utc).isoformat()
-                queue.update(stale_task)
-                logger.info(
-                    "Cancelled stale clarification Manager task [%s] "
-                    "after direct answer for task [%s].",
-                    stale_manager_task_id, task_id,
-                )
-            ws.clear_stale_clarification_task(state, task_id)
-            ws.save(state_file, state)
-    except Exception as e:
-        logger.warning(
-            "Failed to cancel stale clarification task for [%s]: %s",
-            task_id, e,
-        )
+    if _ws_state_repo is not None:
+        try:
+            stale_manager_task_id = _ws_state_repo.get_stale_clarification_task(
+                task_id
+            )
+            if stale_manager_task_id:
+                stale_task = queue.get(stale_manager_task_id)
+                if stale_task is not None and not stale_task.status.is_terminal:
+                    queue.mark_cancelled(stale_manager_task_id)
+                    logger.info(
+                        "Cancelled stale clarification Manager task [%s] "
+                        "after direct answer for task [%s].",
+                        stale_manager_task_id, task_id,
+                    )
+                _ws_state_repo.clear_stale_clarification_task(task_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to cancel stale clarification task for [%s]: %s",
+                task_id, e,
+            )
 
     if was_blocked:
         notify_task_available()
@@ -942,9 +938,9 @@ async def answer_task(task_id: str, body: TaskAnswerRequest):
         msg[:80],
     )
     return {
-        "ok":          True,
-        "task_id":     task_id,
-        "unblocked":   was_blocked,
+        "ok":        True,
+        "task_id":   task_id,
+        "unblocked": was_blocked,
     }
 
 
@@ -1017,18 +1013,9 @@ async def critic_review_response(task_id: str, body: CriticReviewResponseRequest
             })
 
         # Remove Critic task from reviewed task's blocked_by
-        if task_id in reviewed_task.blocked_by:
-            reviewed_task.blocked_by.remove(task_id)
-
-        reviewed_task.status = TaskStatus.COMPLETE
-        reviewed_task.completed_at = datetime.now(timezone.utc).isoformat()
-        queue.update(reviewed_task)
-        queue._unblock_dependents(reviewed_task.id)
-
-        # Cancel the Critic task
-        critic_task.status = TaskStatus.CANCELLED
-        critic_task.completed_at = datetime.now(timezone.utc).isoformat()
-        queue.update(critic_task)
+        queue.remove_dependency(task_id, reviewed_task.id)
+        queue.mark_complete(reviewed_task.id)
+        queue.mark_cancelled(task_id)
 
         notify_task_available()
         logger.info(
@@ -1068,20 +1055,23 @@ async def critic_review_response(task_id: str, body: CriticReviewResponseRequest
         }
 
     elif action == "block_task":
-        # Cancel the Critic task
-        critic_task.status = TaskStatus.CANCELLED
-        critic_task.completed_at = datetime.now(timezone.utc).isoformat()
-        queue.update(critic_task)
+        queue.mark_cancelled(task_id)
+        queue.remove_dependency(task_id, reviewed_task.id)
 
-        # Move reviewed task to BLOCKED_BY_HUMAN
-        if task_id in reviewed_task.blocked_by:
-            reviewed_task.blocked_by.remove(task_id)
-        reviewed_task.status = TaskStatus.BLOCKED_BY_HUMAN
         if feedback:
-            reviewed_task.notes = (
-                reviewed_task.notes + f"\n[Critic review blocked]: {feedback}"
+            # Re-fetch after remove_dependency in case status changed
+            refreshed = queue.get(reviewed_task.id)
+            if refreshed is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Reviewed task '{reviewed_task.id}' not found."
+                )
+            refreshed.notes = (
+                refreshed.notes + f"\n[Critic review blocked]: {feedback}"
             ).strip()
-        queue.update(reviewed_task)
+            queue.update(refreshed)
+
+        queue.mark_blocked_by_human(reviewed_task.id)
 
         logger.info(
             "Critic [%s] — operator blocked reviewed task [%s] for manual review.",
@@ -1671,7 +1661,7 @@ def _inject_decomposition_response(
     so the Manager knows whether to proceed with the split or not.
 
     Args:
-        queue:           The TaskQueue.
+        queue:           The TaskRepository.
         confirmation_id: The confirmation ID from the original event.
         approved:        Whether the operator approved the split.
         reason:          Operator's reason (required on denial).
@@ -1733,7 +1723,7 @@ def _build_interjection_task(
     message: str,
     repo: list[str],
     title_prefix: str,
-) -> "Task":
+) -> Task:
     """
     Build a Manager task from a human interjection message.
 
