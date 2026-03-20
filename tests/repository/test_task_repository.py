@@ -159,12 +159,6 @@ class TestAdd:
         assert repo.get(task.id) is not None
         assert repo.get(task.id).title == "hello"
 
-    def test_duplicate_id_raises_value_error(self, repo):
-        task = make_task()
-        repo.add(task)
-        with pytest.raises(ValueError):
-            repo.add(task)
-
     def test_roundtrip_preserves_all_fields(self, repo):
         task = Task(
             title="roundtrip test",
@@ -198,6 +192,38 @@ class TestAdd:
         assert retrieved.turn_limit == task.turn_limit
         assert retrieved.preempt == task.preempt
         assert retrieved.created_at == task.created_at
+
+    def test_id_collision_regenerates_id(self, repo):
+        """If a task with the same ID already exists, add() retries with a new ID."""
+        t1 = make_task(title="first")
+        repo.add(t1)
+        original_id = t1.id
+
+        # Force a collision by giving t2 the same id as t1
+        t2 = make_task(title="second")
+        t2.id = original_id
+
+        repo.add(t2)
+
+        # t2 should now have a different id
+        assert t2.id != original_id
+        # Both tasks should exist in the repository
+        assert repo.get(original_id) is not None
+        assert repo.get(t2.id) is not None
+        assert repo.get(original_id).title == "first"
+        assert repo.get(t2.id).title == "second"
+
+    def test_id_collision_does_not_raise(self, repo):
+        """add() on a colliding ID should succeed silently, not raise ValueError."""
+        t1 = make_task()
+        repo.add(t1)
+
+        t2 = make_task()
+        t2.id = t1.id  # force collision
+
+        # Should not raise
+        repo.add(t2)
+        assert len(repo.all_tasks()) == 2
 
 
 # ---------------------------------------------------------------------------

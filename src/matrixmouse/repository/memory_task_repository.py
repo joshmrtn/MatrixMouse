@@ -19,11 +19,15 @@ in tests/repository/ runs against both implementations to enforce this.
 from __future__ import annotations
 
 import time
+import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.task import AgentRole, Task, TaskStatus
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -54,8 +58,13 @@ class InMemoryTaskRepository(TaskRepository):
     # ------------------------------------------------------------------
 
     def add(self, task: Task) -> None:
-        if task.id in self._tasks:
-            raise ValueError(f"Task '{task.id}' already exists.")
+        while task.id in self._tasks:
+            old_id = task.id
+            task.id = uuid.uuid4().hex[:16]
+            logger.warning(
+                "Task id collision on %r — regenerating to %r.",
+                old_id, task.id,
+            )
         self._tasks[task.id] = task
         self._blocked_by.setdefault(task.id, set())
         self._blocking.setdefault(task.id, set())
