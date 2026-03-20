@@ -7,9 +7,8 @@ Contains:
     - AgentRole   — which agent type handles a task
     - TaskStatus  — lifecycle states (READY → RUNNING → COMPLETE etc.)
     - Task        — the unit of work
-    - TaskQueue   — workspace-level task queue backed by tasks.json
 
-TaskQueue and Task were previously in orchestrator.py. Extracted here so
+Task was previously in orchestrator.py. Extracted here so
 api.py, scheduling.py, task_tools.py, and orchestrator.py can all import
 from a single location without circular dependencies.
 
@@ -121,7 +120,7 @@ class Task:
                                       repository.get_subtasks()
 
     Identity note: task_id is a 16-character hex string (16^16 possible values).  
-    Global uniqueness is enforced at creation time by TaskQueue.add(). For 
+    Global uniqueness is enforced at creation time by TaskRepository.add(). For 
     terminated tasks, the natural unique identifier is the composite of 
     (id, created_at, completed_at) - relevant if/when we migrate from JSON to 
     database persistence.
