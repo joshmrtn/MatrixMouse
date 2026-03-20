@@ -463,9 +463,8 @@ class MatrixMousePaths:
                 AGENT_NOTES.md              workspace-level agent notes
                                             (used by future workspace-scoped tasks
                                             e.g. Project Manager agent)
-                workspace_state.json        orchestrator-level persistent state 
-                                            (last_manager_review_at, stale clarification 
-                                            task registry)
+                matrixmouse.db              SQLite database - tasks, dependencies, 
+                                            workspace state, stale clarification registry
                 <repo_name>/                per-repo runtime state (not in git)
                     AGENT_NOTES.md          repo-scoped agent working memory
                     agent.log               repo-scoped session log
@@ -488,11 +487,6 @@ class MatrixMousePaths:
         return self.workspace_root / ".matrixmouse"
 
     @property
-    def tasks_file(self) -> Path:
-        """<workspace_root>/.matrixmouse/tasks.json"""
-        return self.mm_dir / "tasks.json"
-
-    @property
     def repos_file(self) -> Path:
         """<workspace_root>/.matrixmouse/repos.json"""
         return self.mm_dir / "repos.json"
@@ -511,6 +505,11 @@ class MatrixMousePaths:
     def workspace_ignore(self) -> Path:
         """<workspace_root>/.matrixmouse/ignore — workspace-wide safety blacklist"""
         return self.mm_dir / "ignore"
+    
+    @property
+    def db_file(self) -> Path:
+        """<workspace_root>/.matrixmouse/matrixmouse.db — SQLite database"""
+        return self.mm_dir / "matrixmouse.db"
 
     @property
     def agent_notes(self) -> Path:
@@ -520,11 +519,6 @@ class MatrixMousePaths:
         For repo-scoped notes, use repo_paths(repo_name).agent_notes.
         """
         return self.mm_dir / "AGENT_NOTES.md"
-
-    @property
-    def workspace_state_file(self) -> Path:
-        """<workspace_root>/.matrixmouse/workspace_state.json"""
-        return self.mm_dir / "workspace_state.json"
 
     def repo_paths(self, repo_name: str) -> "RepoPaths":
         """

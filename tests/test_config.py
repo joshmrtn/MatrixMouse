@@ -127,19 +127,15 @@ class TestPriorityConfig:
 # ---------------------------------------------------------------------------
 
 class TestMatrixMousePaths:
-    def test_workspace_state_file_property(self, tmp_path):
+    def test_db_file_property(self, tmp_path):
         paths = MatrixMousePaths(workspace_root=tmp_path)
-        expected = tmp_path / ".matrixmouse" / "workspace_state.json"
-        assert paths.workspace_state_file == expected
-
-    def test_workspace_state_file_is_path(self, tmp_path):
+        expected = tmp_path / ".matrixmouse" / "matrixmouse.db"
+        assert paths.db_file == expected
+        
+    def test_db_file_is_path(self, tmp_path):
         paths = MatrixMousePaths(workspace_root=tmp_path)
-        assert isinstance(paths.workspace_state_file, Path)
+        assert isinstance(paths.db_file, Path)
 
     def test_mm_dir_property(self, tmp_path):
         paths = MatrixMousePaths(workspace_root=tmp_path)
         assert paths.mm_dir == tmp_path / ".matrixmouse"
-
-    def test_tasks_file_property(self, tmp_path):
-        paths = MatrixMousePaths(workspace_root=tmp_path)
-        assert paths.tasks_file == tmp_path / ".matrixmouse" / "tasks.json"
