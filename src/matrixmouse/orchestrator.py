@@ -36,12 +36,14 @@ from matrixmouse.agents import agent_for_role
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
+from matrixmouse.repository.task_repository import TaskRepository
+from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
 from matrixmouse.router import Router
 from matrixmouse.scheduling import Scheduler
 from matrixmouse.stuck import StuckDetector
-from matrixmouse.task import AgentRole, Task, TaskStatus, TaskQueue
+from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.tools._safety import reconfigure_for_task
-from matrixmouse import workspace_state
+from matrixmouse.repository import SQLiteTaskRepository, SQLiteWorkspaceStateRepository
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +192,8 @@ def _review_is_due(
 
 
 def _build_review_task(
-    queue: TaskQueue,
-    state: dict,
+    queue: TaskRepository,
+    ws_state_repo: WorkspaceStateRepository,
     config: MatrixMouseConfig,
 ) -> Task:
     """
@@ -204,15 +206,15 @@ def _build_review_task(
         - The summary from the previous review cycle
 
     Args:
-        queue:  The workspace TaskQueue.
-        state:  Loaded workspace state dict.
+        queue:  The workspace TaskRepository.
+        ws_state_repo:  WorkspaceStateRepository for review timestamps and summaries.
         config: Active config (used for upcoming task count limit).
 
     Returns:
         Task: A READY Manager task with preempt=True.
     """
     now = datetime.now(timezone.utc)
-    last_review_at = workspace_state.get_last_review_at(state)
+    last_review_at = ws_state_repo.get_last_review_at()
 
     all_tasks = queue.all_tasks()
     completed = queue.completed_ids()
@@ -242,12 +244,12 @@ def _build_review_task(
     upcoming_limit = config.manager_review_upcoming_tasks
     ready_tasks = sorted(
         [t for t in all_tasks
-         if t.status == TaskStatus.READY and t.is_ready(completed)],
+        if t.status == TaskStatus.READY and queue.is_ready(t.id)],
         key=lambda t: t.priority_score(),
     )[:upcoming_limit]
 
     # Previous review summary
-    prev_summary = state.get("last_review_summary", "")
+    prev_summary = ws_state_repo.get_last_review_summary()
 
     # Build description
     sections = [
@@ -373,18 +375,17 @@ class Orchestrator:
         self,
         config: MatrixMouseConfig,
         paths: MatrixMousePaths,
+        queue: TaskRepository,
+        ws_state_repo: WorkspaceStateRepository,
         graph=None,
     ):
         self.config = config
         self.paths = paths
         self.graph = graph
 
-        self.queue = TaskQueue(paths.tasks_file)
+        self.queue = queue
+        self._ws_state_repo = ws_state_repo
         self._router = Router(config)
-
-        # Load workspace state before constructing the scheduler so the
-        # stale clarification callback has access to it immediately.
-        self._ws_state = workspace_state.load(paths.workspace_state_file)
 
         self._scheduler = Scheduler(
             config,
@@ -417,6 +418,7 @@ class Orchestrator:
             status=self._status,
             workspace_root=self.paths.workspace_root,
             config=self.config,
+            ws_state_repo=self._ws_state_repo,
         )
 
     # -----------------------------------------------------------------------
@@ -443,13 +445,6 @@ class Orchestrator:
         self._update_status(idle=True)
 
         while True:
-            try:
-                self.queue.reload()
-            except Exception as e:
-                logger.error("Failed to reload task queue: %s", e)
-                self._wait_on_condition(condition)
-                continue
-
             # --- Daily review injection ---
             self._maybe_inject_manager_review()
 
@@ -516,7 +511,7 @@ class Orchestrator:
         if not schedule:
             return
 
-        last_review_at = workspace_state.get_last_review_at(self._ws_state)
+        last_review_at = self._ws_state_repo.get_last_review_at()
 
         if not _review_is_due(schedule, last_review_at):
             return
@@ -541,7 +536,7 @@ class Orchestrator:
 
         try:
             review_task = _build_review_task(
-                self.queue, self._ws_state, self.config
+                self.queue, self._ws_state_repo, self.config
             )
             self.queue.add(review_task)
             logger.info(
@@ -551,7 +546,7 @@ class Orchestrator:
         except Exception as e:
             logger.error("Failed to inject Manager review task: %s", e)
 
-    def _on_manager_review_complete(self, task: Task, summary: str) -> None:
+    def _on_manager_review_complete(self, summary: str) -> None:
         """
         Update workspace state when a Manager review task completes.
 
@@ -562,12 +557,9 @@ class Orchestrator:
             task:    The completed Manager review task.
             summary: The completion summary from declare_complete.
         """
-        workspace_state.set_last_review_at(self._ws_state)
-        self._ws_state["last_review_summary"] = summary
-        workspace_state.save(self.paths.workspace_state_file, self._ws_state)
-        logger.info(
-            "Manager review complete. last_manager_review_at updated."
-        )
+        self._ws_state_repo.set_last_review_at()
+        self._ws_state_repo.set_last_review_summary(summary)
+        logger.info("Manager review complete. last_manager_review_at updated.")
 
     # -----------------------------------------------------------------------
     # Stale clarification handling
@@ -593,8 +585,8 @@ class Orchestrator:
             blocked_since: ISO timestamp when the task was blocked.
         """
         # Check for existing stale clarification task in workspace state
-        existing_manager_task_id = workspace_state.get_stale_clarification_task(
-            self._ws_state, task_id
+        existing_manager_task_id = self._ws_state_repo.get_stale_clarification_task(
+            task_id
         )
         if existing_manager_task_id:
             # Verify the task still exists and is non-terminal
@@ -607,10 +599,7 @@ class Orchestrator:
                 )
                 return
             # Task completed or was cancelled — clear the record
-            workspace_state.clear_stale_clarification_task(
-                self._ws_state, task_id
-            )
-            workspace_state.save(self.paths.workspace_state_file, self._ws_state)
+            self._ws_state_repo.clear_stale_clarification_task(task_id)
 
         blocked_task = self.queue.get(task_id)
         if blocked_task is None:
@@ -645,10 +634,10 @@ class Orchestrator:
 
         try:
             self.queue.add(manager_task)
-            workspace_state.register_stale_clarification_task(
-                self._ws_state, task_id, manager_task.id
+            self._ws_state_repo.register_stale_clarification_task(
+                task_id, manager_task.id
             )
-            workspace_state.save(self.paths.workspace_state_file, self._ws_state)
+
             logger.info(
                 "Stale clarification Manager task [%s] created for "
                 "blocked task [%s].",
@@ -857,7 +846,7 @@ class Orchestrator:
             # If this was a scheduled review task, update workspace state
             if task.title.startswith("[Manager Review]"):
                 self._on_manager_review_complete(
-                    task, result.completion_summary or ""
+                    result.completion_summary or ""
                 )
             logger.info("Manager task [%s] complete.", task.id)
             return
@@ -902,10 +891,8 @@ class Orchestrator:
             self._notify_task_complete(task)
             return
 
-        task.blocked_by.append(critic_task.id)
-        task.status = TaskStatus.BLOCKED_BY_TASK
         try:
-            self.queue.update(task)
+            self.queue.add_dependency(critic_task.id, task.id)
         except Exception as e:
             logger.error(
                 "Failed to block task [%s] on Critic task [%s]: %s",

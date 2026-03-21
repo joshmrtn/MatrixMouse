@@ -35,6 +35,9 @@ Do not add file, git, or navigation tools here.
 import logging
 from typing import Optional
 
+from matrixmouse.config import MatrixMouseConfig
+from matrixmouse.repository.task_repository import TaskRepository
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,25 +45,25 @@ logger = logging.getLogger(__name__)
 # Module-level state — set by configure()
 # ---------------------------------------------------------------------------
 
-_queue: Optional["TaskQueue"] = None
+_queue: Optional[TaskRepository] = None
 _active_task_id: Optional[str] = None
-_config: Optional["MatrixMouseConfig"] = None
+_config: Optional[MatrixMouseConfig] = None
 
 
 def configure(
-    queue: "TaskQueue",
+    queue: TaskRepository,
     active_task_id: Optional[str] = None,
-    config: Optional["MatrixMouseConfig"] = None,
+    config: Optional[MatrixMouseConfig] = None,
 ) -> None:
     """
-    Inject the task queue, active task ID, and config.
+    Inject the task repository, active task ID, and config.
 
     Called by the orchestrator at the start of each task so tools
     can read and mutate the correct task and respect config values
     such as decomposition_depth_limit.
 
     Args:
-        queue:          The workspace-level TaskQueue.
+        queue:          The workspace-level TaskRepository.
         active_task_id: ID of the task currently being worked on.
         config:         MatrixMouseConfig instance. Used for depth
                         limit enforcement in split_task. If None,
@@ -73,7 +76,7 @@ def configure(
     logger.debug("task_tools configured. Active task: %s", active_task_id)
 
 
-def _require_queue() -> "TaskQueue":
+def _require_queue() -> TaskRepository:
     if _queue is None:
         raise RuntimeError(
             "task_tools not configured. "
@@ -248,8 +251,6 @@ def split_task(
             PENDING_CONFIRMATION sentinel if depth limit applies, or
             an error message if the operation failed.
     """
-    # TODO: Handle concurrent write race condition when multi-threading is implemented
-    # TODO: Handle transactional (atomic) updates to task graph with thread-safe logic
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
     queue = _require_queue()
@@ -338,43 +339,32 @@ def split_task(
             "urgency":      max(0.0, min(1.0, sub.get("urgency",    parent.urgency))),
         })
 
+    proposed_titles = [s["title"] for s in validated]
+    if len(proposed_titles) != len(set(proposed_titles)):
+        return "ERROR: Duplicate subtask titles in the same split are not allowed."
     # --- Create subtasks atomically ---
-    # All validation passed. Create them all. If any fails (e.g. a cycle
-    # that wasn't caught in pre-validation due to a concurrent write),
-    # roll back by marking the parent unblocked if no subtasks were added.
-    created_ids = []
+    # New subtasks are isolated nodes with no existing edges — cycles
+    # cannot form from this operation alone. add_subtasks handles cycle
+    # detection defensively and rolls back atomically if needed.
+    task_objects = []
+    for sub in validated:
+        subtask = Task(
+            title=sub["title"],
+            description=sub["description"],
+            role=sub["role"],
+            repo=list(parent.repo),
+            target_files=sub["target_files"],
+            importance=sub["importance"],
+            urgency=sub["urgency"],
+            depth=parent.depth + 1,
+            parent_task_id=task_id,
+        )
+        task_objects.append(subtask)
+
     try:
-        for sub in validated:
-            subtask = queue.add_subtask(
-                parent_id=task_id,
-                title=sub["title"],
-                description=sub["description"],
-                role=sub["role"],
-                target_files=sub["target_files"],
-                importance=sub["importance"],
-                urgency=sub["urgency"],
-            )
-            created_ids.append(subtask.id)
-            logger.info(
-                "Subtask [%s] '%s' created under [%s].",
-                subtask.id, subtask.title, task_id,
-            )
+        created = queue.add_subtasks(task_id, task_objects)
     except ValueError as e:
-        # Cycle detected mid-creation. The queue rolled back the failing
-        # subtask but previously created subtasks in this batch are not
-        # automatically rolled back. Log which ones were created.
-        if created_ids:
-            logger.error(
-                "Cycle detected during split_task on task [%s]. "
-                "Partially created subtasks: %s. Manual cleanup may be required.",
-                task_id, created_ids,
-            )
-            return (
-                f"ERROR: Dependency cycle detected while creating subtask. "
-                f"Some subtasks were created before the cycle was detected: "
-                f"{created_ids}. Please review the task graph."
-            )
-        return f"ERROR: Dependency cycle detected: {e}"
+        return f"ERROR: {e}"
     except Exception as e:
         logger.error(
             "Unexpected error during split_task on task [%s]: %s",
@@ -383,13 +373,15 @@ def split_task(
         return f"ERROR: Failed to create subtasks: {e}"
 
     lines = [
-        f"OK: Task '{task_id}' split into {len(created_ids)} subtask(s).",
+        f"OK: Task '{task_id}' split into {len(created)} subtask(s).",
         f"Parent task is now BLOCKED_BY_TASK until all subtasks complete.",
         "",
         "Subtasks created:",
     ]
-    for sid, sub in zip(created_ids, validated):
-        lines.append(f"  [{sid}] ({sub['role'].value}) {sub['title']}")
+    for subtask in created:
+        lines.append(
+            f"  [{subtask.id}] ({subtask.role.value}) {subtask.title}"
+        )
 
     return "\n".join(lines)
 
@@ -486,67 +478,28 @@ def update_task(
     # --- Dependency graph updates ---
     if remove_blocked_by:
         for dep_id in remove_blocked_by:
-            if dep_id in task.blocked_by:
-                task.blocked_by.remove(dep_id)
-                # Also remove the reverse reference
-                dep_task = queue.get(dep_id)
-                if dep_task and task_id in dep_task.blocking:
-                    dep_task.blocking.remove(task_id)
-                    try:
-                        queue.update(dep_task)
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to update reverse blocking ref on [%s]: %s",
-                            dep_id, e,
-                        )
+            queue.remove_dependency(dep_id, task_id)
         changes.append("blocked_by (removed)")
 
         # If task was BLOCKED_BY_TASK and is now unblocked, set to READY
         if (task.status == TaskStatus.BLOCKED_BY_TASK
-                and task.is_ready(queue.completed_ids())):
+                and queue.is_ready(task_id)):
             task.status = TaskStatus.READY
+            queue.update(task)
             changes.append("status → READY")
 
     if add_blocked_by:
         for dep_id in add_blocked_by:
-            dep_task = queue.get(dep_id)
-            if dep_task is None:
-                return f"ERROR: Cannot add dependency on '{dep_id}' — task not found."
-            if dep_id not in task.blocked_by:
-                task.blocked_by.append(dep_id)
-            # Add reverse reference
-            if task_id not in dep_task.blocking:
-                dep_task.blocking.append(task_id)
-                try:
-                    queue.update(dep_task)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to update reverse blocking ref on [%s]: %s",
-                        dep_id, e,
-                    )
-
-        # Cycle check after adding all new dependencies
-        cycle = queue._find_cycle(task_id)
-        if cycle:
-            # Roll back: remove the deps we just added
+            if queue.get(dep_id) is None:
+                return (
+                    f"ERROR: Cannot add dependency on '{dep_id}' "
+                    f"— task not found."
+                )
+        try:
             for dep_id in add_blocked_by:
-                if dep_id in task.blocked_by:
-                    task.blocked_by.remove(dep_id)
-                dep_task = queue.get(dep_id)
-                if dep_task and task_id in dep_task.blocking:
-                    dep_task.blocking.remove(task_id)
-                    try:
-                        queue.update(dep_task)
-                    except Exception:
-                        pass
-            return (
-                f"ERROR: Adding these dependencies would create a cycle: "
-                f"{' → '.join(cycle)}. No changes made."
-            )
-
-        if task.status == TaskStatus.READY:
-            task.status = TaskStatus.BLOCKED_BY_TASK
-            changes.append("status → BLOCKED_BY_TASK")
+                queue.add_dependency(dep_id, task_id)
+        except ValueError as e:
+            return f"ERROR: {e}"
         changes.append("blocked_by (added)")
 
     if not changes:
@@ -610,10 +563,12 @@ def get_task_info(task_id: Optional[str] = None) -> str:
         lines.append(f"\nDescription:\n{task.description}")
     if task.notes:
         lines.append(f"\nNotes:\n{task.notes}")
-    if task.blocked_by:
-        lines.append(f"\nBlocked by: {', '.join(task.blocked_by)}")
-    if task.subtasks:
-        lines.append(f"Subtasks:   {', '.join(task.subtasks)}")
+    blocked_by = queue.get_blocked_by(tid)
+    if blocked_by:
+        lines.append(f"\nBlocked by: {', '.join(t.id for t in blocked_by)}")
+    subtasks = queue.get_subtasks(tid)
+    if subtasks:
+        lines.append(f"Subtasks:   {', '.join(t.id for t in subtasks)}")
     if task.parent_task_id:
         lines.append(f"Parent:     {task.parent_task_id}")
     if task.reviews_task_id:
@@ -731,16 +686,9 @@ def approve() -> str:
         )
 
     # Remove the Critic task from the reviewed task's blocked_by
-    if _active_task_id in reviewed_task.blocked_by:
-        reviewed_task.blocked_by.remove(_active_task_id)
-
-    # Mark reviewed task COMPLETE
-    reviewed_task.status = TaskStatus.COMPLETE
-    from datetime import datetime, timezone
-    reviewed_task.completed_at = datetime.now(timezone.utc).isoformat()
     try:
-        queue.update(reviewed_task)
-        queue._unblock_dependents(reviewed_task.id)
+        queue.remove_dependency(_active_task_id, reviewed_task.id)
+        queue.mark_complete(reviewed_task.id)
     except Exception as e:
         return f"ERROR: Failed to mark reviewed task complete: {e}"
 
@@ -818,11 +766,8 @@ def deny(feedback: str) -> str:
     })
 
     # Remove Critic task from reviewed task's blocked_by and set back to READY
-    if _active_task_id in reviewed_task.blocked_by:
-        reviewed_task.blocked_by.remove(_active_task_id)
-
-    reviewed_task.status = TaskStatus.READY
     try:
+        queue.remove_dependency(_active_task_id, reviewed_task.id)
         queue.update(reviewed_task)
     except Exception as e:
         return f"ERROR: Failed to return reviewed task to READY: {e}"

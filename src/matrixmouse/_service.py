@@ -33,6 +33,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from matrixmouse.repository.sqlite_task_repository import SQLiteTaskRepository
+from matrixmouse.repository.sqlite_workspace_state_repository import SQLiteWorkspaceStateRepository
 from matrixmouse.utils.logging_utils import setup_logging
 
 # ---------------------------------------------------------------------------
@@ -120,11 +122,11 @@ def _stop_ollama_models() -> None:
 
     # Collect all unique model names across all roles
     model_fields = [
-        getattr(_config, "coder_model",      None),
-        getattr(_config, "manager_model",    None),
-        getattr(_config, "summarizer_model", None),
-        getattr(_config, "critic_model",     None), 
-        getattr(_config, "writer_model",     None),
+        _config.coder_model,
+        _config.manager_model,
+        _config.summarizer_model,
+        _config.critic_model,
+        _config.writer_model,
     ]
 
     # coder_cascade is a list — flatten it
@@ -370,7 +372,15 @@ def main() -> None:
         comms.configure(_config)
 
         # --- Orchestrator ---
-        orchestrator = Orchestrator(config=_config, paths=paths, graph=graphs)
+        queue = SQLiteTaskRepository(paths.db_file)
+        ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
+        orchestrator = Orchestrator(
+            config=_config,
+            paths=paths,
+            queue=queue,
+            ws_state_repo=ws_state_repo,
+            graph=graphs,
+        )
         orchestrator.configure_api()
 
         # --- Pause on startup ---
@@ -387,7 +397,7 @@ def main() -> None:
         start_server(_config, paths)
         logger.info(
             "Web server started on port %d",
-            getattr(_config, "server_port", 8080),
+            _config.server_port,
         )
 
         # --- Run forever ---

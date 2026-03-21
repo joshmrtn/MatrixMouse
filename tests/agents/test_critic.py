@@ -34,13 +34,13 @@ Coverage:
         - Critic task moved to BLOCKED_BY_HUMAN on turn limit
 """
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from matrixmouse.agents.critic import CriticAgent
-from matrixmouse.task import AgentRole, Task, TaskQueue, TaskStatus
+from matrixmouse.task import AgentRole, Task, TaskStatus
+from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
+from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
 from matrixmouse.tools import task_tools
 from matrixmouse.loop import LoopExitReason, LoopResult
 
@@ -74,25 +74,47 @@ def make_critic_task(reviewed_id: str) -> Task:
     return task
 
 
-def make_queue(tmp_path: Path) -> TaskQueue:
-    f = tmp_path / "tasks.json"
-    f.write_text("[]")
-    return TaskQueue(f)
+def make_repo() -> InMemoryTaskRepository:
+    return InMemoryTaskRepository()
 
 
-def setup_critic_review(tmp_path):
+def setup_critic_review():
     """Set up a standard Critic reviewing a Coder task."""
     reviewed = make_task(title="reviewed task", role=AgentRole.CODER)
     critic = make_critic_task(reviewed.id)
-    reviewed.blocked_by = [critic.id]
-    reviewed.status = TaskStatus.BLOCKED_BY_TASK
 
-    q = make_queue(tmp_path)
+    q = make_repo()
     q.add(reviewed)
     q.add(critic)
+    q.add_dependency(critic.id, reviewed.id)
     task_tools.configure(queue=q, active_task_id=critic.id, config=MagicMock())
     return q, reviewed, critic
 
+class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
+    def __init__(self):
+        self._store: dict = {}
+        self._stale: dict = {}
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def set(self, key, value):
+        self._store[key] = value
+
+    def delete(self, key):
+        self._store.pop(key, None)
+
+    def get_stale_clarification_task(self, blocked_task_id):
+        return self._stale.get(blocked_task_id)
+
+    def register_stale_clarification_task(self, blocked_task_id, manager_task_id):
+        self._stale[blocked_task_id] = manager_task_id
+
+    def clear_stale_clarification_task(self, blocked_task_id):
+        self._stale.pop(blocked_task_id, None)
+
+    def all_stale_clarification_tasks(self):
+        return dict(self._stale)
 
 # ---------------------------------------------------------------------------
 # build_system_prompt
@@ -130,40 +152,38 @@ class TestCriticBuildSystemPrompt:
 # ---------------------------------------------------------------------------
 
 class TestApproveFlow:
-    def test_approve_marks_reviewed_task_complete(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_approve_marks_reviewed_task_complete(self):
+        q, reviewed, critic = setup_critic_review()
         task_tools.approve()
         result = q.get(reviewed.id)
         assert result is not None
         assert result.status == TaskStatus.COMPLETE
 
-    def test_approve_marks_critic_task_complete(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_approve_marks_critic_task_complete(self):
+        q, reviewed, critic = setup_critic_review()
         task_tools.approve()
         result= q.get(critic.id)
         assert result is not None
         assert result.status == TaskStatus.COMPLETE
 
-    def test_approve_removes_critic_from_blocked_by(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_approve_removes_critic_from_blocked_by(self):
+        q, reviewed, critic = setup_critic_review()
         task_tools.approve()
-        result = q.get(reviewed.id)
-        assert result is not None
-        assert critic.id not in result.blocked_by
+        assert not q.has_blockers(reviewed.id)
 
-    def test_approve_returns_ok(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_approve_returns_ok(self):
+        q, reviewed, critic = setup_critic_review()
         result = task_tools.approve()
         assert "OK" in result
 
-    def test_approve_error_when_no_active_task(self, tmp_path):
-        q = make_queue(tmp_path)
+    def test_approve_error_when_no_active_task(self):
+        q = make_repo()
         task_tools.configure(queue=q, active_task_id=None, config=MagicMock())
         assert "ERROR" in task_tools.approve()
 
-    def test_approve_error_when_no_reviews_task_id(self, tmp_path):
+    def test_approve_error_when_no_reviews_task_id(self):
         task = make_task(role=AgentRole.CRITIC)
-        q = make_queue(tmp_path)
+        q = make_repo()
         q.add(task)
         task_tools.configure(queue=q, active_task_id=task.id, config=MagicMock())
         assert "ERROR" in task_tools.approve()
@@ -174,15 +194,15 @@ class TestApproveFlow:
 # ---------------------------------------------------------------------------
 
 class TestDenyFlow:
-    def test_deny_returns_reviewed_task_to_ready(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_deny_returns_reviewed_task_to_ready(self):
+        q, reviewed, critic = setup_critic_review()
         task_tools.deny("Missing error handling.")
         result = q.get(reviewed.id)
         assert result is not None
         assert result.status == TaskStatus.READY
 
-    def test_deny_appends_feedback_to_context_messages(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_deny_appends_feedback_to_context_messages(self):
+        q, reviewed, critic = setup_critic_review()
         task_tools.deny("The tests were deleted.")
         result = q.get(reviewed.id)
         assert result is not None
@@ -192,27 +212,27 @@ class TestDenyFlow:
             for m in messages
         )
 
-    def test_deny_marks_critic_task_complete(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_deny_marks_critic_task_complete(self):
+        q, reviewed, critic = setup_critic_review()
         task_tools.deny("Needs more work.")
         result = q.get(critic.id)
         assert result is not None
         assert result.status == TaskStatus.COMPLETE
 
-    def test_deny_returns_ok(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_deny_returns_ok(self):
+        q, reviewed, critic = setup_critic_review()
         assert "OK" in task_tools.deny("Feedback here.")
 
-    def test_deny_empty_feedback_returns_error(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_deny_empty_feedback_returns_error(self):
+        q, reviewed, critic = setup_critic_review()
         assert "ERROR" in task_tools.deny("")
 
-    def test_deny_whitespace_feedback_returns_error(self, tmp_path):
-        q, reviewed, critic = setup_critic_review(tmp_path)
+    def test_deny_whitespace_feedback_returns_error(self):
+        q, reviewed, critic = setup_critic_review()
         assert "ERROR" in task_tools.deny("   ")
 
-    def test_deny_error_when_no_active_task(self, tmp_path):
-        q = make_queue(tmp_path)
+    def test_deny_error_when_no_active_task(self):
+        q = make_repo()
         task_tools.configure(queue=q, active_task_id=None, config=MagicMock())
         assert "ERROR" in task_tools.deny("feedback")
 
@@ -224,19 +244,6 @@ class TestDenyFlow:
 class TestCriticTurnLimitEscalation:
     def _make_orchestrator(self, tmp_path):
         from matrixmouse.orchestrator import Orchestrator
-        from matrixmouse.config import MatrixMousePaths
-
-        tasks_file = tmp_path / ".matrixmouse" / "tasks.json"
-        tasks_file.parent.mkdir(parents=True)
-        tasks_file.write_text("[]")
-
-        paths = MagicMock(spec=MatrixMousePaths)
-        paths.tasks_file = tasks_file
-        paths.workspace_state_file = (
-            tmp_path / ".matrixmouse" / "workspace_state.json"
-        )
-        paths.workspace_root = tmp_path
-        paths.agent_notes = tmp_path / ".matrixmouse" / "AGENT_NOTES.md"
 
         cfg = MagicMock()
         cfg.manager_review_schedule = ""
@@ -247,7 +254,16 @@ class TestCriticTurnLimitEscalation:
         cfg.priority_importance_weight = 0.6
         cfg.priority_urgency_weight = 0.4
 
-        return Orchestrator(config=cfg, paths=paths)
+        paths = MagicMock()
+        paths.workspace_root = tmp_path
+        paths.agent_notes = tmp_path / "AGENT_NOTES.md"
+
+        return Orchestrator(
+            config=cfg,
+            paths=paths,
+            queue=InMemoryTaskRepository(),
+            ws_state_repo=InMemoryWorkspaceStateRepository(),
+        )
 
     def test_critic_task_blocked_on_turn_limit(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
