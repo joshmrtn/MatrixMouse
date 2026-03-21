@@ -176,27 +176,15 @@ class SQLiteTaskRepository(TaskRepository):
     # ------------------------------------------------------------------
 
     def add(self, task: Task) -> None:
+        self._ensure_unique_id(task)
         conn = self._conn()
-        # Retry on id collision — astronomically unlikely with 16-char hex
-        # (16^16 possible values) but worth handling cleanly rather than
-        # surfacing a raw IntegrityError to the caller.
-        while True:
-            try:
-                with conn:
-                    conn.execute(_INSERT_SQL, _task_to_params(task))
-                logger.info("Task added: [%s] %s", task.id, task.title)
-                return
-            except Exception as e:
-                if "UNIQUE constraint" in str(e):
-                    old_id = task.id
-                    task.id = uuid.uuid4().hex[:16]
-                    logger.warning(
-                        "Task id collision on %r — regenerating to %r. "
-                        "This should essentially never happen.",
-                        old_id, task.id,
-                    )
-                else:
-                    raise
+        try:
+            with conn:
+                conn.execute(_INSERT_SQL, _task_to_params(task))
+        except Exception as e:
+            if "UNIQUE constraint" in str(e):
+                raise ValueError(f"Task '{task.id}' already exists.") from e
+            raise
 
     def get(self, task_id: str) -> Task | None:
         conn = self._conn()
@@ -609,6 +597,7 @@ class SQLiteTaskRepository(TaskRepository):
             last_modified=now,
             **kwargs,
         )
+        self._ensure_unique_id(subtask)
 
         conn = self._conn()
         with conn:

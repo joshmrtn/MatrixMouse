@@ -60,13 +60,7 @@ class InMemoryTaskRepository(TaskRepository):
     # ------------------------------------------------------------------
 
     def add(self, task: Task) -> None:
-        while task.id in self._tasks:
-            old_id = task.id
-            task.id = uuid.uuid4().hex[:16]
-            logger.warning(
-                "Task id collision on %r — regenerating to %r.",
-                old_id, task.id,
-            )
+        self._ensure_unique_id(task)
         self._tasks[task.id] = task
         self._blocked_by.setdefault(task.id, set())
         self._blocking.setdefault(task.id, set())
