@@ -4,6 +4,7 @@ tests/test_api.py
 Tests for matrixmouse.api — control endpoints added in refactor/web-server.
 """
 
+from datetime import datetime, timezone
 import os
 import signal
 from pathlib import Path
@@ -47,6 +48,9 @@ class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
     def __init__(self):
         self._store: dict = {}
         self._stale: dict = {}
+        self._repo_metadata: dict = {}
+        self._sessions: dict = {}
+        self._merge_locks: dict = {}
 
     def get(self, key):
         return self._store.get(key)
