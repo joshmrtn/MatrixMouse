@@ -197,7 +197,7 @@ You may also set this globally in Ollama's systemd service.
 - [x] Streaming and thinking control per role
 - [x] Flexible task planning ([#5](../../issues/5), [#6](../../issues/6))
 - [x] Tool scoping per agent role ([#6](../../issues/6))
-- [ ] Refactor task persistence ([#14](../../issues/14))
+- [x] Refactor task persistence ([#14](../../issues/14))
 - [ ] Branch-per-task, merge management ([#8](../../issues/8))
 - [ ] LLM backend flexibility ([#10](../../issues/10))
 - [ ] Refactor: Update CLI to current API ([#16](../../issues/16))
