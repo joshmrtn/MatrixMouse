@@ -555,13 +555,13 @@ class TestDependencyMutations:
 
 class TestMarkRunning:
     def test_sets_running_status(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         repo.mark_running(task.id)
         assert repo.get(task.id).status == TaskStatus.RUNNING
 
     def test_sets_time_slice_started(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         before = time.monotonic()
         repo.mark_running(task.id)
@@ -571,14 +571,14 @@ class TestMarkRunning:
         assert before <= ts <= after
 
     def test_sets_started_at_on_first_run(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         assert task.started_at is None
         repo.mark_running(task.id)
         assert repo.get(task.id).started_at is not None
 
     def test_does_not_overwrite_started_at(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         task.started_at = "2026-01-01T00:00:00+00:00"
         repo.add(task)
         repo.mark_running(task.id)
@@ -597,7 +597,7 @@ class TestMarkReady:
         assert repo.get(task.id).status == TaskStatus.READY
 
     def test_clears_time_slice_started(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         repo.mark_running(task.id)
         repo.mark_ready(task.id)
@@ -721,34 +721,38 @@ class TestStateTransitionGuards:
     # --- mark_running ---
 
     def test_mark_running_from_ready_succeeds(self, repo):
-        task = make_task(status=TaskStatus.READY)
+        task = make_task(status=TaskStatus.READY, role=AgentRole.MANAGER)
         repo.add(task)
         repo.mark_running(task.id)
         assert repo.get(task.id).status == TaskStatus.RUNNING
 
     def test_mark_running_from_blocked_by_human_raises(self, repo):
         task = make_task()
+        task.branch = "mm/feature/foo"
         repo.add(task)
         repo.mark_blocked_by_human(task.id, "waiting")
         with pytest.raises(ValueError, match="RUNNING"):
             repo.mark_running(task.id)
 
     def test_mark_running_from_blocked_by_task_raises(self, repo):
-        parent = make_task()
+        # Use Manager to set up parent with branch, then test the status guard
+        parent = make_task(role=AgentRole.MANAGER)
+        parent.branch = "mm/feature/foo"
         repo.add(parent)
-        child = repo.add_subtask(parent.id, "child", "desc")
+        repo.add_subtask(parent.id, "child", "desc")
+        # parent is now BLOCKED_BY_TASK — try to mark it running
         with pytest.raises(ValueError, match="RUNNING"):
             repo.mark_running(parent.id)
 
     def test_mark_running_from_complete_raises(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         repo.mark_complete(task.id)
         with pytest.raises(ValueError, match="RUNNING"):
             repo.mark_running(task.id)
 
     def test_mark_running_from_cancelled_raises(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         repo.mark_cancelled(task.id)
         with pytest.raises(ValueError, match="RUNNING"):
@@ -757,7 +761,7 @@ class TestStateTransitionGuards:
     # --- mark_ready ---
 
     def test_mark_ready_from_running_succeeds(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         repo.mark_running(task.id)
         repo.mark_ready(task.id)
@@ -842,7 +846,7 @@ class TestStateTransitionGuards:
         assert repo.get(task.id).status == TaskStatus.CANCELLED
 
     def test_mark_cancelled_from_running_succeeds(self, repo):
-        task = make_task()
+        task = make_task(role=AgentRole.MANAGER)
         repo.add(task)
         repo.mark_running(task.id)
         repo.mark_cancelled(task.id)
@@ -881,6 +885,50 @@ class TestStateTransitionGuards:
         # Remove the critic dependency — should NOT change status to READY
         repo.remove_dependency(critic.id, reviewed.id)
         assert repo.get(reviewed.id).status == TaskStatus.BLOCKED_BY_HUMAN
+
+    # Branch immutability
+    def test_update_raises_if_branch_changed_after_assignment(self, repo):
+        task = make_task()
+        task.branch = "mm/feature/foo"
+        repo.add(task)
+        task.branch = "mm/feature/bar"
+        with pytest.raises(ValueError, match="immutable"):
+            repo.update(task)
+
+    def test_update_allows_setting_branch_from_empty(self, repo):
+        task = make_task()
+        repo.add(task)
+        task.branch = "mm/feature/foo"
+        repo.update(task)  # should not raise
+        assert repo.get(task.id).branch == "mm/feature/foo"
+
+    def test_update_allows_no_change_to_branch(self, repo):
+        task = make_task()
+        task.branch = "mm/feature/foo"
+        repo.add(task)
+        task.title = "updated title"
+        repo.update(task)  # same branch — should not raise
+        assert repo.get(task.id).title == "updated title"
+
+    # mark_running branch guard
+    def test_mark_running_raises_if_no_branch_non_manager(self, repo):
+        task = make_task(role=AgentRole.CODER)
+        repo.add(task)
+        with pytest.raises(ValueError, match="branch"):
+            repo.mark_running(task.id)
+
+    def test_mark_running_succeeds_with_branch_set(self, repo):
+        task = make_task(role=AgentRole.CODER)
+        task.branch = "mm/feature/foo"
+        repo.add(task)
+        repo.mark_running(task.id)
+        assert repo.get(task.id).status == TaskStatus.RUNNING
+
+    def test_mark_running_manager_without_branch_succeeds(self, repo):
+        task = make_task(role=AgentRole.MANAGER)
+        repo.add(task)
+        repo.mark_running(task.id)  # Manager allowed without branch
+        assert repo.get(task.id).status == TaskStatus.RUNNING
 
 # ---------------------------------------------------------------------------
 # add_subtask
@@ -1238,3 +1286,48 @@ class TestAddSubtasks:
         assert not errors, f"Concurrent add_subtasks errors: {errors}"
         assert len(results) == 2
         assert repo.has_blockers(parent.id)
+
+
+class TestPendingStatus:
+    def test_pending_task_excluded_from_active_tasks(self, repo):
+        task = make_task(status=TaskStatus.PENDING)
+        repo.add(task)
+        assert len(repo.active_tasks()) == 0
+
+    def test_pending_task_included_in_all_tasks(self, repo):
+        task = make_task(status=TaskStatus.PENDING)
+        repo.add(task)
+        assert len(repo.all_tasks()) == 1
+
+    def test_pending_task_is_never_ready(self, repo):
+        task = make_task(status=TaskStatus.PENDING)
+        repo.add(task)
+        assert repo.is_ready(task.id) is False
+
+    def test_pending_task_has_no_blockers(self, repo):
+        task = make_task(status=TaskStatus.PENDING)
+        repo.add(task)
+        assert repo.has_blockers(task.id) is False
+
+    def test_pending_task_not_in_completed_ids(self, repo):
+        task = make_task(status=TaskStatus.PENDING)
+        repo.add(task)
+        assert task.id not in repo.completed_ids()
+
+    def test_scheduler_skips_pending_tasks(self, repo):
+        """Scheduler sees no ready tasks when only PENDING tasks exist."""
+        from matrixmouse.scheduling import Scheduler
+        from unittest.mock import MagicMock
+        cfg = MagicMock()
+        cfg.scheduler_p1_threshold = 0.35
+        cfg.scheduler_p2_threshold = 0.65
+        cfg.clarification_timeout_minutes = 60
+        cfg.priority_aging_rate = 0.0
+        cfg.priority_max_aging_bonus = 0.0
+        cfg.priority_importance_weight = 0.6
+        cfg.priority_urgency_weight = 0.4
+        s = Scheduler(cfg)
+        task = make_task(status=TaskStatus.PENDING)
+        repo.add(task)
+        decision = s.next(repo)
+        assert decision.task is None

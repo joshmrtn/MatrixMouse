@@ -101,6 +101,7 @@ def make_task(
     repo: list[str] | None = None,
     importance=0.5,
     urgency=0.5,
+    branch="mm/feature/test",
     **kwargs,
 ) -> Task:
     return Task(
@@ -110,6 +111,7 @@ def make_task(
         repo=repo if repo is not None else ["repo"],
         importance=importance,
         urgency=urgency,
+        branch=branch,
         **kwargs,
     )
 
@@ -343,6 +345,13 @@ class TestSplitTask:
         setup_tools(active_task=parent)
         result = task_tools.split_task(parent.id, self._subtasks())
         assert "ERROR" in result
+
+    def test_rejects_parent_with_no_branch(self):
+        parent = make_task(title="parent", branch="")  # branch="" triggers guard
+        setup_tools(active_task=parent)
+        result = task_tools.split_task(parent.id, self._subtasks())
+        assert "ERROR" in result
+        assert "branch" in result.lower()
 
     def test_rejects_empty_subtasks_list(self):
         parent = make_task(title="parent")

@@ -274,6 +274,12 @@ def split_task(
         return (
             f"ERROR: Task '{task_id}' is {parent.status.value} and cannot be split."
         )
+    
+    if not parent.branch:
+        return (
+            f"ERROR: Task '{task_id}' has no branch assigned. "
+            f"Call set_branch() to assign a branch before decomposing."
+        )
 
     # --- Depth limit check ---
     depth_limit = _config.decomposition_depth_limit if _config is not None else 3

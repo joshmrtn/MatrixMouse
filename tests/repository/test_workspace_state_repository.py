@@ -296,21 +296,21 @@ class TestMergeLocks:
     def test_acquire_succeeds_when_unlocked(self, ws_repo):
         assert ws_repo.acquire_merge_lock("mm/refactor/foo", "task1") is True
 
-    def test_acquire_fails_when_locked_by_active_task(self, ws_repo, tmp_path):
-        # Need a real task in the DB for the stale check
+    def test_acquire_fails_when_locked_by_active_task(self, tmp_path):
         from matrixmouse.repository.sqlite_task_repository import SQLiteTaskRepository
         from matrixmouse.repository.sqlite_workspace_state_repository import (
             SQLiteWorkspaceStateRepository,
         )
-        if not isinstance(ws_repo, SQLiteWorkspaceStateRepository):
-            pytest.skip("Stale detection requires SQLite — in-memory skips")
-
         db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
         task_repo = SQLiteTaskRepository(db_path)
         ws = SQLiteWorkspaceStateRepository(db_path)
 
-        from matrixmouse.task import Task, AgentRole, TaskStatus
-        t = Task(title="t", description="d", role=AgentRole.CODER, repo=["r"])
+        from matrixmouse.task import Task, AgentRole
+        t = Task(
+            title="t", description="d",
+            role=AgentRole.MANAGER,
+            repo=["r"]
+        )
         task_repo.add(t)
         task_repo.mark_running(t.id)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import copy
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -37,7 +38,7 @@ def _now_iso() -> str:
 
 
 _TERMINAL = {TaskStatus.COMPLETE, TaskStatus.CANCELLED}
-
+_NON_SCHEDULABLE = {TaskStatus.COMPLETE, TaskStatus.CANCELLED, TaskStatus.PENDING}
 
 class InMemoryTaskRepository(TaskRepository):
     """
@@ -61,7 +62,7 @@ class InMemoryTaskRepository(TaskRepository):
 
     def add(self, task: Task) -> None:
         self._ensure_unique_id(task)
-        self._tasks[task.id] = task
+        self._tasks[task.id] = copy.copy(task)  # store a shallow copy
         self._blocked_by.setdefault(task.id, set())
         self._blocking.setdefault(task.id, set())
 
@@ -86,8 +87,14 @@ class InMemoryTaskRepository(TaskRepository):
     def update(self, task: Task) -> None:
         if task.id not in self._tasks:
             raise KeyError(f"Task '{task.id}' not found.")
+        existing = self._tasks[task.id]
+        if existing.branch and task.branch != existing.branch:
+            raise ValueError(
+                f"Task '{task.id}' branch is immutable once set. "
+                f"Cannot change '{existing.branch}' to '{task.branch}'."
+            )
         task.last_modified = _now_iso()
-        self._tasks[task.id] = task
+        self._tasks[task.id] = copy.copy(task)  # store a copy, don't alias
 
     def delete(self, task_id: str) -> None:
         if task_id not in self._tasks:
@@ -111,7 +118,7 @@ class InMemoryTaskRepository(TaskRepository):
     def active_tasks(self) -> list[Task]:
         return [
             t for t in self._tasks.values()
-            if t.status not in _TERMINAL
+            if t.status not in _NON_SCHEDULABLE
         ]
 
     def completed_ids(self) -> set[str]:
@@ -123,6 +130,9 @@ class InMemoryTaskRepository(TaskRepository):
     def is_ready(self, task_id: str) -> bool:
         if task_id not in self._tasks:
             return False
+        task = self._tasks[task_id]
+        if task.status == TaskStatus.PENDING:
+            return False
         blockers = self._blocked_by.get(task_id, set())
         return all(
             self._tasks[bid].status in _TERMINAL
@@ -132,6 +142,9 @@ class InMemoryTaskRepository(TaskRepository):
 
     def has_blockers(self, task_id: str) -> bool:
         if task_id not in self._tasks:
+            return False
+        task = self._tasks[task_id]
+        if task.status == TaskStatus.PENDING:
             return False
         blockers = self._blocked_by.get(task_id, set())
         return any(
@@ -228,6 +241,11 @@ class InMemoryTaskRepository(TaskRepository):
 
     def mark_running(self, task_id: str) -> None:
         task = self._require(task_id)
+        if not task.branch and task.role != AgentRole.MANAGER:
+            raise ValueError(
+                f"Task '{task_id}' (role={task.role.value}) cannot start: "
+                f"no branch assigned. Set a branch before running."
+            )
         if task.status != TaskStatus.READY:
             raise ValueError(
                 f"Task '{task_id}' cannot transition to RUNNING from "

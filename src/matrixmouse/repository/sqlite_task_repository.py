@@ -27,7 +27,7 @@ from matrixmouse.utils.task_utils import detect_cycles
 logger = logging.getLogger(__name__)
 
 _TERMINAL = (TaskStatus.COMPLETE.value, TaskStatus.CANCELLED.value)
-
+_PENDING = (TaskStatus.PENDING.value,)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -219,6 +219,15 @@ class SQLiteTaskRepository(TaskRepository):
         return None
 
     def update(self, task: Task) -> None:
+        # Branch immutability — once set, task.branch cannot be changed
+        existing = self.get(task.id)
+        if existing is None:
+            raise KeyError(f"Task '{task.id}' not found.")
+        if existing.branch and task.branch != existing.branch:
+            raise ValueError(
+                f"Task '{task.id}' branch is immutable once set. "
+                f"Cannot change '{existing.branch}' to '{task.branch}'."
+            )
         task.last_modified = _now_iso()
         params = _task_to_params(task)
         conn = self._conn()
@@ -246,7 +255,8 @@ class SQLiteTaskRepository(TaskRepository):
 
     def active_tasks(self) -> list[Task]:
         rows = self._conn().execute(
-            "SELECT * FROM tasks WHERE status NOT IN (?, ?)", _TERMINAL
+            "SELECT * FROM tasks WHERE status NOT IN (?, ?, ?)",
+            (*_TERMINAL, TaskStatus.PENDING.value),
         ).fetchall()
         return [_row_to_task(r) for r in rows]
 
@@ -258,11 +268,12 @@ class SQLiteTaskRepository(TaskRepository):
 
     def is_ready(self, task_id: str) -> bool:
         conn = self._conn()
-        # First check the task exists
         exists = conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not exists:
+            return False
+        if exists["status"] == TaskStatus.PENDING.value:
             return False
         row = conn.execute(
             """
@@ -279,14 +290,22 @@ class SQLiteTaskRepository(TaskRepository):
         return bool(row["ready"]) if row else False
 
     def has_blockers(self, task_id: str) -> bool:
-        row = self._conn().execute(
+        conn = self._conn()
+        exists = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not exists:
+            return False
+        if exists["status"] == TaskStatus.PENDING.value:
+            return False
+        row = conn.execute(
             """
             SELECT EXISTS (
                 SELECT 1
                 FROM task_dependencies td
                 JOIN tasks t ON t.id = td.blocking_task_id
                 WHERE td.blocked_task_id = ?
-                  AND t.status NOT IN (?, ?)
+                AND t.status NOT IN (?, ?)
             ) AS blocked
             """,
             (task_id, *_TERMINAL),
@@ -454,6 +473,23 @@ class SQLiteTaskRepository(TaskRepository):
         now_mono = time.monotonic()
         conn = self._conn()
         with conn:
+            # Branch guard — non-Manager tasks must have a branch before running
+            row = conn.execute(
+                "SELECT branch, role, status FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Task '{task_id}' not found.")
+            if not row["branch"] and row["role"] != AgentRole.MANAGER.value:
+                raise ValueError(
+                    f"Task '{task_id}' (role={row['role']}) cannot start: "
+                    f"no branch assigned. Set a branch before running."
+                )
+            if row["status"] != TaskStatus.READY.value:
+                raise ValueError(
+                    f"Task '{task_id}' cannot transition to RUNNING from "
+                    f"{row['status']}. Only READY tasks can become RUNNING."
+                )
             cursor = conn.execute(
                 """
                 UPDATE tasks SET
@@ -477,12 +513,9 @@ class SQLiteTaskRepository(TaskRepository):
                 ),
             )
             if cursor.rowcount == 0:
-                task = self.get(task_id)
-                if task is None:
-                    raise KeyError(f"Task '{task_id}' not found.")
                 raise ValueError(
                     f"Task '{task_id}' cannot transition to RUNNING from "
-                    f"{task.status.value}. Only READY tasks can become RUNNING."
+                    f"{row['status']}. Only READY tasks can become RUNNING."
                 )
 
     def mark_ready(self, task_id: str) -> None:
