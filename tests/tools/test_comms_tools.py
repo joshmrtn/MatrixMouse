@@ -33,23 +33,29 @@ Coverage:
 from unittest.mock import MagicMock, patch, call
 import pytest
 
+from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.tools import comms_tools, task_tools
-from matrixmouse.task import AgentRole, Task, TaskQueue, TaskStatus
+from matrixmouse.task import AgentRole, Task, TaskStatus
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_task(**kwargs) -> Task:
-    defaults = dict(
-        title="Test task",
-        description="desc",
-        role=AgentRole.CODER,
-        repo=["repo"],
+def make_task(
+    title: str = "Test task",
+    description: str = "Do the thing carefully.",
+    role: AgentRole = AgentRole.CODER,
+    repo: list[str] | None = None,
+    **kwargs,
+) -> Task:
+    return Task(
+        title=title,
+        description=description,
+        role=role,
+        repo=repo if repo is not None else ["repo"],
+        **kwargs,
     )
-    defaults.update(kwargs)
-    return Task(**defaults)
 
 
 def make_config(grace_minutes=0.0) -> MagicMock:
@@ -58,12 +64,14 @@ def make_config(grace_minutes=0.0) -> MagicMock:
     cfg.clarification_grace_period_minutes = grace_minutes
     return cfg
 
+def make_repo() -> InMemoryTaskRepository:
+    return InMemoryTaskRepository()
 
 def setup(tmp_path, task=None, grace_minutes=0.0):
     """Wire up task_tools and comms_tools with a fresh queue."""
     tasks_file = tmp_path / "tasks.json"
     tasks_file.write_text("[]")
-    q = TaskQueue(tasks_file)
+    q = make_repo()
     if task:
         q.add(task)
 
@@ -118,7 +126,7 @@ class TestRequestClarificationValidation:
     def test_missing_active_task_id_returns_error(self, tmp_path):
         tasks_file = tmp_path / "tasks.json"
         tasks_file.write_text("[]")
-        q = TaskQueue(tasks_file)
+        q = make_repo()
         task_tools.configure(queue=q, active_task_id=None)
         comms_tools.configure(make_config())
         result = comms_tools.request_clarification("What should I do?")
@@ -136,7 +144,9 @@ class TestRequestClarificationTaskState:
         with patch("matrixmouse.tools.comms_tools.time.sleep"), \
              patch("matrixmouse.comms.get_manager", return_value=None):
             comms_tools.request_clarification("What should I do?")
-        assert q.get(task.id).status == TaskStatus.BLOCKED_BY_HUMAN
+        t = q.get(task.id)
+        assert t is not None
+        assert t.status == TaskStatus.BLOCKED_BY_HUMAN
 
     def test_blocked_reason_contains_question(self, tmp_path):
         task = make_task()
@@ -144,7 +154,9 @@ class TestRequestClarificationTaskState:
         with patch("matrixmouse.tools.comms_tools.time.sleep"), \
              patch("matrixmouse.comms.get_manager", return_value=None):
             comms_tools.request_clarification("Which approach is better?")
-        notes = q.get(task.id).notes
+        t = q.get(task.id)
+        assert t is not None
+        notes = t.notes
         assert "Which approach is better?" in notes or \
                "clarification" in notes.lower()
 
@@ -222,6 +234,7 @@ class TestRequestClarificationGracePeriod:
             if call_count == 1:
                 # Operator answers — update task status and inject message
                 t = q.get(task.id)
+                assert t is not None
                 t.status = TaskStatus.READY
                 t.context_messages.append({
                     "role": "user",
@@ -260,7 +273,9 @@ class TestRequestClarificationGracePeriod:
             result = comms_tools.request_clarification("Test question.")
 
         # Task should be blocked — grace period ran and expired
-        assert q.get(task.id).status == TaskStatus.BLOCKED_BY_HUMAN
+        t = q.get(task.id)
+        assert t is not None
+        assert t.status == TaskStatus.BLOCKED_BY_HUMAN
         assert "ERROR" not in result
 
     def test_zero_grace_period_returns_immediately(self, tmp_path):
@@ -271,7 +286,9 @@ class TestRequestClarificationGracePeriod:
             patch("matrixmouse.comms.get_manager", return_value=None):
             result = comms_tools.request_clarification("Quick question?")
         mock_sleep.assert_not_called()
-        assert q.get(task.id).status == TaskStatus.BLOCKED_BY_HUMAN
+        t = q.get(task.id)
+        assert t is not None
+        assert t.status == TaskStatus.BLOCKED_BY_HUMAN
         assert "ERROR" not in result
 
 
