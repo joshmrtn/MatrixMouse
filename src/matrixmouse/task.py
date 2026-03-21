@@ -45,10 +45,22 @@ class AgentRole(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# PRState
+# ---------------------------------------------------------------------------
+
+class PRState(str, Enum):
+    NONE   = ""        # no PR exists
+    OPEN   = "open"    # PR created, awaiting review
+    MERGED = "merged"  # PR merged, task can complete
+    CLOSED = "closed"  # PR rejected, needs rework
+
+
+# ---------------------------------------------------------------------------
 # TaskStatus
 # ---------------------------------------------------------------------------
 
 class TaskStatus(Enum):
+    PENDING          = "pending"
     READY            = "ready"
     RUNNING          = "running"
     BLOCKED_BY_TASK  = "blocked_by_task"
@@ -108,6 +120,11 @@ class Task:
                                       human response. Set by request_clarification(),
                                       cleared when answered. Empty string means
                                       no pending question.
+        pr_url                      — GitHub/GitLab/Gitea PR URL once created.
+                                      Empty string means no PR exists.
+        pr_state                    — current state of the PR. See PRState enum.
+        pr_poll_next_at             — ISO timestamp of next scheduled PR state
+                                      poll. Empty string means no poll pending.
 
     Removed vs the previous model:
         phase                       — replaced by role
@@ -122,8 +139,8 @@ class Task:
     Identity note: task_id is a 16-character hex string (16^16 possible values).  
     Global uniqueness is enforced at creation time by TaskRepository.add(). For 
     terminated tasks, the natural unique identifier is the composite of 
-    (id, created_at, completed_at) - relevant if/when we migrate from JSON to 
-    database persistence.
+    (id, created_at, completed_at)
+    TODO: Implement archival strategy and retention policy for terminated tasks
     """
 
     # --- Identity ---
@@ -173,6 +190,11 @@ class Task:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     pending_question: str = field(default="") # request_clarification questions land here
+
+    # --- PR tracking ---
+    pr_url:          str     = field(default="")
+    pr_state:        PRState = field(default=PRState.NONE)
+    pr_poll_next_at: str     = field(default="")  # ISO timestamp, "" = no poll pending
 
     # -----------------------------------------------------------------------
     # Priority
@@ -247,6 +269,9 @@ class Task:
             "completed_at":                 self.completed_at,
             "last_modified":                self.last_modified,
             "pending_question":             self.pending_question,
+            "pr_url":                       self.pr_url,
+            "pr_state":                     self.pr_state,
+            "pr_poll_next_at":              self.pr_poll_next_at,
         }
 
     @classmethod
@@ -260,19 +285,14 @@ class Task:
             role = AgentRole.CODER
 
         # --- status ---
-        # Migrate legacy values from the old model:
-        #   "pending" and "active" had different semantics; both map to READY
-        #   since no tasks should be mid-flight across a restart.
         status_str = data.get("status", "ready")
-        _legacy_map = {"pending": "ready", "active": "ready"}
-        status_str = _legacy_map.get(status_str, status_str)
         try:
             status = TaskStatus(status_str)
         except ValueError:
             logger.warning(
-                "Unknown status %r — defaulting to READY.", status_str
+                "Unknown status %r — defaulting to PENDING.", status_str
             )
-            status = TaskStatus.READY
+            status = TaskStatus.PENDING
 
         return cls(
             id=data.get("id", str(uuid.uuid4().hex[:16])),
@@ -308,4 +328,7 @@ class Task:
                 data.get("created_at", datetime.now(timezone.utc).isoformat())
                 ),
             pending_question=data.get("pending_question", ""),
+            pr_url=data.get("pr_url", ""),
+            pr_state=PRState(data.get("pr_state", "")),
+            pr_poll_next_at=data.get("pr_poll_next_at", ""),
         )

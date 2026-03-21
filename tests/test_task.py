@@ -109,6 +109,17 @@ class TestTaskDefaults:
     def test_default_reviews_task_id_is_none(self):
         assert make_task().reviews_task_id is None
 
+    def test_default_pr_url_is_empty(self):
+        from matrixmouse.task import PRState
+        task = make_task()
+        assert task.pr_url == ""
+
+    def test_default_pr_state_is_none(self):
+        from matrixmouse.task import PRState
+        assert make_task().pr_state == PRState.NONE
+
+    def test_default_pr_poll_next_at_is_empty(self):
+        assert make_task().pr_poll_next_at == ""
 
 # ---------------------------------------------------------------------------
 # Task — priority_score
@@ -210,20 +221,10 @@ class TestTaskSerialisation:
         restored = Task.from_dict(data)
         assert restored.preempt is False
 
-    def test_from_dict_legacy_pending_maps_to_ready(self):
-        data = make_task().to_dict()
-        data["status"] = "pending"
-        assert Task.from_dict(data).status == TaskStatus.READY
-
-    def test_from_dict_legacy_active_maps_to_ready(self):
-        data = make_task().to_dict()
-        data["status"] = "active"
-        assert Task.from_dict(data).status == TaskStatus.READY
-
-    def test_from_dict_unknown_status_defaults_to_ready(self):
+    def test_from_dict_unknown_status_defaults_to_pending(self):
         data = make_task().to_dict()
         data["status"] = "totally_made_up"
-        assert Task.from_dict(data).status == TaskStatus.READY
+        assert Task.from_dict(data).status == TaskStatus.PENDING
 
     def test_from_dict_unknown_role_defaults_to_coder(self):
         data = make_task().to_dict()
@@ -246,6 +247,44 @@ class TestTaskSerialisation:
         del data["pending_question"]
         assert Task.from_dict(data).pending_question == ""
 
+    def test_roundtrip_preserves_pr_url(self):
+        task = make_task()
+        task.pr_url = "https://github.com/user/repo/pull/42"
+        assert Task.from_dict(task.to_dict()).pr_url == \
+            "https://github.com/user/repo/pull/42"
+
+    def test_roundtrip_preserves_pr_state(self):
+        from matrixmouse.task import PRState
+        task = make_task()
+        task.pr_state = PRState.OPEN
+        assert Task.from_dict(task.to_dict()).pr_state == PRState.OPEN
+
+    def test_roundtrip_preserves_pr_poll_next_at(self):
+        task = make_task()
+        task.pr_poll_next_at = "2026-04-01T09:00:00+00:00"
+        assert Task.from_dict(task.to_dict()).pr_poll_next_at == \
+            "2026-04-01T09:00:00+00:00"
+
+    def test_pr_state_defaults_to_none(self):
+        from matrixmouse.task import PRState
+        task = make_task()
+        assert task.pr_state == PRState.NONE
+
+    def test_pr_state_defaults_on_missing_key(self):
+        from matrixmouse.task import PRState
+        data = make_task().to_dict()
+        del data["pr_state"]
+        assert Task.from_dict(data).pr_state == PRState.NONE
+
+    def test_pr_url_defaults_empty_on_missing_key(self):
+        data = make_task().to_dict()
+        del data["pr_url"]
+        assert Task.from_dict(data).pr_url == ""
+
+    def test_pr_poll_next_at_defaults_empty_on_missing_key(self):
+        data = make_task().to_dict()
+        del data["pr_poll_next_at"]
+        assert Task.from_dict(data).pr_poll_next_at == ""
 
 # ---------------------------------------------------------------------------
 # TaskStatus helpers
@@ -278,6 +317,11 @@ class TestTaskStatus:
         ):
             assert status.is_blocked is False
 
+    def test_pending_is_not_terminal(self):
+        assert TaskStatus.PENDING.is_terminal is False
+
+    def test_pending_is_not_blocked(self):
+        assert TaskStatus.PENDING.is_blocked is False
 
 # ---------------------------------------------------------------------------
 # Task — last_modified
