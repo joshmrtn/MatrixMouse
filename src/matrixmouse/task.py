@@ -149,7 +149,6 @@ class Task:
     urgency: float = 0.5
     time_slice_started: Optional[float] = None
     turn_limit: int = field(default=0)
-    # preempt is transient, not persisted to disk.
     preempt: bool = field(default = False)
 
     # --- Git ---
@@ -236,6 +235,7 @@ class Task:
             "urgency":                      self.urgency,
             "time_slice_started":           self.time_slice_started,
             "turn_limit":                   self.turn_limit,
+            "preempt":                      self.preempt,
             "wip_commit_hash":              self.wip_commit_hash,
             "reviews_task_id":              self.reviews_task_id,
             "last_review_summary":          self.last_review_summary,
@@ -291,6 +291,7 @@ class Task:
             urgency=data.get("urgency", 0.5),
             time_slice_started=data.get("time_slice_started"),
             turn_limit=data.get("turn_limit", 0),
+            preempt=data.get("preempt") or False,
             wip_commit_hash=data.get("wip_commit_hash") or "",
             reviews_task_id=data.get("reviews_task_id"),
             last_review_summary=data.get("last_review_summary"),

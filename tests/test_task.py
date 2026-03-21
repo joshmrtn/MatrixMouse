@@ -191,15 +191,24 @@ class TestTaskSerialisation:
         task.wip_commit_hash = "abc123"
         assert Task.from_dict(task.to_dict()).wip_commit_hash == "abc123"
 
-    def test_preempt_not_in_to_dict(self):
+    def test_preempt_persisted_in_to_dict(self):
         task = make_task()
         task.preempt = True
-        assert "preempt" not in task.to_dict()
+        assert "preempt" in task.to_dict()
+        assert task.to_dict()["preempt"] is True
 
-    def test_preempt_defaults_false_on_load(self):
+    def test_preempt_roundtrips_through_dict(self):
         task = make_task()
         task.preempt = True
-        assert Task.from_dict(task.to_dict()).preempt is False
+        restored = Task.from_dict(task.to_dict())
+        assert restored.preempt is True
+
+    def test_preempt_defaults_false_when_absent_in_dict(self):
+        task = make_task()
+        data = task.to_dict()
+        data.pop("preempt", None)
+        restored = Task.from_dict(data)
+        assert restored.preempt is False
 
     def test_from_dict_legacy_pending_maps_to_ready(self):
         data = make_task().to_dict()
