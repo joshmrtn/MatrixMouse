@@ -59,6 +59,7 @@ Coverage:
         - No task created for unknown blocked task
 """
 
+from datetime import datetime, timezone
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -82,6 +83,9 @@ class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
     def __init__(self):
         self._store: dict = {}
         self._stale: dict = {}
+        self._repo_metadata: dict = {}
+        self._sessions: dict = {}
+        self._merge_locks: dict = {}
 
     def get(self, key):
         return self._store.get(key)
@@ -104,6 +108,58 @@ class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
     def all_stale_clarification_tasks(self):
         return dict(self._stale)
 
+    # Session contexts
+    def get_session_context(self, task_id):
+        return self._sessions.get(task_id)
+
+    def set_session_context(self, task_id, ctx):
+        self._sessions[task_id] = ctx
+
+    def clear_session_context(self, task_id):
+        self._sessions.pop(task_id, None)
+
+    def get_active_session_contexts(self):
+        return list(self._sessions.items())
+
+    # Merge locks
+    def acquire_merge_lock(self, branch, task_id):
+        if branch in self._merge_locks:
+            return False
+        self._merge_locks[branch] = task_id
+        return True
+
+    def release_merge_lock(self, branch, task_id):
+        if self._merge_locks.get(branch) == task_id:
+            del self._merge_locks[branch]
+
+    def get_merge_lock_holder(self, branch):
+        return self._merge_locks.get(branch)
+
+    # Repo metadata
+    def get_repo_metadata(self, repo_name):
+        return self._repo_metadata.get(repo_name)
+
+    def set_repo_metadata(self, repo_name, provider, remote_url):
+        existing = self._repo_metadata.get(repo_name, {})
+        self._repo_metadata[repo_name] = {
+            **existing,
+            "provider": provider,
+            "remote_url": remote_url,
+        }
+
+    def get_protected_branches_cached(self, repo_name):
+        meta = self._repo_metadata.get(repo_name)
+        if not meta or not meta.get("cache_timestamp"):
+            return None
+        return meta.get("protected_branches", []), meta["cache_timestamp"]
+
+    def set_protected_branches_cached(self, repo_name, branches):
+        existing = self._repo_metadata.get(repo_name, {})
+        self._repo_metadata[repo_name] = {
+            **existing,
+            "protected_branches": branches,
+            "cache_timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
 # ---------------------------------------------------------------------------
 # Helpers

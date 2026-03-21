@@ -21,7 +21,7 @@ from pathlib import Path
 
 from matrixmouse.repository.sqlite_db import get_connection, init_db
 from matrixmouse.repository.task_repository import TaskRepository
-from matrixmouse.task import AgentRole, Task, TaskStatus
+from matrixmouse.task import AgentRole, Task, TaskStatus, PRState
 from matrixmouse.utils.task_utils import detect_cycles
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ def _row_to_task(row) -> Task:
         notes=row["notes"],
         pending_question=row["pending_question"],
         last_review_summary=row["last_review_summary"],
+        pr_url=row["pr_url"],
+        pr_state=PRState(row["pr_state"]),
+        pr_poll_next_at=row["pr_poll_next_at"],
         context_messages=json.loads(row["context_messages"]),
         wip_commit_hash=row["wip_commit_hash"],
         branch=row["branch"],
@@ -85,6 +88,9 @@ def _task_to_params(task: Task) -> dict:
         "notes":                         task.notes or "",
         "pending_question":              task.pending_question or "",
         "last_review_summary":           task.last_review_summary or "",
+        "pr_url":                        task.pr_url or "",
+        "pr_state":                      task.pr_state.value,
+        "pr_poll_next_at":               task.pr_poll_next_at or "",
         "context_messages":              json.dumps(task.context_messages or []),
         "wip_commit_hash":               task.wip_commit_hash,
         "branch":                        task.branch,
@@ -108,7 +114,8 @@ _INSERT_SQL = """
         context_messages, wip_commit_hash, branch,
         decomposition_confirmed_depth, turn_limit,
         preempt, time_slice_started,
-        started_at, completed_at, created_at, last_modified
+        started_at, completed_at, created_at, last_modified,
+        pr_url, pr_state, pr_poll_next_at
     ) VALUES (
         :id, :title, :description, :status, :role,
         :repo, :target_files, :importance, :urgency,
@@ -117,7 +124,8 @@ _INSERT_SQL = """
         :context_messages, :wip_commit_hash, :branch,
         :decomposition_confirmed_depth, :turn_limit,
         :preempt, :time_slice_started,
-        :started_at, :completed_at, :created_at, :last_modified
+        :started_at, :completed_at, :created_at, :last_modified,
+        :pr_url, :pr_state, :pr_poll_next_at
     )
 """
 
@@ -136,6 +144,9 @@ _UPDATE_SQL = """
         reviews_task_id               = :reviews_task_id,
         notes                         = :notes,
         pending_question              = :pending_question,
+        pr_url                        = :pr_url,
+        pr_state                      = :pr_state,
+        pr_poll_next_at               = :pr_poll_next_at,
         last_review_summary           = :last_review_summary,
         context_messages              = :context_messages,
         wip_commit_hash               = :wip_commit_hash,

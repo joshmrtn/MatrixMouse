@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at                    TEXT,
     created_at                      TEXT NOT NULL,
     last_modified                   TEXT NOT NULL,
+    pr_url                          TEXT NOT NULL DEFAULT '',
+    pr_state                        TEXT NOT NULL DEFAULT '',
+    pr_poll_next_at                 TEXT NOT NULL DEFAULT '',
     data                            TEXT
 );
 
@@ -74,6 +77,36 @@ CREATE TABLE IF NOT EXISTS stale_clarification_tasks (
 CREATE TABLE IF NOT EXISTS workspace_state (
     key     TEXT PRIMARY KEY,
     value   TEXT NOT NULL
+);
+
+-- Session contexts: transient execution state for special agent sessions
+-- (BRANCH_SETUP, MERGE_RESOLUTION, PLANNING). Cleared when session ends.
+CREATE TABLE IF NOT EXISTS session_contexts (
+    task_id                TEXT PRIMARY KEY,
+    mode                   TEXT NOT NULL,
+    allowed_tools          TEXT NOT NULL DEFAULT '[]',  -- JSON array
+    system_prompt_addendum TEXT NOT NULL DEFAULT '',
+    turn_limit_override    INTEGER NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL
+);
+
+-- Merge locks: per-parent-branch mutex preventing concurrent sibling merges.
+-- Lock is live while locked_by task is RUNNING or BLOCKED_BY_HUMAN.
+-- Stale if locked_by task is terminal, READY, not found, or locked_at > 24h.
+CREATE TABLE IF NOT EXISTS merge_locks (
+    branch     TEXT PRIMARY KEY,
+    locked_by  TEXT NOT NULL,  -- task_id holding the lock
+    locked_at  TEXT NOT NULL   -- ISO timestamp
+);
+
+-- Repo metadata: per-repo git provider config and cached protected branches.
+-- protected_branches is a JSON array, invalidated after branch_protection_cache_ttl_minutes.
+CREATE TABLE IF NOT EXISTS repo_metadata (
+    repo_name          TEXT PRIMARY KEY,
+    provider           TEXT NOT NULL DEFAULT '',   -- "github"|"gitlab"|"gitea"|"none"|""
+    remote_url         TEXT NOT NULL DEFAULT '',
+    protected_branches TEXT NOT NULL DEFAULT '[]', -- JSON array, cached
+    cache_timestamp    TEXT NOT NULL DEFAULT ''    -- ISO timestamp of last cache update
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status

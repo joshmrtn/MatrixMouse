@@ -24,7 +24,43 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
+
+from dataclasses import dataclass
+from matrixmouse.task import TaskStatus
+
+
+@dataclass
+class SessionContext:
+    """
+    Transient execution context for special agent sessions.
+
+    Attached to a running task by the orchestrator when the task enters
+    a non-normal execution mode. Cleared when the session ends.
+
+    Attributes:
+        mode:                   The session mode — BRANCH_SETUP, MERGE_RESOLUTION,
+                                or PLANNING.
+        allowed_tools:          Tool names available in this session. Overrides
+                                the role's default tool set entirely.
+        system_prompt_addendum: Text appended to the role's base system prompt.
+                                Explains the current situation to the agent.
+        turn_limit_override:    If > 0, overrides config turn limit for this
+                                session. 0 means use config default.
+    """
+    mode:                   "SessionMode"
+    allowed_tools:          set[str]
+    system_prompt_addendum: str = ""
+    turn_limit_override:    int = 0
+
+
+class SessionMode(str, Enum):
+    """Execution modes that restrict or modify agent tool access."""
+    NORMAL           = "normal"
+    BRANCH_SETUP     = "branch_setup"     # Manager before branch named
+    MERGE_RESOLUTION = "merge_resolution" # Any role during conflict resolution
+    PLANNING         = "planning"         # Manager during task decomposition
 
 
 class WorkspaceStateRepository(ABC):
@@ -102,6 +138,116 @@ class WorkspaceStateRepository(ABC):
         of blocked_task_id -> manager_task_id.
 
         Used on startup to reconstruct in-memory state if needed.
+        """
+
+    # ------------------------------------------------------------------
+    # Session contexts
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def get_session_context(self, task_id: str) -> SessionContext | None:
+        """
+        Return the active SessionContext for the given task, or None if
+        the task has no active session.
+        """
+
+    @abstractmethod
+    def set_session_context(self, task_id: str, ctx: SessionContext) -> None:
+        """
+        Store or replace the SessionContext for the given task.
+        """
+
+    @abstractmethod
+    def clear_session_context(self, task_id: str) -> None:
+        """
+        Remove the SessionContext for the given task. No-op if absent.
+        """
+
+    @abstractmethod
+    def get_active_session_contexts(self) -> list[tuple[str, SessionContext]]:
+        """
+        Return all active session contexts as (task_id, SessionContext) pairs.
+        Useful for orchestrator auditing and the web UI.
+        """
+
+    # ------------------------------------------------------------------
+    # Merge locks
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def acquire_merge_lock(self, branch: str, task_id: str) -> bool:
+        """
+        Attempt to acquire the merge lock for the given parent branch.
+
+        Returns True if the lock was acquired, False if it is held by
+        another task that is still active.
+
+        Stale locks (held by a terminal or missing task, or older than
+        24 hours) are cleared and re-acquired atomically.
+
+        Args:
+            branch:  The parent branch being merged into.
+            task_id: The task attempting the merge.
+        """
+
+    @abstractmethod
+    def release_merge_lock(self, branch: str, task_id: str) -> None:
+        """
+        Release the merge lock for the given branch.
+
+        No-op if the lock is not held by task_id.
+        """
+
+    @abstractmethod
+    def get_merge_lock_holder(self, branch: str) -> str | None:
+        """
+        Return the task_id currently holding the merge lock for the given
+        branch, or None if the branch is not locked.
+        """
+
+    # ------------------------------------------------------------------
+    # Repo metadata and branch protection cache
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def get_repo_metadata(self, repo_name: str) -> dict | None:
+        """
+        Return metadata for the named repo, or None if not registered.
+
+        Returned dict has keys: provider, remote_url, protected_branches
+        (list), cache_timestamp (ISO string or "").
+        """
+
+    @abstractmethod
+    def set_repo_metadata(
+        self,
+        repo_name: str,
+        provider: str,
+        remote_url: str,
+    ) -> None:
+        """
+        Store or update provider config for the named repo.
+        Does not touch the protected_branches cache.
+        """
+
+    @abstractmethod
+    def get_protected_branches_cached(
+        self, repo_name: str
+    ) -> tuple[list[str], str] | None:
+        """
+        Return the cached protected branch list and its cache timestamp
+        as (branches, iso_timestamp), or None if no cache entry exists.
+        """
+
+    @abstractmethod
+    def set_protected_branches_cached(
+        self,
+        repo_name: str,
+        branches: list[str],
+    ) -> None:
+        """
+        Update the protected branches cache for the named repo.
+        Stamps cache_timestamp to now.
         """
 
     # ------------------------------------------------------------------
