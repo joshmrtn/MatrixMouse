@@ -31,6 +31,9 @@ Do not add scheduling logic, agent logic, or tool dispatch here.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import uuid
+import logging
+logger = logging.getLogger(__name__)
 
 from matrixmouse.task import AgentRole, Task
 
@@ -43,6 +46,26 @@ class TaskRepository(ABC):
     must use transactions so that concurrent access from multiple worker
     threads cannot produce partial or corrupt state.
     """
+
+    def _ensure_unique_id(self, task: Task) -> None:
+        """
+        Regenerate task.id until it is globally unique in this repository.
+
+        Modifies task in place. Collision is astronomically unlikely with
+        16-char hex IDs but handled cleanly rather than surfacing an
+        IntegrityError to the caller.
+
+        This method is called by all creation paths (add, add_subtask,
+        add_subtasks) so uniqueness is guaranteed regardless of how a
+        task enters the repository.
+        """
+        while self.get(task.id) is not None:
+            old_id = task.id
+            task.id = uuid.uuid4().hex[:16]
+            logger.warning(
+                "Task id collision on %r — regenerating to %r.",
+                old_id, task.id,
+            )
 
     # ------------------------------------------------------------------
     # Core CRUD
@@ -189,16 +212,27 @@ class TaskRepository(ABC):
         blocked_task_id: str,
     ) -> None:
         """
-        Record that blocked_task_id is blocked by blocking_task_id, 
+        Record that blocked_task_id is blocked by blocking_task_id,
         and transition blocked_task_id to BLOCKED_BY_TASK status.
 
-        Both operations are atomic — either both succeed or neither does.
-        If the dependency already exists, this is a no-op. 
+        Cycle detection runs inside the transaction before any rows are
+        written. If adding this edge would create a cycle in the dependency
+        graph, the transaction is rolled back and ValueError is raised.
+        No partial state is written.
 
-        Callers are responsible for cycle detection before calling this.
+        Because the cycle check and the write share a single transaction,
+        there is no window for a concurrent writer to introduce a cycle
+        between the check and the commit.
+
+        If the dependency already exists this is a no-op.
+
+        Args:
+            blocking_task_id: The task that will block blocked_task_id.
+            blocked_task_id:  The task that will become blocked.
 
         Raises:
-            KeyError: If either task does not exist.
+            KeyError:   If either task does not exist.
+            ValueError: If adding this edge would create a dependency cycle.
         """
 
     @abstractmethod
@@ -328,3 +362,41 @@ class TaskRepository(ABC):
             KeyError: If no task with parent_id exists.
         """
         
+    @abstractmethod
+    def add_subtasks(
+        self,
+        parent_id: str,
+        subtasks: list[Task],
+    ) -> list[Task]:
+        """
+        Add multiple subtasks under a parent in a single atomic transaction.
+
+        All subtasks are inserted, all dependency edges (subtask blocks
+        parent) are added, and the parent is set to BLOCKED_BY_TASK — or
+        none of it happens. If any operation fails the entire transaction
+        is rolled back.
+
+        Cycle detection runs inside the transaction for each subtask before
+        any rows are written. Since subtasks are new nodes with no existing
+        edges, cycles cannot form from this operation alone. The check is
+        present as a defensive guard against ID collision after retry.
+
+        ID uniqueness is guaranteed: _ensure_unique_id() is called on each
+        subtask before insertion, regenerating any colliding IDs in place.
+
+        Callers are responsible for constructing Task objects with correct
+        fields (depth, parent_task_id, role, importance, urgency, etc.)
+        before calling this method.
+
+        Args:
+            parent_id: ID of the parent task.
+            subtasks:  List of Task objects to create as children.
+                       task.id and timestamps are managed by the repository.
+
+        Returns:
+            The list of created Task objects with their final IDs assigned.
+
+        Raises:
+            KeyError:   If parent_id does not exist.
+            ValueError: If adding any subtask would create a dependency cycle.
+        """

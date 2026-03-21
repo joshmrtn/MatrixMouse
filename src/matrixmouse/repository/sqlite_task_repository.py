@@ -22,6 +22,7 @@ from pathlib import Path
 from matrixmouse.repository.sqlite_db import get_connection, init_db
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.task import AgentRole, Task, TaskStatus
+from matrixmouse.utils.task_utils import detect_cycles
 
 logger = logging.getLogger(__name__)
 
@@ -337,12 +338,46 @@ class SQLiteTaskRepository(TaskRepository):
         for tid in (blocking_task_id, blocked_task_id):
             if not self.get(tid):
                 raise KeyError(f"Task '{tid}' not found.")
+
         now = _now_iso()
         conn = self._conn()
+
         with conn:
+            # Check for existing edge — no-op if already present
+            existing = conn.execute(
+                """
+                SELECT 1 FROM task_dependencies
+                WHERE blocking_task_id = ? AND blocked_task_id = ?
+                """,
+                (blocking_task_id, blocked_task_id),
+            ).fetchone()
+            if existing:
+                return
+
+            # Cycle check inside the transaction using the same connection.
+            # BEGIN IMMEDIATE means no other writer can modify the graph
+            # between this check and the INSERT below.
+            def _get_blocked_by_ids(tid: str) -> list[str]:
+                rows = conn.execute(
+                    """
+                    SELECT blocking_task_id FROM task_dependencies
+                    WHERE blocked_task_id = ?
+                    """,
+                    (tid,),
+                ).fetchall()
+                return [r[0] for r in rows]
+
+            if detect_cycles(blocking_task_id, blocked_task_id,
+                             _get_blocked_by_ids):
+                raise ValueError(
+                    f"Adding dependency '{blocking_task_id}' → "
+                    f"'{blocked_task_id}' would create a cycle. "
+                    f"No changes made."
+                )
+
             conn.execute(
                 """
-                INSERT OR IGNORE INTO task_dependencies
+                INSERT INTO task_dependencies
                     (blocking_task_id, blocked_task_id)
                 VALUES (?, ?)
                 """,
@@ -354,7 +389,7 @@ class SQLiteTaskRepository(TaskRepository):
                     status        = ?,
                     last_modified = ?
                 WHERE id = ?
-                AND status NOT IN (?, ?)
+                  AND status NOT IN (?, ?)
                 """,
                 (
                     TaskStatus.BLOCKED_BY_TASK.value,
@@ -600,3 +635,70 @@ class SQLiteTaskRepository(TaskRepository):
 
         return subtask
     
+    def add_subtasks(
+        self,
+        parent_id: str,
+        subtasks: list[Task],
+    ) -> list[Task]:
+        parent = self.get(parent_id)
+        if parent is None:
+            raise KeyError(f"Parent task '{parent_id}' not found.")
+
+        if not subtasks:
+            return []
+
+        now = _now_iso()
+        conn = self._conn()
+
+        with conn:
+            # Assign unique IDs and timestamps inside the transaction
+            # so collisions are resolved against the locked state.
+            for subtask in subtasks:
+                self._ensure_unique_id(subtask)
+                subtask.created_at = now
+                subtask.last_modified = now
+
+            def _get_blocked_by_ids(tid: str) -> list[str]:
+                rows = conn.execute(
+                    """
+                    SELECT blocking_task_id FROM task_dependencies
+                    WHERE blocked_task_id = ?
+                    """,
+                    (tid,),
+                ).fetchall()
+                return [r[0] for r in rows]
+
+            # Cycle check for each subtask before any writes.
+            # New subtasks have no existing edges so cycles cannot form,
+            # but we check defensively against ID collision edge cases.
+            for subtask in subtasks:
+                if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
+                    raise ValueError(
+                        f"Adding subtask '{subtask.id}' under '{parent_id}' "
+                        f"would create a cycle. No subtasks were created."
+                    )
+
+            # Insert all subtasks and their dependency edges
+            for subtask in subtasks:
+                conn.execute(_INSERT_SQL, _task_to_params(subtask))
+                conn.execute(
+                    """
+                    INSERT INTO task_dependencies
+                        (blocking_task_id, blocked_task_id)
+                    VALUES (?, ?)
+                    """,
+                    (subtask.id, parent_id),
+                )
+
+            # Update parent status once, atomically
+            conn.execute(
+                """
+                UPDATE tasks SET
+                    status        = ?,
+                    last_modified = ?
+                WHERE id = ?
+                """,
+                (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
+            )
+
+        return subtasks

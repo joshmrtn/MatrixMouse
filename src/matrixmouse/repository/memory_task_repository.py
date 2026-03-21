@@ -18,6 +18,7 @@ in tests/repository/ runs against both implementations to enforce this.
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 import logging
@@ -26,6 +27,7 @@ from typing import Optional
 
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.task import AgentRole, Task, TaskStatus
+from matrixmouse.utils.task_utils import detect_cycles
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +43,8 @@ class InMemoryTaskRepository(TaskRepository):
     """
     Dict-backed task repository for testing.
 
-    All operations are synchronous and in-memory. Thread safety is not
-    guaranteed — this implementation is intended for single-threaded
-    test use only.
+    All operations are in memory. threading.Lock() is used as a simple 
+    mutex lock to validate multi-threaded tests
     """
 
     def __init__(self) -> None:
@@ -52,6 +53,7 @@ class InMemoryTaskRepository(TaskRepository):
         self._blocked_by: dict[str, set[str]] = {}
         # blocking_task_id -> set of blocked_task_ids
         self._blocking: dict[str, set[str]] = {}
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Core CRUD
@@ -180,13 +182,33 @@ class InMemoryTaskRepository(TaskRepository):
         for tid in (blocking_task_id, blocked_task_id):
             if tid not in self._tasks:
                 raise KeyError(f"Task '{tid}' not found.")
-        self._blocked_by.setdefault(blocked_task_id, set()).add(blocking_task_id)
-        self._blocking.setdefault(blocking_task_id, set()).add(blocked_task_id)
-        # Transition blocked task to BLOCKED_BY_TASK if not terminal
-        blocked_task = self._tasks[blocked_task_id]
-        if blocked_task.status not in _TERMINAL:
-            blocked_task.status = TaskStatus.BLOCKED_BY_TASK
-            blocked_task.last_modified = _now_iso()
+
+        with self._lock:
+            # No-op if already present
+            if blocking_task_id in self._blocked_by.get(blocked_task_id, set()):
+                return
+
+            def _get_blocked_by_ids(tid: str) -> list[str]:
+                return list(self._blocked_by.get(tid, set()))
+
+            if detect_cycles(blocking_task_id, blocked_task_id,
+                             _get_blocked_by_ids):
+                raise ValueError(
+                    f"Adding dependency '{blocking_task_id}' → "
+                    f"'{blocked_task_id}' would create a cycle. "
+                    f"No changes made."
+                )
+
+            self._blocked_by.setdefault(blocked_task_id, set()).add(
+                blocking_task_id
+            )
+            self._blocking.setdefault(blocking_task_id, set()).add(
+                blocked_task_id
+            )
+            blocked_task = self._tasks[blocked_task_id]
+            if blocked_task.status not in _TERMINAL:
+                blocked_task.status = TaskStatus.BLOCKED_BY_TASK
+                blocked_task.last_modified = _now_iso()
 
     def remove_dependency(
         self,
@@ -303,6 +325,52 @@ class InMemoryTaskRepository(TaskRepository):
         parent.last_modified = now
 
         return subtask
+    
+
+    def add_subtasks(
+        self,
+        parent_id: str,
+        subtasks: list[Task],
+    ) -> list[Task]:
+        if parent_id not in self._tasks:
+            raise KeyError(f"Parent task '{parent_id}' not found.")
+
+        if not subtasks:
+            return []
+
+        now = _now_iso()
+
+        with self._lock:
+            # Assign unique IDs inside the lock
+            for subtask in subtasks:
+                self._ensure_unique_id(subtask)
+                subtask.created_at = now
+                subtask.last_modified = now
+
+            def _get_blocked_by_ids(tid: str) -> list[str]:
+                return list(self._blocked_by.get(tid, set()))
+
+            # Cycle check before any mutations
+            for subtask in subtasks:
+                if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
+                    raise ValueError(
+                        f"Adding subtask '{subtask.id}' under '{parent_id}' "
+                        f"would create a cycle. No subtasks were created."
+                    )
+
+            # All checks passed — mutate
+            for subtask in subtasks:
+                self._tasks[subtask.id] = subtask
+                self._blocked_by.setdefault(subtask.id, set())
+                self._blocking.setdefault(subtask.id, set())
+                self._blocked_by.setdefault(parent_id, set()).add(subtask.id)
+                self._blocking.setdefault(subtask.id, set()).add(parent_id)
+
+            parent = self._tasks[parent_id]
+            parent.status = TaskStatus.BLOCKED_BY_TASK
+            parent.last_modified = now
+
+        return subtasks
 
     # ------------------------------------------------------------------
     # Internal helpers
