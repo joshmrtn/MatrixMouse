@@ -244,6 +244,14 @@ class TaskRepository(ABC):
         """
         Remove the dependency between blocking_task_id and blocked_task_id.
 
+        If blocked_task_id has no remaining non-terminal blockers after
+        removal, and its status is BLOCKED_BY_TASK, it is automatically
+        transitioned to READY. This is a domain invariant: a task with no
+        blockers must not remain in BLOCKED_BY_TASK status.
+
+        Both the edge removal and the status transition are atomic within
+        a single transaction.
+
         No-op if the dependency does not exist.
 
         Raises:
@@ -259,12 +267,16 @@ class TaskRepository(ABC):
         """
         Transition a task to RUNNING status.
 
+        Only READY tasks can become RUNNING. Raises ValueError if the task
+        is in any other status.
+
         Sets time_slice_started to the current monotonic time.
         Sets started_at to the current UTC time on the first transition
-        to RUNNING only — subsequent re-runs do not overwrite started_at.
+        to RUNNING only.
 
         Raises:
-            KeyError: If no task with this ID exists.
+            KeyError:   If no task with this ID exists.
+            ValueError: If the task is not in READY status.
         """
 
     @abstractmethod
@@ -272,10 +284,14 @@ class TaskRepository(ABC):
         """
         Transition a task to READY status.
 
+        Cannot be applied to terminal tasks (COMPLETE, CANCELLED).
+        Raises ValueError if the task is already terminal.
+
         Clears time_slice_started.
 
         Raises:
-            KeyError: If no task with this ID exists.
+            KeyError:   If no task with this ID exists.
+            ValueError: If the task is in a terminal status.
         """
 
     @abstractmethod
@@ -283,11 +299,16 @@ class TaskRepository(ABC):
         """
         Transition a task to COMPLETE status.
 
+        No-op if the task is already terminal (idempotent for terminal
+        states — the orchestrator may attempt to complete an already-complete
+        task in edge cases).
+
         Sets completed_at to the current UTC time.
 
         Side effect: removes all dependency edges where this task is the
         blocker, then transitions any previously-blocked tasks that now
-        have no remaining blockers to READY. All within one transaction.
+        have no remaining non-terminal blockers to READY. All within one
+        transaction.
 
         Raises:
             KeyError: If no task with this ID exists.
@@ -298,16 +319,23 @@ class TaskRepository(ABC):
         """
         Transition a task to BLOCKED_BY_HUMAN status.
 
+        Cannot be applied to terminal tasks. Raises ValueError if the
+        task is already COMPLETE or CANCELLED.
+
         Appends "[BLOCKED] {reason}" to task.notes if reason is non-empty.
 
         Raises:
-            KeyError: If no task with this ID exists.
+            KeyError:   If no task with this ID exists.
+            ValueError: If the task is in a terminal status.
         """
 
     @abstractmethod
     def mark_cancelled(self, task_id: str) -> None:
         """
         Transition a task to CANCELLED status.
+
+        No-op if the task is already COMPLETE (a completed task cannot
+        be cancelled — the work is done).
 
         Sets completed_at to the current UTC time.
 

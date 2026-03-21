@@ -712,6 +712,176 @@ class TestMarkCancelled:
             repo.mark_cancelled("nonexistent")
 
 
+class TestStateTransitionGuards:
+    """
+    Verify that invalid state transitions are rejected and valid ones
+    are accepted. Both implementations must enforce these invariants.
+    """
+
+    # --- mark_running ---
+
+    def test_mark_running_from_ready_succeeds(self, repo):
+        task = make_task(status=TaskStatus.READY)
+        repo.add(task)
+        repo.mark_running(task.id)
+        assert repo.get(task.id).status == TaskStatus.RUNNING
+
+    def test_mark_running_from_blocked_by_human_raises(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_blocked_by_human(task.id, "waiting")
+        with pytest.raises(ValueError, match="RUNNING"):
+            repo.mark_running(task.id)
+
+    def test_mark_running_from_blocked_by_task_raises(self, repo):
+        parent = make_task()
+        repo.add(parent)
+        child = repo.add_subtask(parent.id, "child", "desc")
+        with pytest.raises(ValueError, match="RUNNING"):
+            repo.mark_running(parent.id)
+
+    def test_mark_running_from_complete_raises(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_complete(task.id)
+        with pytest.raises(ValueError, match="RUNNING"):
+            repo.mark_running(task.id)
+
+    def test_mark_running_from_cancelled_raises(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_cancelled(task.id)
+        with pytest.raises(ValueError, match="RUNNING"):
+            repo.mark_running(task.id)
+
+    # --- mark_ready ---
+
+    def test_mark_ready_from_running_succeeds(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_running(task.id)
+        repo.mark_ready(task.id)
+        assert repo.get(task.id).status == TaskStatus.READY
+
+    def test_mark_ready_from_complete_raises(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_complete(task.id)
+        with pytest.raises(ValueError):
+            repo.mark_ready(task.id)
+
+    def test_mark_ready_from_cancelled_raises(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_cancelled(task.id)
+        with pytest.raises(ValueError):
+            repo.mark_ready(task.id)
+
+    # --- mark_complete ---
+
+    def test_mark_complete_is_noop_when_already_complete(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_complete(task.id)
+        repo.mark_complete(task.id)  # should not raise
+        assert repo.get(task.id).status == TaskStatus.COMPLETE
+
+    def test_mark_complete_is_noop_when_cancelled(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_cancelled(task.id)
+        repo.mark_complete(task.id)  # should not raise, no-op
+        assert repo.get(task.id).status == TaskStatus.CANCELLED
+
+    # --- mark_blocked_by_human ---
+
+    def test_mark_blocked_by_human_from_ready_succeeds(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_blocked_by_human(task.id, "needs input")
+        assert repo.get(task.id).status == TaskStatus.BLOCKED_BY_HUMAN
+
+    def test_mark_blocked_by_human_from_complete_raises(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_complete(task.id)
+        with pytest.raises(ValueError):
+            repo.mark_blocked_by_human(task.id)
+
+    def test_mark_blocked_by_human_from_cancelled_raises(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_cancelled(task.id)
+        with pytest.raises(ValueError):
+            repo.mark_blocked_by_human(task.id)
+
+    def test_mark_blocked_by_human_does_not_overwrite_blocked_by_task(
+        self, repo
+    ):
+        """
+        A task that is BLOCKED_BY_HUMAN should not be touched by
+        remove_dependency — verifies the guard added for the Critic
+        review edge case where a task is manually blocked mid-review.
+        """
+        parent = make_task()
+        repo.add(parent)
+        child = repo.add_subtask(parent.id, "child", "desc")
+        # Manually block the parent by human while child is still running
+        repo.mark_blocked_by_human(parent.id, "manual intervention")
+        assert repo.get(parent.id).status == TaskStatus.BLOCKED_BY_HUMAN
+        # Completing the child should NOT change parent to READY
+        repo.mark_complete(child.id)
+        assert repo.get(parent.id).status == TaskStatus.BLOCKED_BY_HUMAN
+
+    # --- mark_cancelled ---
+
+    def test_mark_cancelled_from_ready_succeeds(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_cancelled(task.id)
+        assert repo.get(task.id).status == TaskStatus.CANCELLED
+
+    def test_mark_cancelled_from_running_succeeds(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_running(task.id)
+        repo.mark_cancelled(task.id)
+        assert repo.get(task.id).status == TaskStatus.CANCELLED
+
+    def test_mark_cancelled_from_blocked_by_human_succeeds(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_blocked_by_human(task.id)
+        repo.mark_cancelled(task.id)
+        assert repo.get(task.id).status == TaskStatus.CANCELLED
+
+    def test_mark_cancelled_is_noop_when_complete(self, repo):
+        task = make_task()
+        repo.add(task)
+        repo.mark_complete(task.id)
+        repo.mark_cancelled(task.id)  # should not raise, no-op
+        assert repo.get(task.id).status == TaskStatus.COMPLETE
+
+    # --- remove_dependency status guard ---
+
+    def test_remove_dependency_does_not_unblock_blocked_by_human(self, repo):
+        """
+        The Critic review edge case: task is BLOCKED_BY_HUMAN mid-review.
+        Completing the Critic task (remove_dependency) must not override
+        BLOCKED_BY_HUMAN with READY.
+        """
+        reviewed = make_task(title="reviewed")
+        critic = make_task(title="critic")
+        repo.add(reviewed)
+        repo.add(critic)
+        repo.add_dependency(critic.id, reviewed.id)
+        # Manually block the reviewed task by human
+        repo.mark_blocked_by_human(reviewed.id, "manual hold")
+        assert repo.get(reviewed.id).status == TaskStatus.BLOCKED_BY_HUMAN
+        # Remove the critic dependency — should NOT change status to READY
+        repo.remove_dependency(critic.id, reviewed.id)
+        assert repo.get(reviewed.id).status == TaskStatus.BLOCKED_BY_HUMAN
+
 # ---------------------------------------------------------------------------
 # add_subtask
 # ---------------------------------------------------------------------------

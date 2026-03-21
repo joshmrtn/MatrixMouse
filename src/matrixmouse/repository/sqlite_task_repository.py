@@ -392,6 +392,7 @@ class SQLiteTaskRepository(TaskRepository):
         blocking_task_id: str,
         blocked_task_id: str,
     ) -> None:
+        now = _now_iso()
         conn = self._conn()
         with conn:
             conn.execute(
@@ -401,6 +402,37 @@ class SQLiteTaskRepository(TaskRepository):
                 """,
                 (blocking_task_id, blocked_task_id),
             )
+            # If blocked_task_id has no remaining non-terminal blockers,
+            # transition it to READY. Atomic in the same transaction.
+            still_blocked = conn.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM task_dependencies td
+                    JOIN tasks t ON t.id = td.blocking_task_id
+                    WHERE td.blocked_task_id = ?
+                    AND t.status NOT IN (?, ?)
+                )
+                """,
+                (blocked_task_id, *_TERMINAL),
+            ).fetchone()[0]
+
+            if not still_blocked:
+                conn.execute(
+                    """
+                    UPDATE tasks SET
+                        status        = ?,
+                        last_modified = ?
+                    WHERE id = ?
+                    AND status = ?
+                    """,
+                    (
+                        TaskStatus.READY.value,
+                        now,
+                        blocked_task_id,
+                        TaskStatus.BLOCKED_BY_TASK.value,
+                    ),
+                )
 
     # ------------------------------------------------------------------
     # Named state transitions
@@ -417,16 +449,30 @@ class SQLiteTaskRepository(TaskRepository):
                     status             = ?,
                     time_slice_started = ?,
                     started_at         = CASE
-                                           WHEN started_at IS NULL THEN ?
-                                           ELSE started_at
-                                         END,
+                                        WHEN started_at IS NULL THEN ?
+                                        ELSE started_at
+                                        END,
                     last_modified      = ?
                 WHERE id = ?
+                AND status = ?
                 """,
-                (TaskStatus.RUNNING.value, now_mono, now_iso, now_iso, task_id),
+                (
+                    TaskStatus.RUNNING.value,
+                    now_mono,
+                    now_iso,
+                    now_iso,
+                    task_id,
+                    TaskStatus.READY.value,
+                ),
             )
             if cursor.rowcount == 0:
-                raise KeyError(f"Task '{task_id}' not found.")
+                task = self.get(task_id)
+                if task is None:
+                    raise KeyError(f"Task '{task_id}' not found.")
+                raise ValueError(
+                    f"Task '{task_id}' cannot transition to RUNNING from "
+                    f"{task.status.value}. Only READY tasks can become RUNNING."
+                )
 
     def mark_ready(self, task_id: str) -> None:
         now = _now_iso()
@@ -439,11 +485,18 @@ class SQLiteTaskRepository(TaskRepository):
                     time_slice_started = NULL,
                     last_modified      = ?
                 WHERE id = ?
+                AND status NOT IN (?, ?)
                 """,
-                (TaskStatus.READY.value, now, task_id),
+                (TaskStatus.READY.value, now, task_id, *_TERMINAL),
             )
             if cursor.rowcount == 0:
-                raise KeyError(f"Task '{task_id}' not found.")
+                task = self.get(task_id)
+                if task is None:
+                    raise KeyError(f"Task '{task_id}' not found.")
+                raise ValueError(
+                    f"Task '{task_id}' is {task.status.value} and cannot "
+                    f"be returned to READY."
+                )
 
     def mark_complete(self, task_id: str) -> None:
         now = _now_iso()
@@ -456,26 +509,28 @@ class SQLiteTaskRepository(TaskRepository):
                     completed_at  = ?,
                     last_modified = ?
                 WHERE id = ?
+                AND status NOT IN (?, ?)
                 """,
-                (TaskStatus.COMPLETE.value, now, now, task_id),
+                (TaskStatus.COMPLETE.value, now, now, task_id, *_TERMINAL),
             )
             if cursor.rowcount == 0:
-                raise KeyError(f"Task '{task_id}' not found.")
+                task = self.get(task_id)
+                if task is None:
+                    raise KeyError(f"Task '{task_id}' not found.")
+                # Already terminal — no-op is acceptable, not an error
+                return
 
-            # Tasks that were waiting on this one
             previously_blocked = conn.execute(
                 "SELECT blocked_task_id FROM task_dependencies "
                 "WHERE blocking_task_id = ?",
                 (task_id,),
             ).fetchall()
 
-            # Remove all edges where this task was the blocker
             conn.execute(
                 "DELETE FROM task_dependencies WHERE blocking_task_id = ?",
                 (task_id,),
             )
 
-            # Unblock any that now have zero non-terminal blockers
             for row in previously_blocked:
                 cid = row["blocked_task_id"]
                 still_blocked = conn.execute(
@@ -485,7 +540,7 @@ class SQLiteTaskRepository(TaskRepository):
                         FROM task_dependencies td
                         JOIN tasks t ON t.id = td.blocking_task_id
                         WHERE td.blocked_task_id = ?
-                          AND t.status NOT IN (?, ?)
+                        AND t.status NOT IN (?, ?)
                     )
                     """,
                     (cid, *_TERMINAL),
@@ -497,7 +552,7 @@ class SQLiteTaskRepository(TaskRepository):
                             status        = ?,
                             last_modified = ?
                         WHERE id = ?
-                          AND status = ?
+                        AND status = ?
                         """,
                         (
                             TaskStatus.READY.value,
@@ -519,11 +574,12 @@ class SQLiteTaskRepository(TaskRepository):
                     UPDATE tasks SET
                         status        = ?,
                         notes         = CASE
-                                          WHEN notes = '' THEN ?
-                                          ELSE notes || char(10) || ?
+                                        WHEN notes = '' THEN ?
+                                        ELSE notes || char(10) || ?
                                         END,
                         last_modified = ?
                     WHERE id = ?
+                    AND status NOT IN (?, ?)
                     """,
                     (
                         TaskStatus.BLOCKED_BY_HUMAN.value,
@@ -531,6 +587,7 @@ class SQLiteTaskRepository(TaskRepository):
                         f"[BLOCKED] {reason}",
                         now,
                         task_id,
+                        *_TERMINAL,
                     ),
                 )
             else:
@@ -540,11 +597,18 @@ class SQLiteTaskRepository(TaskRepository):
                         status        = ?,
                         last_modified = ?
                     WHERE id = ?
+                    AND status NOT IN (?, ?)
                     """,
-                    (TaskStatus.BLOCKED_BY_HUMAN.value, now, task_id),
+                    (TaskStatus.BLOCKED_BY_HUMAN.value, now, task_id, *_TERMINAL),
                 )
             if cursor.rowcount == 0:
-                raise KeyError(f"Task '{task_id}' not found.")
+                task = self.get(task_id)
+                if task is None:
+                    raise KeyError(f"Task '{task_id}' not found.")
+                raise ValueError(
+                    f"Task '{task_id}' is {task.status.value} and cannot "
+                    f"be marked BLOCKED_BY_HUMAN."
+                )
 
     def mark_cancelled(self, task_id: str) -> None:
         now = _now_iso()
@@ -557,11 +621,22 @@ class SQLiteTaskRepository(TaskRepository):
                     completed_at  = ?,
                     last_modified = ?
                 WHERE id = ?
+                AND status != ?
                 """,
-                (TaskStatus.CANCELLED.value, now, now, task_id),
+                (
+                    TaskStatus.CANCELLED.value,
+                    now,
+                    now,
+                    task_id,
+                    TaskStatus.COMPLETE.value,
+                ),
             )
             if cursor.rowcount == 0:
-                raise KeyError(f"Task '{task_id}' not found.")
+                task = self.get(task_id)
+                if task is None:
+                    raise KeyError(f"Task '{task_id}' not found.")
+                # Already COMPLETE — no-op, cannot cancel a completed task
+                return
 
     # ------------------------------------------------------------------
     # Subtask creation

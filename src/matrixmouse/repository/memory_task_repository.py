@@ -209,12 +209,18 @@ class InMemoryTaskRepository(TaskRepository):
         blocking_task_id: str,
         blocked_task_id: str,
     ) -> None:
-        self._blocked_by.get(blocked_task_id, set()).discard(
-            blocking_task_id
-        )
-        self._blocking.get(blocking_task_id, set()).discard(
-            blocked_task_id
-        )
+        self._blocked_by.get(blocked_task_id, set()).discard(blocking_task_id)
+        self._blocking.get(blocking_task_id, set()).discard(blocked_task_id)
+
+        # Transition to READY if no non-terminal blockers remain
+        if blocked_task_id in self._tasks:
+            blocked_task = self._tasks[blocked_task_id]
+            if (
+                blocked_task.status == TaskStatus.BLOCKED_BY_TASK
+                and not self.has_blockers(blocked_task_id)
+            ):
+                blocked_task.status = TaskStatus.READY
+                blocked_task.last_modified = _now_iso()
 
     # ------------------------------------------------------------------
     # Named state transitions
@@ -222,6 +228,11 @@ class InMemoryTaskRepository(TaskRepository):
 
     def mark_running(self, task_id: str) -> None:
         task = self._require(task_id)
+        if task.status != TaskStatus.READY:
+            raise ValueError(
+                f"Task '{task_id}' cannot transition to RUNNING from "
+                f"{task.status.value}. Only READY tasks can become RUNNING."
+            )
         now = _now_iso()
         task.status = TaskStatus.RUNNING
         task.time_slice_started = time.monotonic()
@@ -231,6 +242,11 @@ class InMemoryTaskRepository(TaskRepository):
 
     def mark_ready(self, task_id: str) -> None:
         task = self._require(task_id)
+        if task.status in _TERMINAL:
+            raise ValueError(
+                f"Task '{task_id}' is {task.status.value} and cannot "
+                f"be returned to READY."
+            )
         now = _now_iso()
         task.status = TaskStatus.READY
         task.time_slice_started = None
@@ -238,12 +254,14 @@ class InMemoryTaskRepository(TaskRepository):
 
     def mark_complete(self, task_id: str) -> None:
         task = self._require(task_id)
+        if task.status in _TERMINAL:
+            # Already terminal — no-op
+            return
         now = _now_iso()
         task.status = TaskStatus.COMPLETE
         task.completed_at = now
         task.last_modified = now
 
-        # Find tasks this task was blocking, remove edges, unblock if clear
         previously_blocked = list(self._blocking.get(task_id, set()))
         self._blocking.get(task_id, set()).clear()
         for bid in previously_blocked:
@@ -258,6 +276,11 @@ class InMemoryTaskRepository(TaskRepository):
         self, task_id: str, reason: str = ""
     ) -> None:
         task = self._require(task_id)
+        if task.status in _TERMINAL:
+            raise ValueError(
+                f"Task '{task_id}' is {task.status.value} and cannot "
+                f"be marked BLOCKED_BY_HUMAN."
+            )
         now = _now_iso()
         task.status = TaskStatus.BLOCKED_BY_HUMAN
         if reason:
@@ -270,6 +293,9 @@ class InMemoryTaskRepository(TaskRepository):
 
     def mark_cancelled(self, task_id: str) -> None:
         task = self._require(task_id)
+        if task.status == TaskStatus.COMPLETE:
+            # Cannot cancel a completed task — no-op
+            return
         now = _now_iso()
         task.status = TaskStatus.CANCELLED
         task.completed_at = now
