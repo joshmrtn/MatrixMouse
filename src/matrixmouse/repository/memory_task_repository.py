@@ -369,18 +369,20 @@ class InMemoryTaskRepository(TaskRepository):
             return []
 
         now = _now_iso()
+        parent = self._tasks[parent_id]
 
         with self._lock:
-            # Assign unique IDs inside the lock
             for subtask in subtasks:
                 self._ensure_unique_id(subtask)
                 subtask.created_at = now
                 subtask.last_modified = now
+                # Auto-assign branch if parent has one
+                if parent.branch and not subtask.branch:
+                    subtask.branch = f"{parent.branch}/{subtask.id}"
 
             def _get_blocked_by_ids(tid: str) -> list[str]:
                 return list(self._blocked_by.get(tid, set()))
 
-            # Cycle check before any mutations
             for subtask in subtasks:
                 if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
                     raise ValueError(
@@ -388,15 +390,13 @@ class InMemoryTaskRepository(TaskRepository):
                         f"would create a cycle. No subtasks were created."
                     )
 
-            # All checks passed — mutate
             for subtask in subtasks:
-                self._tasks[subtask.id] = subtask
+                self._tasks[subtask.id] = copy.copy(subtask)
                 self._blocked_by.setdefault(subtask.id, set())
                 self._blocking.setdefault(subtask.id, set())
                 self._blocked_by.setdefault(parent_id, set()).add(subtask.id)
                 self._blocking.setdefault(subtask.id, set()).add(parent_id)
 
-            parent = self._tasks[parent_id]
             parent.status = TaskStatus.BLOCKED_BY_TASK
             parent.last_modified = now
 

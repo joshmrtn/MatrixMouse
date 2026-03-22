@@ -759,12 +759,13 @@ class SQLiteTaskRepository(TaskRepository):
         conn = self._conn()
 
         with conn:
-            # Assign unique IDs and timestamps inside the transaction
-            # so collisions are resolved against the locked state.
             for subtask in subtasks:
                 self._ensure_unique_id(subtask)
                 subtask.created_at = now
                 subtask.last_modified = now
+                # Auto-assign branch if parent has one
+                if parent.branch and not subtask.branch:
+                    subtask.branch = f"{parent.branch}/{subtask.id}"
 
             def _get_blocked_by_ids(tid: str) -> list[str]:
                 rows = conn.execute(
@@ -776,9 +777,6 @@ class SQLiteTaskRepository(TaskRepository):
                 ).fetchall()
                 return [r[0] for r in rows]
 
-            # Cycle check for each subtask before any writes.
-            # New subtasks have no existing edges so cycles cannot form,
-            # but we check defensively against ID collision edge cases.
             for subtask in subtasks:
                 if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
                     raise ValueError(
@@ -786,7 +784,6 @@ class SQLiteTaskRepository(TaskRepository):
                         f"would create a cycle. No subtasks were created."
                     )
 
-            # Insert all subtasks and their dependency edges
             for subtask in subtasks:
                 conn.execute(_INSERT_SQL, _task_to_params(subtask))
                 conn.execute(
@@ -798,7 +795,6 @@ class SQLiteTaskRepository(TaskRepository):
                     (subtask.id, parent_id),
                 )
 
-            # Update parent status once, atomically
             conn.execute(
                 """
                 UPDATE tasks SET
@@ -810,3 +806,4 @@ class SQLiteTaskRepository(TaskRepository):
             )
 
         return subtasks
+    

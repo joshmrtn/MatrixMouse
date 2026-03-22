@@ -544,6 +544,59 @@ def split_task(
         )
         return f"ERROR: Failed to create subtasks: {e}"
 
+    # Create git branches for each subtask.
+    # Subtask branches were auto-assigned in add_subtasks as
+    # <parent_branch>/<subtask_id>. We now create them in git.
+    if _cwd is not None and parent.branch:
+        branched: list[str] = []  # track successfully branched subtasks
+        git_error: str | None = None
+
+        for subtask in created:
+            if not subtask.branch:
+                continue
+            ok, err = create_branch(subtask.branch, parent.branch, _cwd)
+            if ok:
+                branched.append(subtask.branch)
+                push_ok, push_err = push_to_remote(
+                    subtask.branch, MIRROR_REMOTE, _cwd
+                )
+                if not push_ok:
+                    logger.warning(
+                        "Subtask branch '%s' created but mirror push failed: %s. "
+                        "Will sync on next WIP commit.",
+                        subtask.branch, push_err,
+                    )
+            else:
+                git_error = err
+                break
+
+        if git_error:
+            # Compensating rollback — delete git branches already created
+            for branch_name in branched:
+                import subprocess as _sp
+                _sp.run(
+                    ["git", "branch", "-D", branch_name],
+                    cwd=_cwd, capture_output=True,
+                )
+                # Clear branch from subtask in repo
+                for subtask in created:
+                    if subtask.branch == branch_name:
+                        subtask.branch = ""
+                        try:
+                            queue.update(subtask)
+                        except Exception:
+                            pass
+            logger.error(
+                "Git branch creation failed during split_task on [%s]: %s. "
+                "Rolled back %d branch(es).",
+                task_id, git_error, len(branched),
+            )
+            return (
+                f"ERROR: Failed to create git branch for subtask: {git_error}. "
+                f"Rolled back {len(branched)} branch(es). "
+                f"Subtasks were created in PENDING state — retry split_task."
+            )
+
     lines = [
         f"OK: Task '{task_id}' split into {len(created)} subtask(s).",
         f"Parent task is now BLOCKED_BY_TASK until all subtasks complete.",
@@ -551,8 +604,10 @@ def split_task(
         "Subtasks created:",
     ]
     for subtask in created:
+        branch_info = f" branch={subtask.branch}" if subtask.branch else ""
         lines.append(
             f"  [{subtask.id}] ({subtask.role.value}) {subtask.title}"
+            f"{branch_info}"
         )
 
     return "\n".join(lines)

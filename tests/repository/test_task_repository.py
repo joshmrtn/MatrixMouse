@@ -1287,6 +1287,48 @@ class TestAddSubtasks:
         assert len(results) == 2
         assert repo.has_blockers(parent.id)
 
+    def test_subtask_branch_auto_assigned_from_parent(self, repo):
+        parent = make_task()
+        parent.branch = "mm/refactor/foo"
+        repo.add(parent)
+        child = make_task(title="child", branch="")
+        child.depth = 1
+        child.parent_task_id = parent.id
+        created = repo.add_subtasks(parent.id, [child])
+        assert created[0].branch == f"mm/refactor/foo/{created[0].id}"
+
+    def test_subtask_branch_not_overwritten_if_already_set(self, repo):
+        parent = make_task()
+        parent.branch = "mm/refactor/foo"
+        repo.add(parent)
+        child = make_task(title="child", branch="mm/refactor/foo/explicit")
+        child.depth = 1
+        child.parent_task_id = parent.id
+        created = repo.add_subtasks(parent.id, [child])
+        assert created[0].branch == "mm/refactor/foo/explicit"
+
+    def test_subtask_branch_empty_when_parent_has_no_branch(self, repo):
+        parent = make_task()  # branch="" by default
+        repo.add(parent)
+        child = make_task(title="child", branch="")
+        child.depth = 1
+        child.parent_task_id = parent.id
+        created = repo.add_subtasks(parent.id, [child])
+        assert created[0].branch == ""
+
+    def test_multiple_subtasks_get_distinct_branches(self, repo):
+        parent = make_task()
+        parent.branch = "mm/feature/bar"
+        repo.add(parent)
+        children = [make_task(title=f"child{i}", branch="") for i in range(3)]
+        for c in children:
+            c.depth = 1
+            c.parent_task_id = parent.id
+        created = repo.add_subtasks(parent.id, children)
+        branches = [t.branch for t in created]
+        assert len(set(branches)) == 3  # all distinct
+        assert all(b.startswith("mm/feature/bar/") for b in branches)
+
 
 class TestPendingStatus:
     def test_pending_task_excluded_from_active_tasks(self, repo):

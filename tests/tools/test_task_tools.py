@@ -622,6 +622,23 @@ class TestSplitTask:
         result = task_tools.split_task(parent.id, self._subtasks())
         assert "OK" in result
 
+    def test_subtask_branches_assigned_when_parent_has_branch(self):
+        parent = make_task(title="parent")  # branch="mm/feature/test" from make_task
+        q = setup_tools(active_task=parent, cwd=None)  # cwd=None skips git ops
+        result = task_tools.split_task(parent.id, self._subtasks(2))
+        assert "OK" in result
+        subtasks = [t for t in q.all_tasks() if t.id != parent.id]
+        for st in subtasks:
+            assert st.branch.startswith("mm/feature/test/")
+            assert len(st.branch.split("/")[-1]) == 16  # full task ID
+
+    def test_subtask_branch_shown_in_result(self):
+        parent = make_task(title="parent")
+        q = setup_tools(active_task=parent, cwd=None)
+        result = task_tools.split_task(parent.id, self._subtasks(1))
+        subtasks = [t for t in q.all_tasks() if t.id != parent.id]
+        assert subtasks[0].branch in result
+
 
 # ---------------------------------------------------------------------------
 # update_task
