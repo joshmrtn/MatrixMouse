@@ -77,7 +77,7 @@ Coverage:
         - Returns error when not called from Critic task
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -120,10 +120,15 @@ def make_config(depth_limit=3):
     from unittest.mock import MagicMock
     cfg = MagicMock()
     cfg.decomposition_depth_limit = depth_limit
+    cfg.agent_branch_prefix = "mm"
     return cfg
 
 
-def setup_tools(active_task=None, config=None) -> InMemoryTaskRepository:
+def setup_tools(
+    active_task=None,
+    config=None,
+    cwd=None,
+) -> InMemoryTaskRepository:
     """Configure task_tools with a fresh repository and optional active task."""
     q = make_repo()
     if active_task is not None:
@@ -132,6 +137,7 @@ def setup_tools(active_task=None, config=None) -> InMemoryTaskRepository:
         queue=q,
         active_task_id=active_task.id if active_task else None,
         config=config or make_config(),
+        cwd=cwd,
     )
     return q
 
@@ -288,6 +294,223 @@ class TestCreateTask:
         assert "ERROR" not in result
         assert q.all_tasks()[0].role == AgentRole.WRITER
 
+
+# ---------------------------------------------------------------------------
+# set_branch
+# ---------------------------------------------------------------------------
+
+
+class TestSetBranch:
+    """
+    Tests for set_branch tool.
+
+    Note: set_branch calls git operations internally (create_branch,
+    branch_exists, get_head_hash, push_to_remote). We patch these so
+    tests run without a real git repo.
+    """
+
+    def _setup(self, tmp_path, branch="") -> tuple:
+        task = make_task(title="parent task", branch=branch)
+        q = setup_tools(active_task=task, cwd=tmp_path)
+        return q, task
+
+    def _patch_git(
+        self,
+        branch_exists_return=False,
+        create_branch_return=(True, ""),
+        get_head_return="abc123def456abcd",
+        push_return=(True, ""),
+        current_branch="main",
+    ):
+        """Return a context manager that patches all git calls in set_branch."""
+        import unittest.mock as mock
+        return mock.patch.multiple(
+            "matrixmouse.tools.task_tools",
+            branch_exists=mock.MagicMock(return_value=branch_exists_return),
+            create_branch=mock.MagicMock(return_value=create_branch_return),
+            get_head_hash=mock.MagicMock(return_value=get_head_return),
+            push_to_remote=mock.MagicMock(return_value=push_return),
+        )
+
+    def test_returns_full_branch_name_on_success(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        with self._patch_git():
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="main\n"
+                )
+                result = task_tools.set_branch(task.id, "refactor/foobar")
+        assert "OK" in result
+        assert "mm/refactor/foobar" in result
+
+    def test_persists_branch_to_repository(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        with self._patch_git():
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="main\n"
+                )
+                task_tools.set_branch(task.id, "refactor/foobar")
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.branch == "mm/refactor/foobar"
+
+    def test_persists_wip_commit_hash(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        with self._patch_git(get_head_return="deadbeef12345678"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="main\n"
+                )
+                task_tools.set_branch(task.id, "fix/something")
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.wip_commit_hash == "deadbeef12345678"
+
+    def test_rejects_empty_slug(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        result = task_tools.set_branch(task.id, "")
+        assert "ERROR" in result
+
+    def test_rejects_invalid_slug(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        result = task_tools.set_branch(task.id, "Invalid Slug!")
+        assert "ERROR" in result
+
+    def test_rejects_task_with_branch_already_set(self, tmp_path):
+        q, task = self._setup(tmp_path, branch="mm/already/set")
+        result = task_tools.set_branch(task.id, "new/slug")
+        assert "ERROR" in result
+
+    def test_rejects_unknown_task_id(self, tmp_path):
+        setup_tools(cwd=tmp_path)
+        result = task_tools.set_branch("nonexistent", "fix/foo")
+        assert "ERROR" in result
+
+    def test_rejects_slug_when_branch_exists_in_git(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        with self._patch_git(branch_exists_return=True):
+            result = task_tools.set_branch(task.id, "refactor/foobar")
+        assert "ERROR" in result
+        assert "already exists" in result
+
+    def test_returns_error_when_git_branch_creation_fails(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        with self._patch_git(
+            create_branch_return=(False, "fatal: some git error")
+        ):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="main\n"
+                )
+                result = task_tools.set_branch(task.id, "fix/foo")
+        assert "ERROR" in result
+        assert "fatal" in result
+
+    def test_rolls_back_git_branch_on_db_failure(self, tmp_path):
+        """If the DB update fails after git branch creation, the git branch is deleted."""
+        q, task = self._setup(tmp_path)
+        with self._patch_git():
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="main\n"
+                )
+                with patch.object(q, "update", side_effect=Exception("DB down")):
+                    result = task_tools.set_branch(task.id, "fix/foo")
+        assert "ERROR" in result
+        assert "rolled back" in result.lower()
+        # Branch should not be persisted
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.branch == ""
+
+    def test_mirror_push_failure_does_not_block(self, tmp_path):
+        """Mirror push failure is a warning — branch is still assigned."""
+        q, task = self._setup(tmp_path)
+        with self._patch_git(push_return=(False, "mirror unreachable")):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="main\n"
+                )
+                result = task_tools.set_branch(task.id, "fix/foo")
+        assert "OK" in result
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.branch == "mm/fix/foo"
+
+    def test_uses_parent_branch_as_base(self, tmp_path):
+        parent = make_task(title="parent", branch="mm/refactor/foo")
+        child = make_task(title="child", branch="")
+        child.parent_task_id = parent.id
+
+        # Use setup_tools so _queue is the same repo both tasks live in
+        q = make_repo()
+        q.add(parent)
+        q.add(child)
+        task_tools.configure(
+            queue=q,
+            active_task_id=child.id,
+            config=make_config(),
+            cwd=tmp_path,
+        )
+
+        captured_base = []
+
+        def mock_create(branch_name, base, cwd):
+            captured_base.append(base)
+            return True, ""
+
+        with patch("matrixmouse.tools.task_tools.branch_exists",
+                return_value=False), \
+            patch("matrixmouse.tools.task_tools.create_branch",
+                side_effect=mock_create), \
+            patch("matrixmouse.tools.task_tools.get_head_hash",
+                return_value="abc123"), \
+            patch("matrixmouse.tools.task_tools.push_to_remote",
+                return_value=(True, "")), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            task_tools.set_branch(child.id, "child/work")
+
+        assert captured_base == ["mm/refactor/foo"]
+
+    def test_full_branch_name_uses_configured_prefix(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        cfg = make_config()
+        cfg.agent_branch_prefix = "bot"
+        task_tools.configure(queue=q, active_task_id=task.id, config=cfg, cwd=tmp_path)
+
+        with self._patch_git():
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="main\n"
+                )
+                result = task_tools.set_branch(task.id, "fix/foo")
+
+        assert "bot/fix/foo" in result
+
+    def test_rejects_empty_task_id(self, tmp_path):
+        setup_tools(cwd=tmp_path)
+        result = task_tools.set_branch("", "fix/foo")
+        assert "ERROR" in result
+
+    def test_returns_error_when_cwd_not_configured(self):
+        q = make_repo()
+        task = make_task(title="t", branch="")
+        q.add(task)
+        task_tools.configure(queue=q, active_task_id=task.id,
+                            config=make_config(), cwd=None)
+        result = task_tools.set_branch(task.id, "fix/foo")
+        assert "ERROR" in result
+        assert "Working directory" in result
+
+    def test_baseline_commit_hash_in_response(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        with self._patch_git(get_head_return="deadbeef12345678abcd"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+                result = task_tools.set_branch(task.id, "fix/foo")
+        assert "deadbeef" in result  # first 8 chars of hash shown
 
 # ---------------------------------------------------------------------------
 # split_task
@@ -517,6 +740,19 @@ class TestUpdateTask:
         setup_tools(active_task=task)
         result = task_tools.update_task(task.id)
         assert "No changes" in result
+
+    def test_field_and_dependency_change_together(self):
+        """Title update and add_blocked_by in same call both take effect."""
+        task = make_task(title="main", branch="")
+        blocker = make_task(title="blocker")
+        q = setup_tools(active_task=task)
+        q.add(blocker)
+        task_tools.update_task(task.id, title="new title",
+                            add_blocked_by=[blocker.id])
+        updated = q.get(task.id)
+        assert updated is not None
+        assert updated.title == "new title"
+        assert updated.status == TaskStatus.BLOCKED_BY_TASK
 
 
 # ---------------------------------------------------------------------------
@@ -774,3 +1010,14 @@ class TestDeny:
         setup_tools(active_task=task)
         result = task_tools.deny("feedback")
         assert "ERROR" in result
+
+    def test_deny_feedback_survives_refetch(self):
+        q, reviewed, critic = self._setup_critic_review()
+        task_tools.deny("Specific feedback that must survive.")
+        updated = q.get(reviewed.id)
+        assert updated is not None
+        assert any(
+            "Specific feedback that must survive." in m.get("content", "")
+            for m in updated.context_messages
+        )
+        

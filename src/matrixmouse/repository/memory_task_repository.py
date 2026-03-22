@@ -69,18 +69,15 @@ class InMemoryTaskRepository(TaskRepository):
     def get(self, task_id: str) -> Task | None:
         # Exact match
         if task_id in self._tasks:
-            return self._tasks[task_id]
+            return copy.copy(self._tasks[task_id])
         # Prefix match
-        matches = [
-            t for tid, t in self._tasks.items()
-            if tid.startswith(task_id)
-        ]
+        matches = [tid for tid in self._tasks if tid.startswith(task_id)]
         if len(matches) == 1:
-            return matches[0]
+            return copy.copy(self._tasks[matches[0]])
         if len(matches) > 1:
             raise ValueError(
                 f"Ambiguous prefix '{task_id}' matches: "
-                f"{[t.id for t in matches]}"
+                f"{[self._tasks[m].id for m in matches]}"
             )
         return None
 
@@ -113,11 +110,11 @@ class InMemoryTaskRepository(TaskRepository):
     # ------------------------------------------------------------------
 
     def all_tasks(self) -> list[Task]:
-        return list(self._tasks.values())
+        return [copy.copy(t) for t in self._tasks.values()]
 
     def active_tasks(self) -> list[Task]:
         return [
-            t for t in self._tasks.values()
+            copy.copy(t) for t in self._tasks.values()
             if t.status not in _NON_SCHEDULABLE
         ]
 
@@ -159,20 +156,20 @@ class InMemoryTaskRepository(TaskRepository):
 
     def get_subtasks(self, task_id: str) -> list[Task]:
         return [
-            t for t in self._tasks.values()
+            copy.copy(t) for t in self._tasks.values()
             if t.parent_task_id == task_id
         ]
 
     def get_blocked_by(self, task_id: str) -> list[Task]:
         return [
-            self._tasks[bid]
+            copy.copy(self._tasks[bid])
             for bid in self._blocked_by.get(task_id, set())
             if bid in self._tasks
         ]
 
     def get_blocking(self, task_id: str) -> list[Task]:
         return [
-            self._tasks[bid]
+            copy.copy(self._tasks[bid])
             for bid in self._blocking.get(task_id, set())
             if bid in self._tasks
         ]
@@ -191,7 +188,6 @@ class InMemoryTaskRepository(TaskRepository):
                 raise KeyError(f"Task '{tid}' not found.")
 
         with self._lock:
-            # No-op if already present
             if blocking_task_id in self._blocked_by.get(blocked_task_id, set()):
                 return
 
@@ -199,7 +195,7 @@ class InMemoryTaskRepository(TaskRepository):
                 return list(self._blocked_by.get(tid, set()))
 
             if detect_cycles(blocking_task_id, blocked_task_id,
-                             _get_blocked_by_ids):
+                            _get_blocked_by_ids):
                 raise ValueError(
                     f"Adding dependency '{blocking_task_id}' → "
                     f"'{blocked_task_id}' would create a cycle. "
@@ -212,6 +208,7 @@ class InMemoryTaskRepository(TaskRepository):
             self._blocking.setdefault(blocking_task_id, set()).add(
                 blocked_task_id
             )
+            # Mutate stored object directly
             blocked_task = self._tasks[blocked_task_id]
             if blocked_task.status not in _TERMINAL:
                 blocked_task.status = TaskStatus.BLOCKED_BY_TASK
@@ -225,9 +222,8 @@ class InMemoryTaskRepository(TaskRepository):
         self._blocked_by.get(blocked_task_id, set()).discard(blocking_task_id)
         self._blocking.get(blocking_task_id, set()).discard(blocked_task_id)
 
-        # Transition to READY if no non-terminal blockers remain
         if blocked_task_id in self._tasks:
-            blocked_task = self._tasks[blocked_task_id]
+            blocked_task = self._tasks[blocked_task_id]  # live reference
             if (
                 blocked_task.status == TaskStatus.BLOCKED_BY_TASK
                 and not self.has_blockers(blocked_task_id)
@@ -334,9 +330,9 @@ class InMemoryTaskRepository(TaskRepository):
         urgency: float | None = None,
         **kwargs,
     ) -> Task:
-        parent = self.get(parent_id)
-        if parent is None:
+        if parent_id not in self._tasks:
             raise KeyError(f"Parent task '{parent_id}' not found.")
+        parent = self._tasks[parent_id]  # live reference for mutation
 
         now = _now_iso()
         subtask = Task(
@@ -344,12 +340,8 @@ class InMemoryTaskRepository(TaskRepository):
             description=description,
             role=role if role is not None else parent.role,
             repo=repo if repo is not None else list(parent.repo),
-            importance=(
-                importance if importance is not None else parent.importance
-            ),
-            urgency=(
-                urgency if urgency is not None else parent.urgency
-            ),
+            importance=importance if importance is not None else parent.importance,
+            urgency=urgency if urgency is not None else parent.urgency,
             depth=parent.depth + 1,
             parent_task_id=parent_id,
             created_at=now,
@@ -362,7 +354,7 @@ class InMemoryTaskRepository(TaskRepository):
         parent.status = TaskStatus.BLOCKED_BY_TASK
         parent.last_modified = now
 
-        return subtask
+        return copy.copy(subtask)  # return copy so caller can't alias stored object
     
 
     def add_subtasks(
@@ -408,15 +400,16 @@ class InMemoryTaskRepository(TaskRepository):
             parent.status = TaskStatus.BLOCKED_BY_TASK
             parent.last_modified = now
 
-        return subtasks
+        return [copy.copy(t) for t in subtasks]
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _require(self, task_id: str) -> Task:
+        """Return the live stored task object for internal mutation."""
         task = self._tasks.get(task_id)
         if task is None:
             raise KeyError(f"Task '{task_id}' not found.")
-        return task
+        return task  # intentionally returns live reference for mutation
     

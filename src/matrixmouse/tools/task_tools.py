@@ -33,10 +33,19 @@ Do not add file, git, or navigation tools here.
 """
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from matrixmouse.config import MatrixMouseConfig
 from matrixmouse.repository.task_repository import TaskRepository
+from matrixmouse.utils.task_utils import validate_branch_slug
+from matrixmouse.tools.git_tools import (
+    branch_exists,
+    create_branch,
+    push_to_remote,
+    get_head_hash,
+    MIRROR_REMOTE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,32 +57,36 @@ logger = logging.getLogger(__name__)
 _queue: Optional[TaskRepository] = None
 _active_task_id: Optional[str] = None
 _config: Optional[MatrixMouseConfig] = None
+_cwd: Path | None = None
 
 
 def configure(
     queue: TaskRepository,
-    active_task_id: Optional[str] = None,
-    config: Optional[MatrixMouseConfig] = None,
+    active_task_id: str | None = None,
+    config: MatrixMouseConfig | None = None,
+    cwd: Path | None = None,
 ) -> None:
     """
-    Inject the task repository, active task ID, and config.
+    Inject the task repository, active task ID, config, and working directory.
 
-    Called by the orchestrator at the start of each task so tools
-    can read and mutate the correct task and respect config values
-    such as decomposition_depth_limit.
+    Called by the orchestrator at the start of each task.
 
     Args:
         queue:          The workspace-level TaskRepository.
         active_task_id: ID of the task currently being worked on.
-        config:         MatrixMouseConfig instance. Used for depth
-                        limit enforcement in split_task. If None,
-                        split_task falls back to the default value of 3.
+        config:         MatrixMouseConfig instance.
+        cwd:            Working directory (repo root) for git operations.
+                        If None, set_branch will be unavailable.
     """
-    global _queue, _active_task_id, _config
+    global _queue, _active_task_id, _config, _cwd
     _queue = queue
     _active_task_id = active_task_id
     _config = config
-    logger.debug("task_tools configured. Active task: %s", active_task_id)
+    _cwd = cwd
+    logger.debug(
+        "task_tools configured. Active task: %s cwd: %s",
+        active_task_id, cwd,
+    )
 
 
 def _require_queue() -> TaskRepository:
@@ -202,6 +215,159 @@ def create_task(
         f"Title: {task.title}\n"
         f"Role:  {role_enum.value}\n"
         f"Repo:  {', '.join(repo)}"
+    )
+
+
+def set_branch(task_id: str, slug: str) -> str:
+    """
+    Assign a git branch to a task and create it in the repository.
+
+    Call this before decomposing a task or doing any file work. The branch
+    name is permanent — it cannot be changed after assignment.
+
+    The full branch name is constructed as '<prefix>/<slug>', e.g. if the
+    prefix is 'mm' and the slug is 'refactor/foobar', the branch becomes
+    'mm/refactor/foobar'.
+
+    Slug rules:
+        - Lowercase letters, digits, hyphens, and forward slashes only
+        - No consecutive hyphens or slashes
+        - No leading or trailing hyphens or slashes
+        - Maximum 50 characters
+
+    Only available when the task has no branch assigned. Once a branch is
+    set, this tool is removed from your available tools.
+
+    Args:
+        task_id (str): ID of the task to assign the branch to. This is
+            typically the current active task, but may be any task you
+            are planning for.
+        slug (str): Human-meaningful branch slug, e.g. 'refactor/foobar'
+            or 'fix/login-timeout'. Do not include the prefix.
+
+    Returns:
+        str: The full branch name on success, or an error message.
+    """
+    from matrixmouse.task import TaskStatus
+
+    queue = _require_queue()
+
+    if not task_id:
+        return "ERROR: task_id is required."
+    if not slug or not slug.strip():
+        return "ERROR: slug cannot be empty."
+
+    task = queue.get(task_id)
+    if task is None:
+        return f"ERROR: Task '{task_id}' not found."
+
+    if task.branch:
+        return (
+            f"ERROR: Task '{task_id}' already has branch '{task.branch}' assigned. "
+            f"Branch names are permanent and cannot be changed."
+        )
+
+    # Validate slug and construct full branch name
+    prefix = _config.agent_branch_prefix if _config is not None else "mm"
+    try:
+        full_branch_name = validate_branch_slug(slug.strip(), prefix)
+    except ValueError as e:
+        return f"ERROR: {e}"
+
+    # Determine the working directory for git operations
+    if not _active_task_id:
+        return "ERROR: No active task — cannot determine working directory."
+
+    if _cwd is None:
+        return (
+            "ERROR: Working directory not configured. "
+            "Call task_tools.configure(cwd=...) at task start."
+        )
+    cwd = _cwd
+
+    # Check the branch doesn't already exist in git
+    if branch_exists(full_branch_name, cwd):
+        return (
+            f"ERROR: Branch '{full_branch_name}' already exists in the repository. "
+            f"Choose a different slug."
+        )
+
+    # Determine base branch — parent task's branch or current HEAD branch
+    base_branch = None
+    if task.parent_task_id:
+        parent = queue.get(task.parent_task_id)
+        if parent and parent.branch:
+            base_branch = parent.branch
+
+    if not base_branch:
+        # Top-level task — base off current HEAD branch
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd, capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip() != "HEAD":
+            base_branch = result.stdout.strip()
+        else:
+            return "ERROR: Could not determine base branch. Ensure the repo is on a named branch."
+
+    # Create the git branch atomically with DB update
+    # If git creation fails, task.branch is not updated.
+    success, git_output = create_branch(full_branch_name, base_branch, cwd)
+    if not success:
+        return (
+            f"ERROR: Failed to create git branch '{full_branch_name}' "
+            f"from '{base_branch}': {git_output}"
+        )
+
+    original_wip_hash = task.wip_commit_hash
+
+    # Record wip_commit_hash — HEAD of base at branch creation time
+    head_hash = get_head_hash(cwd)
+    if head_hash:
+        task.wip_commit_hash = head_hash
+
+    # Persist branch name to repository — immutability enforced here
+    task.branch = full_branch_name
+    try:
+        queue.update(task)
+    except ValueError as e:
+        # Immutability violation — should not happen since we checked above
+        # but guard defensively. Attempt to delete the git branch we just created.
+        task.branch = ""
+        import subprocess
+        subprocess.run(
+            ["git", "branch", "-D", full_branch_name],
+            cwd=cwd, capture_output=True,
+        )
+        return f"ERROR: Failed to persist branch assignment: {e}"
+    except Exception as e:
+        # Roll back git branch creation
+        task.branch = ""
+        import subprocess
+        subprocess.run(
+            ["git", "branch", "-D", full_branch_name],
+            cwd=cwd, capture_output=True,
+        )
+        return f"ERROR: Failed to persist branch assignment: {e}. Git branch rolled back."
+
+    # Push new branch to local mirror
+    push_ok, push_output = push_to_remote(full_branch_name, MIRROR_REMOTE, cwd)
+    if not push_ok:
+        logger.warning(
+            "Branch '%s' created and persisted but mirror push failed: %s. "
+            "Mirror will be updated on next WIP commit.",
+            full_branch_name, push_output,
+        )
+
+    logger.info(
+        "Branch '%s' assigned to task [%s] from base '%s'.",
+        full_branch_name, task_id, base_branch,
+    )
+    return (
+        f"OK: Branch '{full_branch_name}' created from '{base_branch}' "
+        f"and assigned to task '{task_id}'.\n"
+        f"Baseline commit: {head_hash[:8] if head_hash else 'unknown'}"
     )
 
 
@@ -481,26 +647,33 @@ def update_task(
         task.notes = (task.notes + f"\n{notes}").strip() if task.notes else notes
         changes.append("notes")
 
-    # --- Dependency graph updates ---
+    # --- Apply non-dependency field changes ---
+    non_dep_changes = [c for c in changes 
+                       if "blocked_by" not in c and "status" not in c]
+
+    if non_dep_changes:
+        try:
+            queue.update(task)
+        except Exception as e:
+            return f"ERROR: Failed to save task: {e}"
+
+    # --- Dependency graph updates (handle their own persistence) ---
     if remove_blocked_by:
         for dep_id in remove_blocked_by:
             queue.remove_dependency(dep_id, task_id)
-        changes.append("blocked_by (removed)")
-
-        # If task was BLOCKED_BY_TASK and is now unblocked, set to READY
-        if (task.status == TaskStatus.BLOCKED_BY_TASK
+        # Check if unblocked
+        refreshed = queue.get(task_id)
+        if (refreshed is not None
+                and refreshed.status == TaskStatus.BLOCKED_BY_TASK
                 and queue.is_ready(task_id)):
-            task.status = TaskStatus.READY
-            queue.update(task)
+            refreshed.status = TaskStatus.READY
+            queue.update(refreshed)
             changes.append("status → READY")
 
     if add_blocked_by:
         for dep_id in add_blocked_by:
             if queue.get(dep_id) is None:
-                return (
-                    f"ERROR: Cannot add dependency on '{dep_id}' "
-                    f"— task not found."
-                )
+                return f"ERROR: Cannot add dependency on '{dep_id}' — task not found."
         try:
             for dep_id in add_blocked_by:
                 queue.add_dependency(dep_id, task_id)
@@ -510,11 +683,6 @@ def update_task(
 
     if not changes:
         return "No changes specified. Provide at least one field to update."
-
-    try:
-        queue.update(task)
-    except Exception as e:
-        return f"ERROR: Failed to save task: {e}"
 
     logger.info(
         "Task [%s] updated by Manager. Fields changed: %s",
@@ -774,7 +942,13 @@ def deny(feedback: str) -> str:
     # Remove Critic task from reviewed task's blocked_by and set back to READY
     try:
         queue.remove_dependency(_active_task_id, reviewed_task.id)
-        queue.update(reviewed_task)
+        # Re-fetch to get status updated by remove_dependency
+        refreshed = queue.get(reviewed_task.id)
+        if refreshed is None:
+            return f"Error: Reviewed task '{reviewed_task.id}' disappeared."
+        # Apply the context message we added to the refereshed copy
+        refreshed.context_messages = reviewed_task.context_messages
+        queue.update(refreshed)
     except Exception as e:
         return f"ERROR: Failed to return reviewed task to READY: {e}"
 
