@@ -575,6 +575,22 @@ class MatrixMousePaths:
         For repo-scoped notes, use repo_paths(repo_name).agent_notes.
         """
         return self.mm_dir / "AGENT_NOTES.md"
+    
+    @property
+    def mirrors_dir(self) -> Path:
+        """
+        /var/lib/matrixmouse-mirrors/
+        Base directory for all local repo mirrors.
+        Created by install.sh and owned by the matrixmouse user.
+        """
+        return Path("/var/lib/matrixmouse-mirrors")
+
+    def mirror_path(self, repo_name: str) -> Path:
+        """
+        /var/lib/matrixmouse-mirrors/<repo_name>.git
+        Bare git mirror for the named repo.
+        """
+        return self.mirrors_dir / f"{repo_name}.git"
 
     def repo_paths(self, repo_name: str) -> "RepoPaths":
         """

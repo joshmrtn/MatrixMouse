@@ -47,13 +47,12 @@ from matrixmouse.tools.task_tools import (
     deny,
 )
 from matrixmouse.tools.git_tools import (
-    create_task_branch,
-    commit_progress,
+    git_commit,
     get_git_diff,
     get_git_log,
     get_git_status,
     push_branch,
-    open_pull_request,
+    clone_repo,
 )
 from matrixmouse.tools.code_tools import (
     get_function_def,
@@ -92,13 +91,12 @@ TOOLS = [
     approve,
     deny,
     # git_tools
-    create_task_branch,
-    commit_progress,
+    git_commit,
     get_git_diff,
     get_git_log,
     get_git_status,
     push_branch,
-    open_pull_request,
+    clone_repo,
     # code_tools
     get_function_def,
     get_function_list,
@@ -168,13 +166,12 @@ _CODER_TOOLS: frozenset[str] = frozenset({
     "str_replace",
     "append_to_file",
     # Git tools
-    "create_task_branch",
-    "commit_progress",
+    "git_commit",
     "get_git_diff",
     "get_git_log",
     "get_git_status",
     "push_branch",
-    "open_pull_request",
+    "clone_repo",
     # Code tools
     "get_function_def",
     "get_function_list",
@@ -204,13 +201,12 @@ _WRITER_TOOLS: frozenset[str] = frozenset({
     "str_replace",
     "append_to_file",
     # Git tools
-    "create_task_branch",
-    "commit_progress",
+    "git_commit",
     "get_git_diff",
     "get_git_log",
     "get_git_status",
     "push_branch",
-    "open_pull_request",
+    "clone_repo",
     # Navigation (Writers need to explore the project for context)
     "get_project_directory_structure",
     "get_file_summary",
