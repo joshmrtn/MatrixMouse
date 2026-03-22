@@ -61,6 +61,7 @@ Coverage:
 """
 
 import subprocess
+import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -99,7 +100,7 @@ def git_repo(tmp_path):
             cwd=repo,
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, "GIT_AUTHOR_NAME": "Test",
+            env={**os.environ, "GIT_AUTHOR_NAME": "Test",
                  "GIT_AUTHOR_EMAIL": "test@test.com",
                  "GIT_COMMITTER_NAME": "Test",
                  "GIT_COMMITTER_EMAIL": "test@test.com"},
@@ -147,7 +148,10 @@ def configured_task(git_repo):
         repo=["repo"],
         branch="mm/test/branch",
     )
-    task.wip_commit_hash = get_head_hash(git_repo)
+    assert git_repo is not None
+    hash = get_head_hash(git_repo)
+    assert hash is not None
+    task.wip_commit_hash = hash
     git_tools.configure(task, git_repo)
     yield task
     # Reset module state
@@ -213,7 +217,7 @@ class TestSquashWipCommits:
     def _git(self, repo, *args):
         result = subprocess.run(
             ["git"] + list(args), cwd=repo, capture_output=True, text=True,
-            env={**subprocess.os.environ,
+            env={**os.environ,
                  "GIT_AUTHOR_NAME": "Test",
                  "GIT_AUTHOR_EMAIL": "test@test.com",
                  "GIT_COMMITTER_NAME": "Test",
@@ -228,12 +232,14 @@ class TestSquashWipCommits:
 
     def test_noop_when_no_commits_since_baseline(self, git_repo):
         baseline = get_head_hash(git_repo)
+        assert baseline is not None
         success, msg = squash_wip_commits(baseline, "squashed", git_repo)
         assert success
         assert "Nothing to squash" in msg
 
     def test_noop_when_no_wip_at_top(self, git_repo):
         baseline = get_head_hash(git_repo)
+        assert baseline is not None
         self._commit(git_repo, "real commit", "real.txt")
         success, msg = squash_wip_commits(baseline, "squashed", git_repo)
         assert success
@@ -241,6 +247,7 @@ class TestSquashWipCommits:
 
     def test_squashes_single_wip_commit(self, git_repo):
         baseline = get_head_hash(git_repo)
+        assert baseline is not None
         self._commit(git_repo, f"{WIP_PREFIX}2026-01-01T00:00:00Z", "wip1.txt")
         success, _ = squash_wip_commits(baseline, "real commit", git_repo)
         assert success
@@ -250,6 +257,7 @@ class TestSquashWipCommits:
 
     def test_squashes_multiple_wip_commits(self, git_repo):
         baseline = get_head_hash(git_repo)
+        assert baseline is not None
         for i in range(3):
             self._commit(git_repo, f"{WIP_PREFIX}ts{i}", f"wip{i}.txt")
         success, _ = squash_wip_commits(baseline, "squashed all", git_repo)
@@ -260,6 +268,7 @@ class TestSquashWipCommits:
 
     def test_does_not_squash_real_commit_below_wip(self, git_repo):
         baseline = get_head_hash(git_repo)
+        assert baseline is not None
         self._commit(git_repo, "real work", "real.txt")
         self._commit(git_repo, f"{WIP_PREFIX}ts1", "wip1.txt")
         success, _ = squash_wip_commits(baseline, "squashed wip", git_repo)
@@ -269,6 +278,8 @@ class TestSquashWipCommits:
 
     def test_leaves_wip_below_real_commit_intact(self, git_repo):
         baseline = get_head_hash(git_repo)
+        assert baseline is not None
+
         # WIP commit, then real commit on top
         self._commit(git_repo, f"{WIP_PREFIX}ts1", "wip_below.txt")
         self._commit(git_repo, "real commit on top", "real_top.txt")
@@ -278,6 +289,47 @@ class TestSquashWipCommits:
         log = self._git(git_repo, "log", "--format=%s", "-5")
         assert "real commit on top" in log
         assert WIP_PREFIX in log  # WIP below real commit survives
+
+    def test_returns_error_when_reset_fails(self, git_repo):
+        baseline = get_head_hash(git_repo)
+        assert baseline is not None
+
+        self._commit(git_repo, f"{WIP_PREFIX}ts1", "wip1.txt")
+        
+        original_git = git_tools._git
+        call_count = 0
+        
+        def mock_git(args, cwd):
+            nonlocal call_count
+            # First call is git log — let it succeed
+            # Second call is git reset --soft — fail it
+            if args[0] == "reset":
+                return False, "fatal: mock reset failure"
+            return original_git(args, cwd)
+        
+        with patch("matrixmouse.tools.git_tools._git", side_effect=mock_git):
+            success, msg = squash_wip_commits(baseline, "squashed", git_repo)
+        
+        assert not success
+        assert "reset" in msg.lower()
+
+    def test_returns_error_when_commit_after_reset_fails(self, git_repo):
+        baseline = get_head_hash(git_repo)
+        assert baseline is not None
+        self._commit(git_repo, f"{WIP_PREFIX}ts1", "wip1.txt")
+        
+        original_git = git_tools._git
+        
+        def mock_git(args, cwd):
+            if args[0] == "commit":
+                return False, "fatal: mock commit failure"
+            return original_git(args, cwd)
+        
+        with patch("matrixmouse.tools.git_tools._git", side_effect=mock_git):
+            success, msg = squash_wip_commits(baseline, "squashed", git_repo)
+        
+        assert not success
+        assert "commit" in msg.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +448,7 @@ class TestGetGitLog:
     def _git(self, repo, *args):
         result = subprocess.run(
             ["git"] + list(args), cwd=repo, capture_output=True, text=True,
-            env={**subprocess.os.environ,
+            env={**os.environ,
                  "GIT_AUTHOR_NAME": "Test",
                  "GIT_AUTHOR_EMAIL": "test@test.com",
                  "GIT_COMMITTER_NAME": "Test",
@@ -455,7 +507,7 @@ class TestGitCommit:
     def _git(self, repo, *args):
         result = subprocess.run(
             ["git"] + list(args), cwd=repo, capture_output=True, text=True,
-            env={**subprocess.os.environ,
+            env={**os.environ,
                  "GIT_AUTHOR_NAME": "Test",
                  "GIT_AUTHOR_EMAIL": "test@test.com",
                  "GIT_COMMITTER_NAME": "Test",
