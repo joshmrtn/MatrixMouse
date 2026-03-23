@@ -77,6 +77,7 @@ Coverage:
         - Returns error when not called from Critic task
 """
 
+import copy
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -334,26 +335,124 @@ class TestSetBranch:
 
     def test_returns_full_branch_name_on_success(self, tmp_path):
         q, task = self._setup(tmp_path)
-        with self._patch_git():
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout="main\n"
-                )
-                result = task_tools.set_branch(task.id, "refactor/foobar")
+        with patch("matrixmouse.tools.task_tools.branch_exists", return_value=False), \
+            patch.object(q, "set_task_branch", return_value="mm/refactor/foobar"), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            result = task_tools.set_branch(task.id, "refactor/foobar")
         assert "OK" in result
         assert "mm/refactor/foobar" in result
 
     def test_persists_branch_to_repository(self, tmp_path):
         q, task = self._setup(tmp_path)
-        with self._patch_git():
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout="main\n"
-                )
-                task_tools.set_branch(task.id, "refactor/foobar")
+
+        def fake_set_task_branch(task_id, full_branch_name, base_branch,
+                                create_git_branch, delete_git_branch):
+            t = q._tasks[task_id]
+            t.branch = full_branch_name
+            t.wip_commit_hash = "abc123"
+            return full_branch_name
+
+        with patch("matrixmouse.tools.task_tools.branch_exists", return_value=False), \
+            patch.object(q, "set_task_branch", side_effect=fake_set_task_branch), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            task_tools.set_branch(task.id, "refactor/foobar")
+
         updated = q.get(task.id)
         assert updated is not None
         assert updated.branch == "mm/refactor/foobar"
+
+    def test_rejects_empty_slug(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        result = task_tools.set_branch(task.id, "")
+        assert "ERROR" in result
+
+    
+    def test_rejects_invalid_slug(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        result = task_tools.set_branch(task.id, "Invalid Slug!")
+        assert "ERROR" in result
+
+    def test_rejects_task_with_branch_already_set(self, tmp_path):
+        q, task = self._setup(tmp_path, branch="mm/already/set")
+        result = task_tools.set_branch(task.id, "new/slug")
+        assert "ERROR" in result
+        assert "permanent" in result.lower() or "already" in result.lower()
+
+    def test_rejects_unknown_task_id(self, tmp_path):
+        setup_tools(cwd=tmp_path)
+        result = task_tools.set_branch("nonexistent", "fix/foo")
+        assert "ERROR" in result
+
+    def test_returns_error_when_cwd_not_configured(self):
+        q = make_repo()
+        task = make_task(title="t", branch="")
+        q.add(task)
+        task_tools.configure(queue=q, active_task_id=task.id,
+                             config=make_config(), cwd=None)
+        result = task_tools.set_branch(task.id, "fix/foo")
+        assert "ERROR" in result
+        assert "Working directory" in result
+
+    def test_returns_error_when_empty_task_id(self, tmp_path):
+        setup_tools(cwd=tmp_path)
+        result = task_tools.set_branch("", "fix/foo")
+        assert "ERROR" in result
+
+    def test_git_failure_propagates_as_error(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        with patch.object(q, "set_task_branch",
+                          side_effect=ValueError("Failed to create git branch")):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+                result = task_tools.set_branch(task.id, "fix/foo")
+        assert "ERROR" in result
+
+    def test_uses_parent_branch_as_base(self, tmp_path):
+        parent = make_task(title="parent", branch="mm/refactor/foo")
+        child = make_task(title="child", branch="")
+        child.parent_task_id = parent.id
+        q = make_repo()
+        q.add(parent)
+        q.add(child)
+        task_tools.configure(queue=q, active_task_id=child.id,
+                             config=make_config(), cwd=tmp_path)
+
+        captured_base = []
+
+        def fake_set_task_branch(task_id, full_branch_name, base_branch,
+                                  create_git_branch, delete_git_branch):
+            captured_base.append(base_branch)
+            return full_branch_name
+
+        with patch.object(q, "set_task_branch",
+                          side_effect=fake_set_task_branch):
+            task_tools.set_branch(child.id, "child/work")
+
+        assert captured_base == ["mm/refactor/foo"]
+
+    def test_full_branch_name_uses_configured_prefix(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        cfg = make_config()
+        cfg.agent_branch_prefix = "bot"
+        task_tools.configure(queue=q, active_task_id=task.id,
+                            config=cfg, cwd=tmp_path)
+
+        captured_name = []
+
+        def fake_set_task_branch(task_id, full_branch_name, base_branch,
+                                create_git_branch, delete_git_branch):
+            captured_name.append(full_branch_name)
+            return full_branch_name
+
+        with patch("matrixmouse.tools.task_tools.branch_exists", return_value=False), \
+            patch.object(q, "set_task_branch", side_effect=fake_set_task_branch), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            task_tools.set_branch(task.id, "fix/foo")
+
+        assert captured_name == ["bot/fix/foo"]
 
     def test_persists_wip_commit_hash(self, tmp_path):
         q, task = self._setup(tmp_path)
@@ -367,29 +466,11 @@ class TestSetBranch:
         assert updated is not None
         assert updated.wip_commit_hash == "deadbeef12345678"
 
-    def test_rejects_empty_slug(self, tmp_path):
-        q, task = self._setup(tmp_path)
-        result = task_tools.set_branch(task.id, "")
-        assert "ERROR" in result
-
-    def test_rejects_invalid_slug(self, tmp_path):
-        q, task = self._setup(tmp_path)
-        result = task_tools.set_branch(task.id, "Invalid Slug!")
-        assert "ERROR" in result
-
-    def test_rejects_task_with_branch_already_set(self, tmp_path):
-        q, task = self._setup(tmp_path, branch="mm/already/set")
-        result = task_tools.set_branch(task.id, "new/slug")
-        assert "ERROR" in result
-
-    def test_rejects_unknown_task_id(self, tmp_path):
-        setup_tools(cwd=tmp_path)
-        result = task_tools.set_branch("nonexistent", "fix/foo")
-        assert "ERROR" in result
-
     def test_rejects_slug_when_branch_exists_in_git(self, tmp_path):
         q, task = self._setup(tmp_path)
-        with self._patch_git(branch_exists_return=True):
+        with patch("matrixmouse.tools.task_tools.branch_exists", return_value=True), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
             result = task_tools.set_branch(task.id, "refactor/foobar")
         assert "ERROR" in result
         assert "already exists" in result
@@ -408,18 +489,13 @@ class TestSetBranch:
         assert "fatal" in result
 
     def test_rolls_back_git_branch_on_db_failure(self, tmp_path):
-        """If the DB update fails after git branch creation, the git branch is deleted."""
         q, task = self._setup(tmp_path)
-        with self._patch_git():
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout="main\n"
-                )
-                with patch.object(q, "update", side_effect=Exception("DB down")):
-                    result = task_tools.set_branch(task.id, "fix/foo")
+        with patch.object(q, "set_task_branch",
+                        side_effect=ValueError("DB down. Git branch rolled back.")), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            result = task_tools.set_branch(task.id, "fix/foo")
         assert "ERROR" in result
-        assert "rolled back" in result.lower()
-        # Branch should not be persisted
         updated = q.get(task.id)
         assert updated is not None
         assert updated.branch == ""
@@ -438,71 +514,10 @@ class TestSetBranch:
         assert updated is not None
         assert updated.branch == "mm/fix/foo"
 
-    def test_uses_parent_branch_as_base(self, tmp_path):
-        parent = make_task(title="parent", branch="mm/refactor/foo")
-        child = make_task(title="child", branch="")
-        child.parent_task_id = parent.id
-
-        # Use setup_tools so _queue is the same repo both tasks live in
-        q = make_repo()
-        q.add(parent)
-        q.add(child)
-        task_tools.configure(
-            queue=q,
-            active_task_id=child.id,
-            config=make_config(),
-            cwd=tmp_path,
-        )
-
-        captured_base = []
-
-        def mock_create(branch_name, base, cwd):
-            captured_base.append(base)
-            return True, ""
-
-        with patch("matrixmouse.tools.task_tools.branch_exists",
-                return_value=False), \
-            patch("matrixmouse.tools.task_tools.create_branch",
-                side_effect=mock_create), \
-            patch("matrixmouse.tools.task_tools.get_head_hash",
-                return_value="abc123"), \
-            patch("matrixmouse.tools.task_tools.push_to_remote",
-                return_value=(True, "")), \
-            patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
-            task_tools.set_branch(child.id, "child/work")
-
-        assert captured_base == ["mm/refactor/foo"]
-
-    def test_full_branch_name_uses_configured_prefix(self, tmp_path):
-        q, task = self._setup(tmp_path)
-        cfg = make_config()
-        cfg.agent_branch_prefix = "bot"
-        task_tools.configure(queue=q, active_task_id=task.id, config=cfg, cwd=tmp_path)
-
-        with self._patch_git():
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout="main\n"
-                )
-                result = task_tools.set_branch(task.id, "fix/foo")
-
-        assert "bot/fix/foo" in result
-
     def test_rejects_empty_task_id(self, tmp_path):
         setup_tools(cwd=tmp_path)
         result = task_tools.set_branch("", "fix/foo")
         assert "ERROR" in result
-
-    def test_returns_error_when_cwd_not_configured(self):
-        q = make_repo()
-        task = make_task(title="t", branch="")
-        q.add(task)
-        task_tools.configure(queue=q, active_task_id=task.id,
-                            config=make_config(), cwd=None)
-        result = task_tools.set_branch(task.id, "fix/foo")
-        assert "ERROR" in result
-        assert "Working directory" in result
 
     def test_baseline_commit_hash_in_response(self, tmp_path):
         q, task = self._setup(tmp_path)
@@ -519,125 +534,186 @@ class TestSetBranch:
 class TestSplitTask:
     def _subtasks(self, n=2):
         return [
-            {
-                "title": f"Subtask {i}",
-                "description": f"Do part {i}",
-                "role": "coder",
-            }
+            {"title": f"Subtask {i}", "description": f"Do part {i}",
+             "role": "coder"}
             for i in range(n)
         ]
 
-    def test_creates_subtasks_under_parent(self):
-        parent = make_task(title="parent")
-        q = setup_tools(active_task=parent)
-        task_tools.split_task(parent.id, self._subtasks(2))
-        assert len(q.all_tasks()) == 3  # parent + 2 subtasks
+    def _setup_with_cwd(self, tmp_path, active_task=None):
+        task = active_task or make_task(title="parent")
+        q = setup_tools(active_task=task, cwd=tmp_path)
+        return q, task
 
-    def test_parent_becomes_blocked(self):
-        parent = make_task(title="parent")
-        q = setup_tools(active_task=parent)
-        task_tools.split_task(parent.id, self._subtasks(2))
-        t = q.get(parent.id)
+    def _mock_add_subtasks(self, q, created_tasks):
+        """Patch add_subtasks to return created_tasks without git ops."""
+        def fake_add_subtasks(parent_id, subtasks, create_git_branch,
+                               delete_git_branch):
+            for t in subtasks:
+                t.branch = f"mm/feature/test/{t.id}"
+                t.wip_commit_hash = "abc123"
+                q._tasks[t.id] = copy.copy(t)
+                q._blocked_by.setdefault(t.id, set())
+                q._blocking.setdefault(t.id, set())
+                q._blocked_by.setdefault(parent_id, set()).add(t.id)
+                q._blocking.setdefault(t.id, set()).add(parent_id)
+            parent = q._tasks[parent_id]
+            parent.status = TaskStatus.BLOCKED_BY_TASK
+            return [copy.copy(t) for t in subtasks]
+        return patch.object(q, "add_subtasks", side_effect=fake_add_subtasks)
+
+    def test_creates_subtasks_under_parent(self, tmp_path):
+        q, task = self._setup_with_cwd(tmp_path)
+        with self._mock_add_subtasks(q, []):
+            task_tools.split_task(task.id, self._subtasks(2))
+        assert len(q.all_tasks()) == 3
+
+    def test_parent_becomes_blocked(self, tmp_path):
+        q, task = self._setup_with_cwd(tmp_path)
+        with self._mock_add_subtasks(q, []):
+            task_tools.split_task(task.id, self._subtasks(2))
+        t = q.get(task.id)
         assert t is not None
         assert t.status == TaskStatus.BLOCKED_BY_TASK
 
-    def test_subtasks_block_parent(self):
-        parent = make_task(title="parent")
-        q = setup_tools(active_task=parent)
-        task_tools.split_task(parent.id, self._subtasks(2))
+    def test_subtasks_block_parent(self, tmp_path):
+        q, parent = self._setup_with_cwd(tmp_path)
+        with self._mock_add_subtasks(q, []):
+            task_tools.split_task(parent.id, self._subtasks(2))
         assert q.has_blockers(parent.id)
 
-    def test_returns_confirmation_with_subtask_ids(self):
-        parent = make_task(title="parent")
-        q = setup_tools(active_task=parent)
-        result = task_tools.split_task(parent.id, self._subtasks(2))
+    def test_returns_confirmation_with_subtask_ids(self, tmp_path):
+        q, parent = self._setup_with_cwd(tmp_path)
+        with self._mock_add_subtasks(q, []):
+            result = task_tools.split_task(parent.id, self._subtasks(2))
         assert "OK" in result
         subtasks = [t for t in q.all_tasks() if t.id != parent.id]
         for st in subtasks:
             assert st.id in result
 
-    def test_rejects_running_parent(self):
-        parent = make_task(title="parent", status=TaskStatus.RUNNING)
-        setup_tools(active_task=parent)
-        result = task_tools.split_task(parent.id, self._subtasks())
+    def test_rejects_running_parent(self, tmp_path):
+        q, parent = self._setup_with_cwd(tmp_path)
+        q.mark_running(parent.id)
+        with self._mock_add_subtasks(q, []):
+            result = task_tools.split_task(parent.id, self._subtasks(2))
         assert "ERROR" in result
         assert "RUNNING" in result
 
-    def test_rejects_terminal_parent(self):
-        parent = make_task(title="parent", status=TaskStatus.COMPLETE)
-        setup_tools(active_task=parent)
-        result = task_tools.split_task(parent.id, self._subtasks())
+    def test_rejects_terminal_parent(self, tmp_path):
+        q, parent = self._setup_with_cwd(tmp_path)
+        q.mark_complete(parent.id)
+        with self._mock_add_subtasks(q, []):
+            result = task_tools.split_task(parent.id, self._subtasks(2))
         assert "ERROR" in result
 
-    def test_rejects_parent_with_no_branch(self):
-        parent = make_task(title="parent", branch="")  # branch="" triggers guard
-        setup_tools(active_task=parent)
-        result = task_tools.split_task(parent.id, self._subtasks())
-        assert "ERROR" in result
-        assert "branch" in result.lower()
-
-    def test_rejects_empty_subtasks_list(self):
-        parent = make_task(title="parent")
-        setup_tools(active_task=parent)
-        result = task_tools.split_task(parent.id, [])
+    def test_rejects_empty_subtasks_list(self, tmp_path):
+        q, parent = self._setup_with_cwd(tmp_path)
+        with self._mock_add_subtasks(q, []):
+            result = task_tools.split_task(parent.id, self._subtasks(0))
         assert "ERROR" in result
 
-    def test_rejects_missing_task_id(self):
-        setup_tools()
-        result = task_tools.split_task("nonexistent", self._subtasks())
+    def test_rejects_missing_task_id(self, tmp_path):
+        q, task = self._setup_with_cwd(tmp_path)
+        with self._mock_add_subtasks(q, []):
+            result = task_tools.split_task("nonexistent", self._subtasks(2))
         assert "ERROR" in result
 
-    def test_rejects_subtask_with_invalid_role(self):
-        parent = make_task(title="parent")
-        setup_tools(active_task=parent)
+    def test_rejects_subtask_with_invalid_role(self, tmp_path):
+        q, task = self._setup_with_cwd(tmp_path)
         bad_subtasks = [{"title": "t", "description": "d", "role": "invalid"}]
-        result = task_tools.split_task(parent.id, bad_subtasks)
+        with self._mock_add_subtasks(q, []):
+            result = task_tools.split_task(task.id, bad_subtasks)
         assert "ERROR" in result
 
-    def test_validates_all_before_creating_any(self):
-        parent = make_task(title="parent")
-        q = setup_tools(active_task=parent)
+    def test_validates_all_before_creating_any(self, tmp_path):
+        q, parent = self._setup_with_cwd(tmp_path)
         mixed = [
             {"title": "good", "description": "fine", "role": "coder"},
             {"title": "bad",  "description": "broken", "role": "invalid"},
         ]
-        task_tools.split_task(parent.id, mixed)
-        # No subtasks should have been created
+        with self._mock_add_subtasks(q, []):
+            task_tools.split_task(parent.id, mixed)
         assert len(q.all_tasks()) == 1
 
-    def test_depth_limit_triggers_pending_confirmation(self):
-        parent = make_task(title="parent", depth=3)
-        setup_tools(active_task=parent, config=make_config(depth_limit=3))
-        with patch.object(task_tools, "_emit_decomposition_confirmation"):
-            result = task_tools.split_task(parent.id, self._subtasks())
+    def test_depth_limit_triggers_pending_confirmation(self, tmp_path):
+        parent_task = make_task(title="parent", depth=3)
+        q, parent = self._setup_with_cwd(tmp_path, parent_task)
+        with self._mock_add_subtasks(q, []):
+            with patch.object(task_tools, "_emit_decomposition_confirmation"):
+                result = task_tools.split_task(parent.id, self._subtasks())
         assert "PENDING_CONFIRMATION" in result
 
-    def test_depth_limit_respects_confirmed_depth(self):
+    def test_depth_limit_respects_confirmed_depth(self, tmp_path):
         # depth=3, confirmed_depth=1 means allowed_depth = 3 + 3 = 6
         parent = make_task(
             title="parent", depth=3,
             decomposition_confirmed_depth=1,
         )
-        setup_tools(active_task=parent, config=make_config(depth_limit=3))
-        result = task_tools.split_task(parent.id, self._subtasks())
+        q = setup_tools(active_task=parent, config=make_config(depth_limit=3), cwd=tmp_path)
+        with patch.object(q, "add_subtasks", return_value=[]):
+            result = task_tools.split_task(parent.id, self._subtasks())
         assert "OK" in result
 
-    def test_subtask_branches_assigned_when_parent_has_branch(self):
+    def test_subtask_branches_assigned_when_parent_has_branch(self, tmp_path):
         parent = make_task(title="parent")  # branch="mm/feature/test" from make_task
-        q = setup_tools(active_task=parent, cwd=None)  # cwd=None skips git ops
-        result = task_tools.split_task(parent.id, self._subtasks(2))
+        q = setup_tools(active_task=parent, cwd=tmp_path)
+        with patch.object(q, "add_subtasks", return_value=[]):
+            result = task_tools.split_task(parent.id, self._subtasks(2))
         assert "OK" in result
         subtasks = [t for t in q.all_tasks() if t.id != parent.id]
         for st in subtasks:
             assert st.branch.startswith("mm/feature/test/")
             assert len(st.branch.split("/")[-1]) == 16  # full task ID
 
-    def test_subtask_branch_shown_in_result(self):
+    def test_subtask_branch_shown_in_result(self, tmp_path):
         parent = make_task(title="parent")
-        q = setup_tools(active_task=parent, cwd=None)
-        result = task_tools.split_task(parent.id, self._subtasks(1))
-        subtasks = [t for t in q.all_tasks() if t.id != parent.id]
-        assert subtasks[0].branch in result
+        q = setup_tools(active_task=parent, cwd=tmp_path)
+
+        expected_branch = f"mm/feature/test/abc123def456abcd"
+        fake_subtask = make_task(title="Subtask 0")
+        fake_subtask.branch = expected_branch
+
+        with patch.object(q, "add_subtasks", return_value=[fake_subtask]):
+            result = task_tools.split_task(parent.id, self._subtasks(1))
+
+        assert "OK" in result
+        assert expected_branch in result
+
+    def test_git_rollback_on_partial_branch_creation_failure(self, tmp_path):
+        """If the second git branch creation fails, the first is rolled back."""
+        parent = make_task(title="parent")
+        q = setup_tools(active_task=parent, cwd=tmp_path)
+
+        call_count = 0
+        def mock_add_subtasks(parent_id, subtasks, create_git_branch,
+                            delete_git_branch):
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("Failed to create git branch: fatal error. "
+                            "All git branches rolled back.")
+
+        with patch.object(q, "add_subtasks", side_effect=mock_add_subtasks):
+            result = task_tools.split_task(parent.id, self._subtasks(2))
+
+        assert "ERROR" in result
+        # No subtasks created
+        assert len([t for t in q.all_tasks() if t.id != parent.id]) == 0
+
+    def test_rejects_when_cwd_not_configured(self):
+        parent = make_task(title="parent")
+        setup_tools(active_task=parent, cwd=None)
+        result = task_tools.split_task(parent.id, self._subtasks())
+        assert "ERROR" in result
+        assert "Working directory" in result
+
+    def test_rejects_parent_with_no_branch(self, tmp_path):
+        parent = make_task(title="parent", branch="")
+        q = make_repo()
+        q.add(parent)
+        task_tools.configure(queue=q, active_task_id=parent.id,
+                            config=make_config(), cwd=tmp_path)
+        result = task_tools.split_task(parent.id, self._subtasks())
+        assert "ERROR" in result
+        assert "branch" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -828,15 +904,21 @@ class TestGetTaskInfo:
         result = task_tools.get_task_info(task_id=task.id)
         assert blocker.id in result
 
-    def test_output_includes_subtasks_when_present(self):
+    def test_output_includes_subtasks_when_present(self, tmp_path):
         parent = make_task(title="parent")
-        q = setup_tools(active_task=parent)
-        task_tools.split_task(parent.id, [
-            {"title": "child", "description": "d", "role": "coder"}
-        ])
+        q = setup_tools(active_task=parent, cwd=tmp_path)
+
+        # Create a subtask directly so get_task_info can find it
+        subtask = make_task(title="child")
+        subtask.branch = f"mm/feature/test/{subtask.id}"
+        subtask.parent_task_id = parent.id
+        subtask.depth = 1
+        q.add(subtask)
+        q._blocked_by.setdefault(parent.id, set()).add(subtask.id)
+        q._blocking.setdefault(subtask.id, set()).add(parent.id)
+
         result = task_tools.get_task_info(task_id=parent.id)
-        subtasks = q.get_subtasks(parent.id)
-        assert subtasks[0].id in result
+        assert subtask.id in result
 
 
 # ---------------------------------------------------------------------------

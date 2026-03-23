@@ -148,6 +148,34 @@ def make_task(
     )
 
 
+def make_git_callables(
+    fail_create_on: int | None = None,
+    fail_delete: bool = False,
+):
+    """
+    Return (create_git_branch, delete_git_branch) mocks.
+
+    fail_create_on: if set, the Nth create call (1-indexed) returns failure.
+    fail_delete:    if True, delete always returns failure.
+    """
+    create_calls = []
+    deleted = []
+
+    def create(branch_name: str, base_branch: str) -> tuple[bool, str, str]:
+        create_calls.append(branch_name)
+        if fail_create_on and len(create_calls) == fail_create_on:
+            return False, "mock git failure", ""
+        return True, "", "deadbeef" * 5  # fake 40-char hash
+
+    def delete(branch_name: str) -> tuple[bool, str]:
+        deleted.append(branch_name)
+        if fail_delete:
+            return False, "mock delete failure"
+        return True, ""
+
+    return create, delete, create_calls, deleted
+
+
 # ---------------------------------------------------------------------------
 # add
 # ---------------------------------------------------------------------------
@@ -413,7 +441,9 @@ class TestDependencyQueries:
     def test_get_subtasks_returns_children(self, repo):
         parent = make_task(title="parent")
         repo.add(parent)
-        child = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        child = repo.add_subtask(parent.id, "child", "desc", create, delete)
         subtasks = repo.get_subtasks(parent.id)
         assert len(subtasks) == 1
         assert subtasks[0].id == child.id
@@ -426,8 +456,10 @@ class TestDependencyQueries:
     def test_get_subtasks_direct_children_only(self, repo):
         grandparent = make_task(title="grandparent")
         repo.add(grandparent)
-        parent = repo.add_subtask(grandparent.id, "parent", "desc")
-        repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(grandparent.id, "branchname", "", create, delete)
+        parent = repo.add_subtask(grandparent.id, "parent", "desc", create, delete)
+        repo.add_subtask(parent.id, "child", "desc", create, delete)
         # grandparent should only see parent, not grandchild
         assert len(repo.get_subtasks(grandparent.id)) == 1
 
@@ -739,7 +771,8 @@ class TestStateTransitionGuards:
         parent = make_task(role=AgentRole.MANAGER)
         parent.branch = "mm/feature/foo"
         repo.add(parent)
-        repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.add_subtask(parent.id, "child", "desc", create, delete)
         # parent is now BLOCKED_BY_TASK — try to mark it running
         with pytest.raises(ValueError, match="RUNNING"):
             repo.mark_running(parent.id)
@@ -829,7 +862,9 @@ class TestStateTransitionGuards:
         """
         parent = make_task()
         repo.add(parent)
-        child = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        child = repo.add_subtask(parent.id, "child", "desc", create, delete)
         # Manually block the parent by human while child is still running
         repo.mark_blocked_by_human(parent.id, "manual intervention")
         assert repo.get(parent.id).status == TaskStatus.BLOCKED_BY_HUMAN
@@ -938,53 +973,69 @@ class TestAddSubtask:
     def test_subtask_has_correct_depth(self, repo):
         parent = make_task(title="parent")
         repo.add(parent)
-        subtask = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        subtask = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert subtask.depth == 1
 
     def test_nested_depth(self, repo):
         grandparent = make_task()
         repo.add(grandparent)
-        parent = repo.add_subtask(grandparent.id, "parent", "desc")
-        child = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(grandparent.id, "branchname", "", create, delete)
+        parent = repo.add_subtask(grandparent.id, "parent", "desc", create, delete)
+        child = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert child.depth == 2
 
     def test_inherits_parent_role(self, repo):
         parent = make_task(role=AgentRole.WRITER)
         repo.add(parent)
-        subtask = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        subtask = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert subtask.role == AgentRole.WRITER
 
     def test_inherits_parent_repo(self, repo):
         parent = make_task(repo=["special-repo"])
         repo.add(parent)
-        subtask = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        subtask = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert subtask.repo == ["special-repo"]
 
     def test_inherits_parent_importance_urgency(self, repo):
         parent = make_task(importance=0.8, urgency=0.9)
         repo.add(parent)
-        subtask = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        subtask = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert subtask.importance == 0.8
         assert subtask.urgency == 0.9
 
     def test_explicit_role_override(self, repo):
         parent = make_task(role=AgentRole.CODER)
         repo.add(parent)
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
         subtask = repo.add_subtask(
-            parent.id, "doc child", "desc", role=AgentRole.WRITER
+            parent.id, "doc child", "desc", create, delete, role=AgentRole.WRITER,
         )
         assert subtask.role == AgentRole.WRITER
 
     def test_parent_becomes_blocked_by_task(self, repo):
         parent = make_task()
         repo.add(parent)
-        repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert repo.get(parent.id).status == TaskStatus.BLOCKED_BY_TASK
 
     def test_subtask_blocks_parent(self, repo):
         parent = make_task()
         repo.add(parent)
-        subtask = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        subtask = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert repo.has_blockers(parent.id) is True
         blockers = repo.get_blocked_by(parent.id)
         assert any(t.id == subtask.id for t in blockers)
@@ -992,18 +1043,23 @@ class TestAddSubtask:
     def test_subtask_persisted(self, repo):
         parent = make_task()
         repo.add(parent)
-        subtask = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        subtask = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert repo.get(subtask.id) is not None
 
     def test_parent_task_id_set(self, repo):
         parent = make_task()
         repo.add(parent)
-        subtask = repo.add_subtask(parent.id, "child", "desc")
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        subtask = repo.add_subtask(parent.id, "child", "desc", create, delete)
         assert subtask.parent_task_id == parent.id
 
     def test_unknown_parent_raises(self, repo):
         with pytest.raises(KeyError):
-            repo.add_subtask("nonexistent", "child", "desc")
+            create, delete, _, _ = make_git_callables()
+            repo.add_subtask("nonexistent", "child", "desc", create, delete)
             
 # ---------------------------------------------------------------------------
 # Concurrency — SQLite only
@@ -1186,7 +1242,9 @@ class TestAddSubtasks:
         parent = make_task(title="parent")
         repo.add(parent)
         children = [make_task(title=f"child{i}") for i in range(3)]
-        created = repo.add_subtasks(parent.id, children)
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        created = repo.add_subtasks(parent.id, children, create, delete)
         assert len(created) == 3
         for c in created:
             assert repo.get(c.id) is not None
@@ -1195,14 +1253,18 @@ class TestAddSubtasks:
         parent = make_task(title="parent")
         repo.add(parent)
         children = [make_task(title="child")]
-        repo.add_subtasks(parent.id, children)
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        repo.add_subtasks(parent.id, children, create, delete)
         assert repo.get(parent.id).status == TaskStatus.BLOCKED_BY_TASK
 
     def test_subtasks_block_parent(self, repo):
         parent = make_task(title="parent")
         repo.add(parent)
         children = [make_task(title="child")]
-        created = repo.add_subtasks(parent.id, children)
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        created = repo.add_subtasks(parent.id, children, create, delete)
         assert repo.has_blockers(parent.id)
         blockers = repo.get_blocked_by(parent.id)
         assert any(b.id == created[0].id for b in blockers)
@@ -1212,17 +1274,22 @@ class TestAddSubtasks:
         repo.add(parent)
         child = make_task(title="child")
         child.depth = parent.depth + 1
-        created = repo.add_subtasks(parent.id, [child])
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        created = repo.add_subtasks(parent.id, [child], create, delete)
         assert repo.get(created[0].id).depth == 1
 
     def test_unknown_parent_raises(self, repo):
         with pytest.raises(KeyError):
-            repo.add_subtasks("nonexistent", [make_task()])
+            create, delete, _, _ = make_git_callables()
+            repo.add_subtasks("nonexistent", [make_task()], create, delete)
 
     def test_empty_list_returns_empty(self, repo):
         parent = make_task(title="parent")
         repo.add(parent)
-        result = repo.add_subtasks(parent.id, [])
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        result = repo.add_subtasks(parent.id, [], create, delete)
         assert result == []
         assert repo.get(parent.id).status == TaskStatus.READY
 
@@ -1235,36 +1302,38 @@ class TestAddSubtasks:
         collider.id = child.id
         repo.add(collider)
         # add_subtasks should regenerate child's id
-        created = repo.add_subtasks(parent.id, [child])
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
+        created = repo.add_subtasks(parent.id, [child], create, delete)
         assert created[0].id != collider.id
         assert repo.get(created[0].id) is not None
 
     def test_atomic_rollback_on_failure(self, repo):
-        """If any subtask fails to insert, no subtasks should be created."""
+        """If git branch creation fails, no subtasks are created."""
         parent = make_task(title="parent")
+        parent.branch = "mm/feature/foo"
         repo.add(parent)
-        children = [make_task(title=f"child{i}") for i in range(3)]
-        # Force failure by making the second child have a duplicate id
-        # that will conflict after the first succeeds — only testable
-        # on SQLite where IntegrityError fires mid-transaction.
-        # For in-memory, test that ValueError rolls back cleanly.
-        original_status = repo.get(parent.id).status
-        try:
-            # Simulate by passing a subtask whose id matches the parent
-            bad_child = make_task(title="bad")
-            bad_child.id = parent.id  # will collide after retry loop
-            # _ensure_unique_id will regenerate, so this tests the
-            # retry path rather than rollback — that's acceptable.
-            repo.add_subtasks(parent.id, [bad_child])
-        except Exception:
-            pass
+
+        create, delete, _, deleted = make_git_callables(fail_create_on=2)
+        children = [make_task(title=f"child{i}", branch="") for i in range(3)]
+
+        with pytest.raises(ValueError):
+            repo.add_subtasks(parent.id, children, create, delete)
+
+        # No subtasks persisted
+        assert repo.get_subtasks(parent.id) == []
+        # Parent status unchanged
+        assert repo.get(parent.id).status == TaskStatus.READY
+        # First branch was rolled back
+        assert len(deleted) == 1
 
     def test_concurrent_add_subtasks_both_succeed(self, repo):
         """Two threads adding subtasks to the same parent both succeed."""
         import threading
         parent = make_task(title="parent")
         repo.add(parent)
-
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(parent.id, "branchname", "", create, delete)
         errors = []
         results = []
 
@@ -1273,7 +1342,7 @@ class TestAddSubtasks:
                 child = make_task(title=title)
                 child.depth = 1
                 child.parent_task_id = parent.id
-                created = repo.add_subtasks(parent.id, [child])
+                created = repo.add_subtasks(parent.id, [child], create, delete)
                 results.extend(created)
             except Exception as e:
                 errors.append(e)
@@ -1294,27 +1363,9 @@ class TestAddSubtasks:
         child = make_task(title="child", branch="")
         child.depth = 1
         child.parent_task_id = parent.id
-        created = repo.add_subtasks(parent.id, [child])
+        create, delete, _, _ = make_git_callables()
+        created = repo.add_subtasks(parent.id, [child], create, delete)
         assert created[0].branch == f"mm/refactor/foo/{created[0].id}"
-
-    def test_subtask_branch_not_overwritten_if_already_set(self, repo):
-        parent = make_task()
-        parent.branch = "mm/refactor/foo"
-        repo.add(parent)
-        child = make_task(title="child", branch="mm/refactor/foo/explicit")
-        child.depth = 1
-        child.parent_task_id = parent.id
-        created = repo.add_subtasks(parent.id, [child])
-        assert created[0].branch == "mm/refactor/foo/explicit"
-
-    def test_subtask_branch_empty_when_parent_has_no_branch(self, repo):
-        parent = make_task()  # branch="" by default
-        repo.add(parent)
-        child = make_task(title="child", branch="")
-        child.depth = 1
-        child.parent_task_id = parent.id
-        created = repo.add_subtasks(parent.id, [child])
-        assert created[0].branch == ""
 
     def test_multiple_subtasks_get_distinct_branches(self, repo):
         parent = make_task()
@@ -1324,10 +1375,109 @@ class TestAddSubtasks:
         for c in children:
             c.depth = 1
             c.parent_task_id = parent.id
-        created = repo.add_subtasks(parent.id, children)
+        create, delete, _, _ = make_git_callables()
+        created = repo.add_subtasks(parent.id, children, create, delete)
         branches = [t.branch for t in created]
         assert len(set(branches)) == 3  # all distinct
         assert all(b.startswith("mm/feature/bar/") for b in branches)
+
+    def test_git_branch_created_for_each_subtask(self, repo):
+        parent = make_task()
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        create, delete, created_branches, _ = make_git_callables()
+        children = [make_task(title=f"child{i}", branch="") for i in range(3)]
+        repo.add_subtasks(parent.id, children, create, delete)
+        assert len(created_branches) == 3
+        assert all(b.startswith("mm/feature/foo/") for b in created_branches)
+
+    def test_git_branches_rolled_back_on_second_failure(self, repo):
+        parent = make_task()
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        create, delete, _, deleted_branches = make_git_callables(fail_create_on=2)
+        children = [make_task(title=f"child{i}", branch="") for i in range(3)]
+        with pytest.raises(ValueError, match="git branch"):
+            repo.add_subtasks(parent.id, children, create, delete)
+        # First branch was created and then deleted on rollback
+        assert len(deleted_branches) == 1
+        # No tasks were persisted
+        assert repo.get_subtasks(parent.id) == []
+
+    def test_no_subtasks_persisted_on_git_failure(self, repo):
+        parent = make_task()
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        create, delete, _, _ = make_git_callables(fail_create_on=1)
+        children = [make_task(title="child", branch="")]
+        with pytest.raises(ValueError):
+            repo.add_subtasks(parent.id, children, create, delete)
+        assert len(repo.all_tasks()) == 1  # only parent
+
+    def test_wip_commit_hash_set_from_git_callable(self, repo):
+        parent = make_task()
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        create, delete, _, _ = make_git_callables()
+        child = make_task(title="child", branch="")
+        created = repo.add_subtasks(parent.id, [child], create, delete)
+        assert created[0].wip_commit_hash == "deadbeef" * 5
+
+    def test_raises_when_parent_has_no_branch(self, repo):
+        parent = make_task(branch="")
+        repo.add(parent)
+        create, delete, _, _ = make_git_callables()
+        child = make_task(title="child", branch="")
+        with pytest.raises(ValueError, match="no branch"):
+            repo.add_subtasks(parent.id, [child], create, delete)
+
+
+class TestSetTaskBranch:
+    def test_sets_branch_on_unbranded_task(self, repo):
+        task = make_task(role=AgentRole.MANAGER, branch="")
+        repo.add(task)
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(task.id, "mm/fix/foo", "main", create, delete)
+        assert repo.get(task.id).branch == "mm/fix/foo"
+
+    def test_sets_wip_commit_hash(self, repo):
+        task = make_task(role=AgentRole.MANAGER, branch="")
+        repo.add(task)
+        create, delete, _, _ = make_git_callables()
+        repo.set_task_branch(task.id, "mm/fix/foo", "main", create, delete)
+        assert repo.get(task.id).wip_commit_hash == "deadbeef" * 5
+
+    def test_raises_when_task_already_has_branch(self, repo):
+        task = make_task(branch="mm/existing/branch")
+        repo.add(task)
+        create, delete, _, _ = make_git_callables()
+        with pytest.raises(ValueError, match="permanent"):
+            repo.set_task_branch(
+                task.id, "mm/new/branch", "main", create, delete
+            )
+
+    def test_raises_when_task_not_found(self, repo):
+        create, delete, _, _ = make_git_callables()
+        with pytest.raises(KeyError):
+            repo.set_task_branch(
+                "nonexistent", "mm/fix/foo", "main", create, delete
+            )
+
+    def test_rolls_back_on_git_failure(self, repo):
+        task = make_task(role=AgentRole.MANAGER, branch="")
+        repo.add(task)
+
+        def failing_create(branch, base):
+            return False, "fatal: git error", ""
+
+        def delete(branch):
+            return True, ""
+
+        with pytest.raises(ValueError, match="git branch"):
+            repo.set_task_branch(
+                task.id, "mm/fix/foo", "main", failing_create, delete
+            )
+        assert repo.get(task.id).branch == ""
 
 
 class TestPendingStatus:

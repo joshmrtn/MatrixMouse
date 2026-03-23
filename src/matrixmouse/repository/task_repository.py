@@ -25,12 +25,18 @@ Design principles:
     - is_ready is a repository query, not a method on Task, because it
       requires a live view of the dependency graph.
 
+TODO: As the system matures, consider extracting a TaskService layer that 
+owns domain invariants and orchestration, leaving TaskRespository as pure 
+persistence. The repository currently handles both concerns as a pragmatic 
+early-stage decision. 
+
 Do not add scheduling logic, agent logic, or tool dispatch here.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Callable
 import uuid
 import logging
 logger = logging.getLogger(__name__)
@@ -353,78 +359,120 @@ class TaskRepository(ABC):
         parent_id: str,
         title: str,
         description: str,
-        role: "AgentRole | None" = None,
-        repo: "list[str] | None" = None,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
+        role: AgentRole | None = None,
+        repo: list[str] | None = None,
         importance: float | None = None,
         urgency: float | None = None,
         **kwargs,
     ) -> Task:
         """
-        Create a subtask under the given parent and persist both atomically.
+        Create a single subtask under parent_id atomically.
 
-        The subtask inherits role, repo, importance, and urgency from the
-        parent unless explicitly overridden. depth is always parent.depth + 1.
-        parent_task_id is always set to parent_id.
-
-        The parent task is updated atomically in the same transaction:
-            - status set to BLOCKED_BY_TASK
-            - dependency edge added: subtask blocks parent
-
-        Callers are responsible for running cycle detection before calling
-        this method. The repository does not re-check for cycles.
+        The subtask's branch is created via create_git_branch inside the
+        same transaction as the task row. If either the git operation or
+        the DB write fails, neither is committed.
 
         Args:
-            parent_id:   ID of the parent task.
-            title:       Title of the new subtask.
-            description: Description of the new subtask.
-            role:        Agent role. Defaults to parent's role.
-            repo:        Repo scope. Defaults to parent's repo.
-            importance:  Priority importance. Defaults to parent's importance.
-            urgency:     Priority urgency. Defaults to parent's urgency.
-            **kwargs:    Additional Task fields for edge cases.
+            parent_id:          ID of the parent task.
+            title:              Subtask title.
+            description:        Subtask description.
+            create_git_branch:  Callable(branch_name, base_branch)
+                                -> (success, error_msg, head_hash).
+                                Called inside the transaction.
+            delete_git_branch:  Callable(branch_name) -> (success, error_msg).
+                                Called on rollback if git branch was created
+                                before the transaction failed.
+            role:               Agent role. Defaults to parent's role.
+            repo:               Repo list. Defaults to parent's repo.
+            importance:         Defaults to parent's importance.
+            urgency:            Defaults to parent's urgency.
+            **kwargs:           Additional Task fields.
 
         Returns:
-            The newly created subtask.
+            The created Task with branch and wip_commit_hash set.
 
         Raises:
-            KeyError: If no task with parent_id exists.
+            KeyError:   Parent task not found.
+            ValueError: Branch creation failed or would create a cycle.
         """
-        
+
     @abstractmethod
     def add_subtasks(
         self,
         parent_id: str,
         subtasks: list[Task],
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
     ) -> list[Task]:
         """
-        Add multiple subtasks under a parent in a single atomic transaction.
+        Add multiple subtasks under parent_id in a single atomic transaction.
 
-        All subtasks are inserted, all dependency edges (subtask blocks
-        parent) are added, and the parent is set to BLOCKED_BY_TASK — or
-        none of it happens. If any operation fails the entire transaction
-        is rolled back.
+        For each subtask:
+          1. Assigns branch name as <parent_branch>/<subtask_id>
+          2. Calls create_git_branch(branch_name, parent_branch)
+          3. Sets subtask.wip_commit_hash from returned head_hash
+          4. Inserts task row and dependency edge
 
-        Cycle detection runs inside the transaction for each subtask before
-        any rows are written. Since subtasks are new nodes with no existing
-        edges, cycles cannot form from this operation alone. The check is
-        present as a defensive guard against ID collision after retry.
-
-        ID uniqueness is guaranteed: _ensure_unique_id() is called on each
-        subtask before insertion, regenerating any colliding IDs in place.
-
-        Callers are responsible for constructing Task objects with correct
-        fields (depth, parent_task_id, role, importance, urgency, etc.)
-        before calling this method.
+        If any step fails, all git branches created so far are deleted via
+        delete_git_branch, and no DB changes are committed.
 
         Args:
-            parent_id: ID of the parent task.
-            subtasks:  List of Task objects to create as children.
-                       task.id and timestamps are managed by the repository.
+            parent_id:          ID of the parent task.
+            subtasks:           Task objects to create. IDs may be regenerated
+                                by _ensure_unique_id before branch assignment.
+            create_git_branch:  Callable(branch_name, base_branch)
+                                -> (success, error_msg, head_hash).
+            delete_git_branch:  Callable(branch_name) -> (success, error_msg).
+                                Called for each successfully created branch
+                                on rollback.
 
         Returns:
-            The list of created Task objects with their final IDs assigned.
+            List of created Task objects with branch and wip_commit_hash set.
 
         Raises:
-            KeyError:   If parent_id does not exist.
-            ValueError: If adding any subtask would create a dependency cycle.
+            KeyError:   Parent task not found.
+            ValueError: Branch creation failed, cycle detected, or parent
+                        has no branch assigned.
+        """
+
+    @abstractmethod
+    def set_task_branch(
+        self,
+        task_id: str,
+        full_branch_name: str,
+        base_branch: str,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
+    ) -> str:
+        """
+        Assign a branch to a task that currently has no branch.
+
+        This is the only method that sets task.branch on an existing task.
+        Used by the Manager in BRANCH_SETUP session mode to name the top-level
+        interjection task before decomposition begins.
+
+        Atomicity guarantee: the git branch is created and the DB is updated
+        in a single operation. If either fails, neither is committed.
+
+        Args:
+            task_id:            Task to assign the branch to. Must have
+                                branch == "".
+            full_branch_name:   Full branch name including prefix,
+                                e.g. 'mm/refactor/foobar'.
+            base_branch:        Branch to base the new branch on.
+            create_git_branch:  Callable(branch_name, base_branch)
+                                -> (success, error_msg, head_hash).
+            delete_git_branch:  Callable(branch_name) -> (success, error_msg).
+                                Called on rollback if git branch was created
+                                before the DB write failed.
+
+        Returns:
+            The full branch name on success.
+
+        Raises:
+            KeyError:   Task not found.
+            ValueError: Task already has a branch, git operation failed,
+                        or branch name is invalid.
         """

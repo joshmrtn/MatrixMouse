@@ -97,6 +97,14 @@ def _require_queue() -> TaskRepository:
         )
     return _queue
 
+def _require_cwd() -> Path:
+    if _cwd is None:
+        raise RuntimeError(
+            "task_tools not configured. "
+            "Call task_tools.configure(cwd=...) at task start."
+        )
+    return _cwd
+
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -256,109 +264,93 @@ def set_branch(task_id: str, slug: str) -> str:
         return "ERROR: task_id is required."
     if not slug or not slug.strip():
         return "ERROR: slug cannot be empty."
+    try:
+        cwd = _require_cwd()
+    except RuntimeError as e:
+        return f"ERROR: Working directory not configured: {e}"
 
     task = queue.get(task_id)
     if task is None:
         return f"ERROR: Task '{task_id}' not found."
-
     if task.branch:
         return (
-            f"ERROR: Task '{task_id}' already has branch '{task.branch}' assigned. "
+            f"ERROR: Task '{task_id}' already has branch '{task.branch}'. "
             f"Branch names are permanent and cannot be changed."
         )
 
-    # Validate slug and construct full branch name
     prefix = _config.agent_branch_prefix if _config is not None else "mm"
     try:
         full_branch_name = validate_branch_slug(slug.strip(), prefix)
     except ValueError as e:
         return f"ERROR: {e}"
-
-    # Determine the working directory for git operations
-    if not _active_task_id:
-        return "ERROR: No active task — cannot determine working directory."
-
-    if _cwd is None:
-        return (
-            "ERROR: Working directory not configured. "
-            "Call task_tools.configure(cwd=...) at task start."
-        )
-    cwd = _cwd
-
-    # Check the branch doesn't already exist in git
+    
     if branch_exists(full_branch_name, cwd):
         return (
             f"ERROR: Branch '{full_branch_name}' already exists in the repository. "
             f"Choose a different slug."
         )
 
-    # Determine base branch — parent task's branch or current HEAD branch
-    base_branch = None
+    # Determine base branch
+    base_branch: str | None = None
     if task.parent_task_id:
         parent = queue.get(task.parent_task_id)
         if parent and parent.branch:
             base_branch = parent.branch
 
     if not base_branch:
-        # Top-level task — base off current HEAD branch
         import subprocess
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=cwd, capture_output=True, text=True,
         )
-        if result.returncode == 0 and result.stdout.strip() != "HEAD":
+        if result.returncode == 0 and result.stdout.strip() not in ("HEAD", ""):
             base_branch = result.stdout.strip()
         else:
-            return "ERROR: Could not determine base branch. Ensure the repo is on a named branch."
+            return (
+                "ERROR: Could not determine base branch. "
+                "Ensure the repo is on a named branch."
+            )
 
-    # Create the git branch atomically with DB update
-    # If git creation fails, task.branch is not updated.
-    success, git_output = create_branch(full_branch_name, base_branch, cwd)
-    if not success:
-        return (
-            f"ERROR: Failed to create git branch '{full_branch_name}' "
-            f"from '{base_branch}': {git_output}"
+    def git_create(branch_name: str, base: str) -> tuple[bool, str, str]:
+        if branch_exists(branch_name, cwd):
+            return False, f"Branch '{branch_name}' already exists.", ""
+        ok, err = create_branch(branch_name, base, cwd)
+        if not ok:
+            return False, err, ""
+        head = get_head_hash(cwd) or ""
+        push_ok, push_err = push_to_remote(branch_name, MIRROR_REMOTE, cwd)
+        if not push_ok:
+            logger.warning(
+                "Branch '%s' created but mirror push failed: %s. "
+                "Will sync on next WIP commit.",
+                branch_name, push_err,
+            )
+        return True, "", head
+
+    def git_delete(branch_name: str) -> tuple[bool, str]:
+        import subprocess as _sp
+        result = _sp.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=cwd, capture_output=True, text=True,
         )
+        if result.returncode != 0:
+            return False, result.stderr.strip()
+        return True, ""
 
-    original_wip_hash = task.wip_commit_hash
-
-    # Record wip_commit_hash — HEAD of base at branch creation time
-    head_hash = get_head_hash(cwd)
-    if head_hash:
-        task.wip_commit_hash = head_hash
-
-    # Persist branch name to repository — immutability enforced here
-    task.branch = full_branch_name
     try:
-        queue.update(task)
-    except ValueError as e:
-        # Immutability violation — should not happen since we checked above
-        # but guard defensively. Attempt to delete the git branch we just created.
-        task.branch = ""
-        import subprocess
-        subprocess.run(
-            ["git", "branch", "-D", full_branch_name],
-            cwd=cwd, capture_output=True,
+        queue.set_task_branch(
+            task_id=task_id,
+            full_branch_name=full_branch_name,
+            base_branch=base_branch,
+            create_git_branch=git_create,
+            delete_git_branch=git_delete,
         )
-        return f"ERROR: Failed to persist branch assignment: {e}"
-    except Exception as e:
-        # Roll back git branch creation
-        task.branch = ""
-        import subprocess
-        subprocess.run(
-            ["git", "branch", "-D", full_branch_name],
-            cwd=cwd, capture_output=True,
-        )
-        return f"ERROR: Failed to persist branch assignment: {e}. Git branch rolled back."
+    except (KeyError, ValueError) as e:
+        return f"ERROR: {e}"
 
-    # Push new branch to local mirror
-    push_ok, push_output = push_to_remote(full_branch_name, MIRROR_REMOTE, cwd)
-    if not push_ok:
-        logger.warning(
-            "Branch '%s' created and persisted but mirror push failed: %s. "
-            "Mirror will be updated on next WIP commit.",
-            full_branch_name, push_output,
-        )
+    updated = queue.get(task_id)
+    head_short = (updated.wip_commit_hash[:8]
+                  if updated and updated.wip_commit_hash else "unknown")
 
     logger.info(
         "Branch '%s' assigned to task [%s] from base '%s'.",
@@ -367,7 +359,7 @@ def set_branch(task_id: str, slug: str) -> str:
     return (
         f"OK: Branch '{full_branch_name}' created from '{base_branch}' "
         f"and assigned to task '{task_id}'.\n"
-        f"Baseline commit: {head_hash[:8] if head_hash else 'unknown'}"
+        f"Baseline commit: {head_short}"
     )
 
 
@@ -425,6 +417,10 @@ def split_task(
         return "ERROR: task_id is required."
     if not subtasks:
         return "ERROR: subtasks list cannot be empty."
+    try:
+        cwd = _require_cwd()
+    except RuntimeError as e:
+        return f"ERROR: Working directory not configured: {e}"
 
     parent = queue.get(task_id)
     if parent is None:
@@ -533,69 +529,48 @@ def split_task(
         )
         task_objects.append(subtask)
 
+    def git_create(branch_name: str, base: str) -> tuple[bool, str, str]:
+        ok, err = create_branch(branch_name, base, cwd)
+        if not ok:
+            return False, err, ""
+        head = get_head_hash(cwd) or ""
+        push_ok, push_err = push_to_remote(branch_name, MIRROR_REMOTE, cwd)
+        if not push_ok:
+            logger.warning(
+                "Branch '%s' created but mirror push failed: %s.",
+                branch_name, push_err,
+            )
+        return True, "", head
+
+    def git_delete(branch_name: str) -> tuple[bool, str]:
+        import subprocess as _sp
+        result = _sp.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=cwd, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return False, result.stderr.strip()
+        return True, ""
+
+
+    if not parent.branch:
+        return (
+            f"ERROR: Task '{task_id}' has no branch assigned. "
+            f"Call set_branch() before decomposing."
+        )
+
     try:
-        created = queue.add_subtasks(task_id, task_objects)
+        created = queue.add_subtasks(
+            task_id,
+            task_objects,
+            create_git_branch=git_create,
+            delete_git_branch=git_delete,
+        )
     except ValueError as e:
         return f"ERROR: {e}"
     except Exception as e:
-        logger.error(
-            "Unexpected error during split_task on task [%s]: %s",
-            task_id, e,
-        )
+        logger.error("Unexpected error in split_task [%s]: %s", task_id, e)
         return f"ERROR: Failed to create subtasks: {e}"
-
-    # Create git branches for each subtask.
-    # Subtask branches were auto-assigned in add_subtasks as
-    # <parent_branch>/<subtask_id>. We now create them in git.
-    if _cwd is not None and parent.branch:
-        branched: list[str] = []  # track successfully branched subtasks
-        git_error: str | None = None
-
-        for subtask in created:
-            if not subtask.branch:
-                continue
-            ok, err = create_branch(subtask.branch, parent.branch, _cwd)
-            if ok:
-                branched.append(subtask.branch)
-                push_ok, push_err = push_to_remote(
-                    subtask.branch, MIRROR_REMOTE, _cwd
-                )
-                if not push_ok:
-                    logger.warning(
-                        "Subtask branch '%s' created but mirror push failed: %s. "
-                        "Will sync on next WIP commit.",
-                        subtask.branch, push_err,
-                    )
-            else:
-                git_error = err
-                break
-
-        if git_error:
-            # Compensating rollback — delete git branches already created
-            for branch_name in branched:
-                import subprocess as _sp
-                _sp.run(
-                    ["git", "branch", "-D", branch_name],
-                    cwd=_cwd, capture_output=True,
-                )
-                # Clear branch from subtask in repo
-                for subtask in created:
-                    if subtask.branch == branch_name:
-                        subtask.branch = ""
-                        try:
-                            queue.update(subtask)
-                        except Exception:
-                            pass
-            logger.error(
-                "Git branch creation failed during split_task on [%s]: %s. "
-                "Rolled back %d branch(es).",
-                task_id, git_error, len(branched),
-            )
-            return (
-                f"ERROR: Failed to create git branch for subtask: {git_error}. "
-                f"Rolled back {len(branched)} branch(es). "
-                f"Subtasks were created in PENDING state — retry split_task."
-            )
 
     lines = [
         f"OK: Task '{task_id}' split into {len(created)} subtask(s).",
@@ -604,12 +579,10 @@ def split_task(
         "Subtasks created:",
     ]
     for subtask in created:
-        branch_info = f" branch={subtask.branch}" if subtask.branch else ""
         lines.append(
-            f"  [{subtask.id}] ({subtask.role.value}) {subtask.title}"
-            f"{branch_info}"
+            f"  [{subtask.id}] ({subtask.role.value}) {subtask.title} "
+            f"branch={subtask.branch}"
         )
-
     return "\n".join(lines)
 
 

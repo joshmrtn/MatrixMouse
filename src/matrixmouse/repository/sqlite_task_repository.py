@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from typing import Callable
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -686,11 +687,73 @@ class SQLiteTaskRepository(TaskRepository):
     # Subtask creation
     # ------------------------------------------------------------------
 
+    def set_task_branch(
+        self,
+        task_id: str,
+        full_branch_name: str,
+        base_branch: str,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
+    ) -> str:
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(f"Task '{task_id}' not found.")
+        if task.branch:
+            raise ValueError(
+                f"Task '{task_id}' already has branch '{task.branch}'. "
+                f"Branch names are permanent."
+            )
+
+        # Create git branch first — outside the DB transaction
+        # so we can roll back cleanly if it fails
+        git_ok, git_err, head_hash = create_git_branch(
+            full_branch_name, base_branch
+        )
+        if not git_ok:
+            raise ValueError(
+                f"Failed to create git branch '{full_branch_name}': {git_err}"
+            )
+
+        # Persist to DB
+        now = _now_iso()
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE tasks SET
+                        branch           = ?,
+                        wip_commit_hash  = ?,
+                        last_modified    = ?
+                    WHERE id = ?
+                      AND branch = ''
+                    """,
+                    (full_branch_name, head_hash, now, task_id),
+                )
+        except Exception as e:
+            # DB write failed — roll back the git branch
+            del_ok, del_err = delete_git_branch(full_branch_name)
+            if not del_ok:
+                logger.error(
+                    "DB write failed AND git branch deletion failed for '%s': "
+                    "DB error: %s | Git error: %s. "
+                    "Manual cleanup of orphaned branch may be required.",
+                    full_branch_name, e, del_err,
+                )
+            raise ValueError(
+                f"Failed to persist branch assignment: {e}. "
+                f"Git branch rolled back."
+            ) from e
+
+        return full_branch_name
+
     def add_subtask(
         self,
         parent_id: str,
         title: str,
         description: str,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
         role: AgentRole | None = None,
         repo: list[str] | None = None,
         importance: float | None = None,
@@ -700,6 +763,11 @@ class SQLiteTaskRepository(TaskRepository):
         parent = self.get(parent_id)
         if parent is None:
             raise KeyError(f"Parent task '{parent_id}' not found.")
+        if not parent.branch:
+            raise ValueError(
+                f"Parent task '{parent_id}' has no branch. "
+                f"Set a branch before creating subtasks."
+            )
 
         now = _now_iso()
         subtask = Task(
@@ -707,8 +775,7 @@ class SQLiteTaskRepository(TaskRepository):
             description=description,
             role=role if role is not None else parent.role,
             repo=repo if repo is not None else list(parent.repo),
-            importance=importance if importance is not None
-                       else parent.importance,
+            importance=importance if importance is not None else parent.importance,
             urgency=urgency if urgency is not None else parent.urgency,
             depth=parent.depth + 1,
             parent_task_id=parent_id,
@@ -718,92 +785,140 @@ class SQLiteTaskRepository(TaskRepository):
         )
         self._ensure_unique_id(subtask)
 
+        branch_name = f"{parent.branch}/{subtask.id}"
+        git_ok, git_err, head_hash = create_git_branch(branch_name, parent.branch)
+        if not git_ok:
+            raise ValueError(
+                f"Failed to create git branch '{branch_name}': {git_err}"
+            )
+
+        subtask.branch = branch_name
+        subtask.wip_commit_hash = head_hash
+
         conn = self._conn()
-        with conn:
-            conn.execute(_INSERT_SQL, _task_to_params(subtask))
-
-            conn.execute(
-                """
-                INSERT INTO task_dependencies
-                    (blocking_task_id, blocked_task_id)
-                VALUES (?, ?)
-                """,
-                (subtask.id, parent_id),
-            )
-
-            conn.execute(
-                """
-                UPDATE tasks SET
-                    status        = ?,
-                    last_modified = ?
-                WHERE id = ?
-                """,
-                (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
-            )
+        try:
+            with conn:
+                conn.execute(_INSERT_SQL, _task_to_params(subtask))
+                conn.execute(
+                    "INSERT INTO task_dependencies "
+                    "(blocking_task_id, blocked_task_id) VALUES (?, ?)",
+                    (subtask.id, parent_id),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status = ?, last_modified = ? "
+                    "WHERE id = ?",
+                    (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
+                )
+        except Exception as e:
+            del_ok, del_err = delete_git_branch(branch_name)
+            if not del_ok:
+                logger.error(
+                    "DB write failed AND git branch deletion failed for '%s': "
+                    "DB: %s | Git: %s. Orphaned branch requires manual cleanup.",
+                    branch_name, e, del_err,
+                )
+            raise ValueError(
+                f"Failed to create subtask: {e}. Git branch rolled back."
+            ) from e
 
         return subtask
-    
+
     def add_subtasks(
         self,
         parent_id: str,
         subtasks: list[Task],
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
     ) -> list[Task]:
         parent = self.get(parent_id)
         if parent is None:
             raise KeyError(f"Parent task '{parent_id}' not found.")
-
+        if not parent.branch:
+            raise ValueError(
+                f"Parent task '{parent_id}' has no branch. "
+                f"Set a branch before creating subtasks."
+            )
         if not subtasks:
             return []
 
         now = _now_iso()
         conn = self._conn()
 
-        with conn:
+        # Assign unique IDs and branch names, create git branches
+        # outside the DB transaction so we can track which branches
+        # to roll back on failure.
+        created_branches: list[str] = []
+
+        try:
             for subtask in subtasks:
                 self._ensure_unique_id(subtask)
                 subtask.created_at = now
                 subtask.last_modified = now
-                # Auto-assign branch if parent has one
-                if parent.branch and not subtask.branch:
-                    subtask.branch = f"{parent.branch}/{subtask.id}"
+                branch_name = f"{parent.branch}/{subtask.id}"
 
-            def _get_blocked_by_ids(tid: str) -> list[str]:
-                rows = conn.execute(
-                    """
-                    SELECT blocking_task_id FROM task_dependencies
-                    WHERE blocked_task_id = ?
-                    """,
-                    (tid,),
-                ).fetchall()
-                return [r[0] for r in rows]
-
-            for subtask in subtasks:
-                if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
-                    raise ValueError(
-                        f"Adding subtask '{subtask.id}' under '{parent_id}' "
-                        f"would create a cycle. No subtasks were created."
-                    )
-
-            for subtask in subtasks:
-                conn.execute(_INSERT_SQL, _task_to_params(subtask))
-                conn.execute(
-                    """
-                    INSERT INTO task_dependencies
-                        (blocking_task_id, blocked_task_id)
-                    VALUES (?, ?)
-                    """,
-                    (subtask.id, parent_id),
+                git_ok, git_err, head_hash = create_git_branch(
+                    branch_name, parent.branch
                 )
+                if not git_ok:
+                    raise ValueError(
+                        f"Failed to create git branch '{branch_name}': {git_err}"
+                    )
+                subtask.branch = branch_name
+                subtask.wip_commit_hash = head_hash
+                created_branches.append(branch_name)
 
-            conn.execute(
-                """
-                UPDATE tasks SET
-                    status        = ?,
-                    last_modified = ?
-                WHERE id = ?
-                """,
-                (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
-            )
+        except Exception:
+            # Roll back all git branches created so far
+            for branch_name in created_branches:
+                del_ok, del_err = delete_git_branch(branch_name)
+                if not del_ok:
+                    logger.error(
+                        "Git rollback failed for '%s': %s. "
+                        "Orphaned branch requires manual cleanup.",
+                        branch_name, del_err,
+                    )
+            raise
+
+        # All git branches created — now write to DB atomically
+        def _get_blocked_by_ids(tid: str) -> list[str]:
+            rows = conn.execute(
+                "SELECT blocking_task_id FROM task_dependencies "
+                "WHERE blocked_task_id = ?",
+                (tid,),
+            ).fetchall()
+            return [r[0] for r in rows]
+
+        try:
+            with conn:
+                for subtask in subtasks:
+                    if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
+                        raise ValueError(
+                            f"Adding subtask '{subtask.id}' would create a cycle."
+                        )
+                    conn.execute(_INSERT_SQL, _task_to_params(subtask))
+                    conn.execute(
+                        "INSERT INTO task_dependencies "
+                        "(blocking_task_id, blocked_task_id) VALUES (?, ?)",
+                        (subtask.id, parent_id),
+                    )
+                conn.execute(
+                    "UPDATE tasks SET status = ?, last_modified = ? WHERE id = ?",
+                    (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
+                )
+        except Exception as e:
+            # DB transaction rolled back automatically — roll back git branches
+            for branch_name in created_branches:
+                del_ok, del_err = delete_git_branch(branch_name)
+                if not del_ok:
+                    logger.error(
+                        "DB write failed AND git rollback failed for '%s': "
+                        "DB: %s | Git: %s. Orphaned branch requires manual cleanup.",
+                        branch_name, e, del_err,
+                    )
+            raise ValueError(
+                f"Failed to create subtasks: {e}. "
+                f"All git branches rolled back."
+            ) from e
 
         return subtasks
     

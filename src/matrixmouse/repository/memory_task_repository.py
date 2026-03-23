@@ -24,7 +24,7 @@ import uuid
 import copy
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.task import AgentRole, Task, TaskStatus
@@ -319,11 +319,58 @@ class InMemoryTaskRepository(TaskRepository):
     # Subtask creation
     # ------------------------------------------------------------------
 
+    def set_task_branch(
+        self,
+        task_id: str,
+        full_branch_name: str,
+        base_branch: str,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
+    ) -> str:
+        if task_id not in self._tasks:
+            raise KeyError(f"Task '{task_id}' not found.")
+        task = self._tasks[task_id]
+        if task.branch:
+            raise ValueError(
+                f"Task '{task_id}' already has branch '{task.branch}'. "
+                f"Branch names are permanent."
+            )
+
+        git_ok, git_err, head_hash = create_git_branch(
+            full_branch_name, base_branch
+        )
+        if not git_ok:
+            raise ValueError(
+                f"Failed to create git branch '{full_branch_name}': {git_err}"
+            )
+
+        try:
+            task.branch = full_branch_name
+            task.wip_commit_hash = head_hash
+            task.last_modified = _now_iso()
+        except Exception as e:
+            del_ok, del_err = delete_git_branch(full_branch_name)
+            if not del_ok:
+                logger.error(
+                    "State update failed AND git rollback failed for '%s': "
+                    "%s | %s",
+                    full_branch_name, e, del_err,
+                )
+            task.branch = ""
+            task.wip_commit_hash = ""
+            raise ValueError(
+                f"Failed to persist branch: {e}. Git branch rolled back."
+            ) from e
+
+        return full_branch_name
+
     def add_subtask(
         self,
         parent_id: str,
         title: str,
         description: str,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
         role: AgentRole | None = None,
         repo: list[str] | None = None,
         importance: float | None = None,
@@ -332,7 +379,12 @@ class InMemoryTaskRepository(TaskRepository):
     ) -> Task:
         if parent_id not in self._tasks:
             raise KeyError(f"Parent task '{parent_id}' not found.")
-        parent = self._tasks[parent_id]  # live reference for mutation
+        parent = self._tasks[parent_id]
+        if not parent.branch:
+            raise ValueError(
+                f"Parent task '{parent_id}' has no branch. "
+                f"Set a branch before creating subtasks."
+            )
 
         now = _now_iso()
         subtask = Task(
@@ -348,57 +400,134 @@ class InMemoryTaskRepository(TaskRepository):
             last_modified=now,
             **kwargs,
         )
+        self._ensure_unique_id(subtask)
 
-        self.add(subtask)
-        self.add_dependency(subtask.id, parent_id)
-        parent.status = TaskStatus.BLOCKED_BY_TASK
-        parent.last_modified = now
+        branch_name = f"{parent.branch}/{subtask.id}"
+        git_ok, git_err, head_hash = create_git_branch(branch_name, parent.branch)
+        if not git_ok:
+            raise ValueError(
+                f"Failed to create git branch '{branch_name}': {git_err}"
+            )
 
-        return copy.copy(subtask)  # return copy so caller can't alias stored object
-    
+        subtask.branch = branch_name
+        subtask.wip_commit_hash = head_hash
+
+        try:
+            self._tasks[subtask.id] = copy.copy(subtask)
+            self._blocked_by.setdefault(subtask.id, set())
+            self._blocking.setdefault(subtask.id, set())
+            self._blocked_by.setdefault(parent_id, set()).add(subtask.id)
+            self._blocking.setdefault(subtask.id, set()).add(parent_id)
+            parent.status = TaskStatus.BLOCKED_BY_TASK
+            parent.last_modified = now
+        except Exception as e:
+            del_ok, del_err = delete_git_branch(branch_name)
+            if not del_ok:
+                logger.error(
+                    "State update failed AND git rollback failed for '%s': "
+                    "%s | %s",
+                    branch_name, e, del_err,
+                )
+            # Clean up partial state
+            self._tasks.pop(subtask.id, None)
+            self._blocked_by.get(subtask.id, set()).clear()
+            self._blocking.get(subtask.id, set()).clear()
+            self._blocked_by.get(parent_id, set()).discard(subtask.id)
+            raise ValueError(
+                f"Failed to create subtask: {e}. Git branch rolled back."
+            ) from e
+
+        return copy.copy(subtask)
 
     def add_subtasks(
         self,
         parent_id: str,
         subtasks: list[Task],
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
     ) -> list[Task]:
         if parent_id not in self._tasks:
             raise KeyError(f"Parent task '{parent_id}' not found.")
-
+        parent = self._tasks[parent_id]
+        if not parent.branch:
+            raise ValueError(
+                f"Parent task '{parent_id}' has no branch. "
+                f"Set a branch before creating subtasks."
+            )
         if not subtasks:
             return []
 
         now = _now_iso()
-        parent = self._tasks[parent_id]
+        created_branches: list[str] = []
 
         with self._lock:
-            for subtask in subtasks:
-                self._ensure_unique_id(subtask)
-                subtask.created_at = now
-                subtask.last_modified = now
-                # Auto-assign branch if parent has one
-                if parent.branch and not subtask.branch:
-                    subtask.branch = f"{parent.branch}/{subtask.id}"
+            try:
+                for subtask in subtasks:
+                    self._ensure_unique_id(subtask)
+                    subtask.created_at = now
+                    subtask.last_modified = now
+                    branch_name = f"{parent.branch}/{subtask.id}"
+
+                    git_ok, git_err, head_hash = create_git_branch(
+                        branch_name, parent.branch
+                    )
+                    if not git_ok:
+                        raise ValueError(
+                            f"Failed to create git branch '{branch_name}': "
+                            f"{git_err}"
+                        )
+                    subtask.branch = branch_name
+                    subtask.wip_commit_hash = head_hash
+                    created_branches.append(branch_name)
+
+            except Exception:
+                for branch_name in created_branches:
+                    del_ok, del_err = delete_git_branch(branch_name)
+                    if not del_ok:
+                        logger.error(
+                            "Git rollback failed for '%s': %s.",
+                            branch_name, del_err,
+                        )
+                raise
 
             def _get_blocked_by_ids(tid: str) -> list[str]:
                 return list(self._blocked_by.get(tid, set()))
 
-            for subtask in subtasks:
-                if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
-                    raise ValueError(
-                        f"Adding subtask '{subtask.id}' under '{parent_id}' "
-                        f"would create a cycle. No subtasks were created."
-                    )
+            try:
+                for subtask in subtasks:
+                    if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
+                        raise ValueError(
+                            f"Adding subtask '{subtask.id}' would create a cycle."
+                        )
+                    self._tasks[subtask.id] = copy.copy(subtask)
+                    self._blocked_by.setdefault(subtask.id, set())
+                    self._blocking.setdefault(subtask.id, set())
+                    self._blocked_by.setdefault(parent_id, set()).add(subtask.id)
+                    self._blocking.setdefault(subtask.id, set()).add(parent_id)
 
-            for subtask in subtasks:
-                self._tasks[subtask.id] = copy.copy(subtask)
-                self._blocked_by.setdefault(subtask.id, set())
-                self._blocking.setdefault(subtask.id, set())
-                self._blocked_by.setdefault(parent_id, set()).add(subtask.id)
-                self._blocking.setdefault(subtask.id, set()).add(parent_id)
+                parent.status = TaskStatus.BLOCKED_BY_TASK
+                parent.last_modified = now
 
-            parent.status = TaskStatus.BLOCKED_BY_TASK
-            parent.last_modified = now
+            except Exception as e:
+                # Roll back in-memory state
+                for subtask in subtasks:
+                    self._tasks.pop(subtask.id, None)
+                    self._blocked_by.pop(subtask.id, None)
+                    self._blocking.pop(subtask.id, None)
+                    self._blocked_by.get(parent_id, set()).discard(subtask.id)
+                # Roll back git branches
+                for branch_name in created_branches:
+                    del_ok, del_err = delete_git_branch(branch_name)
+                    if not del_ok:
+                        logger.error(
+                            "State rollback AND git rollback failed for '%s': "
+                            "%s | %s. Orphaned branch requires manual cleanup.",
+                            branch_name, e, del_err,
+                        )
+                raise ValueError(
+                    f"Failed to create subtasks: {e}. "
+                    f"All git branches rolled back."
+                ) from e
 
         return [copy.copy(t) for t in subtasks]
 
