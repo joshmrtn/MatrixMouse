@@ -317,3 +317,9 @@ def tools_for_role_list(role: "AgentRole") -> list:
     """
     allowed = tools_for_role(role)
     return [fn for fn in TOOLS if fn.__name__ in allowed]
+
+
+def tools_for_names(names: set[str]) -> list:
+    """Return tool functions matching the given name set."""
+    all_tools = {fn.__name__: fn for fn in TOOLS}
+    return [all_tools[n] for n in names if n in all_tools]

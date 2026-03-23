@@ -62,6 +62,29 @@ class SessionMode(str, Enum):
     MERGE_RESOLUTION = "merge_resolution" # Any role during conflict resolution
     PLANNING         = "planning"         # Manager during task decomposition
 
+BRANCH_SETUP_TOOLS: frozenset[str] = frozenset({
+    "get_task_info",
+    "list_tasks",
+    "set_branch",
+    "declare_complete",
+})
+
+PLANNING_TOOLS: frozenset[str] = frozenset({
+    "get_task_info",
+    "list_tasks",
+    "create_task",
+    "split_task",
+    "update_task",
+    "set_branch",
+    "declare_complete",
+    "request_clarification",
+})
+
+MERGE_RESOLUTION_TOOLS: frozenset[str] = frozenset({
+    "show_conflict",
+    "resolve_conflict",
+})
+
 
 class WorkspaceStateRepository(ABC):
     """

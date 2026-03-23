@@ -476,3 +476,26 @@ class TaskRepository(ABC):
             ValueError: Task already has a branch, git operation failed,
                         or branch name is invalid.
         """
+
+    @abstractmethod
+    def commit_pending_subtree(self, root_task_id: str) -> list[str]:
+        """
+        Transition all PENDING descendants of root_task_id to their
+        correct schedulable status in a single atomic operation.
+
+        For each PENDING descendant:
+        - If it has no non-terminal blockers: READY
+        - If it has non-terminal blockers: BLOCKED_BY_TASK
+
+        Called by the orchestrator when a Manager declares_complete
+        in PLANNING session mode, committing the planned task graph.
+
+        Args:
+            root_task_id: Root of the subtree to commit.
+
+        Returns:
+            List of task IDs that were transitioned.
+
+        Raises:
+            KeyError: If root_task_id does not exist.
+        """

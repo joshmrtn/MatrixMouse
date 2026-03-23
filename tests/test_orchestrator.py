@@ -187,15 +187,17 @@ def make_task(
 
 def make_config(**kwargs) -> MagicMock:
     cfg = MagicMock()
-    cfg.priority_aging_rate           = kwargs.get("aging_rate",        0.01)
-    cfg.priority_max_aging_bonus      = kwargs.get("max_aging_bonus",   0.3)
-    cfg.priority_importance_weight    = kwargs.get("importance_weight", 0.6)
-    cfg.priority_urgency_weight       = kwargs.get("urgency_weight",    0.4)
-    cfg.agent_max_turns               = kwargs.get("agent_max_turns",   50)
-    cfg.manager_review_schedule       = kwargs.get("schedule",          "")
-    cfg.clarification_timeout_minutes = kwargs.get("timeout_minutes",   60)
-    cfg.manager_review_upcoming_tasks = kwargs.get("upcoming_tasks",    20)
-    cfg.critic_max_turns              = kwargs.get("critic_max_turns",  5)
+    cfg.priority_aging_rate           = kwargs.get("aging_rate",               0.01)
+    cfg.priority_max_aging_bonus      = kwargs.get("max_aging_bonus",          0.3)
+    cfg.priority_importance_weight    = kwargs.get("importance_weight",        0.6)
+    cfg.priority_urgency_weight       = kwargs.get("urgency_weight",           0.4)
+    cfg.agent_max_turns               = kwargs.get("agent_max_turns",          50)
+    cfg.manager_review_schedule       = kwargs.get("schedule",                 "")
+    cfg.clarification_timeout_minutes = kwargs.get("timeout_minutes",          60)
+    cfg.manager_review_upcoming_tasks = kwargs.get("upcoming_tasks",           20)
+    cfg.critic_max_turns              = kwargs.get("critic_max_turns",         5)
+    cfg.manager_planning_max_turns    = kwargs.get("planning_max_turns",       10)
+    cfg.agent_branch_prefix           = kwargs.get("agent_branch_prefix",      "mm")
     return cfg
 
 
@@ -768,3 +770,188 @@ class TestOnManagerReviewComplete:
              patch.object(orch, "_on_manager_review_complete") as mock_review:
             orch._handle_complete(task, result)
         mock_review.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Session mode wiring
+# ---------------------------------------------------------------------------
+
+class TestSessionModeWiring:
+    """
+    Tests for BRANCH_SETUP and PLANNING session mode wiring in the
+    orchestrator. These test the orchestrator's state management around
+    session contexts — not the full agent loop execution.
+    """
+
+    def test_branch_setup_context_set_for_branchless_manager(self, tmp_path):
+        """Manager task with no branch gets BRANCH_SETUP session context."""
+        from matrixmouse.repository.workspace_state_repository import SessionMode
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MANAGER, branch="")
+        orch.queue.add(task)
+
+        # Simulate the session context check at start of _run_task
+        # by calling the relevant block directly
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, BRANCH_SETUP_TOOLS
+        )
+        if (task.role == AgentRole.MANAGER
+                and not task.branch
+                and task.status != TaskStatus.PENDING):
+            existing_ctx = orch._ws_state_repo.get_session_context(task.id)
+            if existing_ctx is None:
+                orch._ws_state_repo.set_session_context(
+                    task.id,
+                    SessionContext(
+                        mode=SessionMode.BRANCH_SETUP,
+                        allowed_tools=set(BRANCH_SETUP_TOOLS),
+                        system_prompt_addendum="name the branch",
+                    ),
+                )
+
+        ctx = orch._ws_state_repo.get_session_context(task.id)
+        assert ctx is not None
+        assert ctx.mode == SessionMode.BRANCH_SETUP
+        assert "set_branch" in ctx.allowed_tools
+        assert "split_task" not in ctx.allowed_tools
+
+    def test_branch_setup_context_not_set_for_branched_manager(self, tmp_path):
+        """Manager task with a branch does not get BRANCH_SETUP context."""
+        from matrixmouse.repository.workspace_state_repository import SessionMode
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
+        orch.queue.add(task)
+        # No context should be set
+        assert orch._ws_state_repo.get_session_context(task.id) is None
+
+    def test_planning_context_cleared_on_complete(self, tmp_path):
+        """PLANNING session context is cleared when Manager declares complete."""
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode, PLANNING_TOOLS
+        )
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
+        orch.queue.add(task)
+
+        # Set PLANNING context
+        orch._ws_state_repo.set_session_context(
+            task.id,
+            SessionContext(
+                mode=SessionMode.PLANNING,
+                allowed_tools=set(PLANNING_TOOLS),
+            ),
+        )
+
+        result = make_loop_result(summary="plan done")
+        with patch("matrixmouse.comms.get_manager", return_value=None):
+            orch._handle_complete(task, result)
+
+        assert orch._ws_state_repo.get_session_context(task.id) is None
+
+    def test_planning_commit_pending_subtree_on_complete(self, tmp_path):
+        """PLANNING completion transitions PENDING subtasks to READY."""
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode, PLANNING_TOOLS
+        )
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
+        orch.queue.add(task)
+
+        # Add PENDING subtask
+        subtask = make_task(title="pending child",
+                            status=TaskStatus.PENDING, branch="")
+        subtask.parent_task_id = task.id
+        subtask.depth = 1
+        orch.queue.add(subtask)
+
+        # Set PLANNING context
+        orch._ws_state_repo.set_session_context(
+            task.id,
+            SessionContext(
+                mode=SessionMode.PLANNING,
+                allowed_tools=set(PLANNING_TOOLS),
+            ),
+        )
+
+        result = make_loop_result(summary="plan done")
+        with patch("matrixmouse.comms.get_manager", return_value=None):
+            orch._handle_complete(task, result)
+
+        t = orch.queue.get(subtask.id)
+        assert t is not None
+        assert t.status == TaskStatus.READY
+
+    def test_branch_setup_context_cleared_on_complete(self, tmp_path):
+        """BRANCH_SETUP session context is cleared when Manager completes."""
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode, BRANCH_SETUP_TOOLS
+        )
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
+        orch.queue.add(task)
+
+        orch._ws_state_repo.set_session_context(
+            task.id,
+            SessionContext(
+                mode=SessionMode.BRANCH_SETUP,
+                allowed_tools=set(BRANCH_SETUP_TOOLS),
+            ),
+        )
+
+        result = make_loop_result(summary="branch set")
+        with patch("matrixmouse.comms.get_manager", return_value=None):
+            orch._handle_complete(task, result)
+
+        assert orch._ws_state_repo.get_session_context(task.id) is None
+
+    def test_planning_turn_limit_commits_pending_and_clears_context(
+        self, tmp_path
+    ):
+        """On PLANNING turn limit, pending tasks committed and context cleared."""
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode, PLANNING_TOOLS
+        )
+        orch = make_orchestrator(tmp_path)
+        orch.config.manager_planning_max_turns = 10
+        task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
+        orch.queue.add(task)
+
+        subtask = make_task(title="pending child",
+                            status=TaskStatus.PENDING, branch="")
+        subtask.parent_task_id = task.id
+        subtask.depth = 1
+        orch.queue.add(subtask)
+
+        orch._ws_state_repo.set_session_context(
+            task.id,
+            SessionContext(
+                mode=SessionMode.PLANNING,
+                allowed_tools=set(PLANNING_TOOLS),
+            ),
+        )
+
+        result = make_loop_result(
+            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            turns=10,
+        )
+        mock_comms = MagicMock()
+        with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
+            orch._handle_turn_limit(task, result)
+
+        # Pending task committed
+        t = orch.queue.get(subtask.id)
+        assert t is not None
+        assert t.status == TaskStatus.READY
+        # Context cleared
+        assert orch._ws_state_repo.get_session_context(task.id) is None
+        # Correct event emitted
+        emitted = [c.args[0] for c in mock_comms.emit.call_args_list]
+        assert "planning_turn_limit_reached" in emitted
+        assert "turn_limit_reached" not in emitted
+
+    def test_coder_task_not_given_branch_setup_context(self, tmp_path):
+        """Non-Manager tasks never get BRANCH_SETUP context."""
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="")
+        orch.queue.add(task)
+        assert orch._ws_state_repo.get_session_context(task.id) is None

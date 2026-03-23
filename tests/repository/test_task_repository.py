@@ -1523,3 +1523,84 @@ class TestPendingStatus:
         repo.add(task)
         decision = s.next(repo)
         assert decision.task is None
+
+
+class TestCommitPendingSubtree:
+    def _make_git_ops(self):
+        def create(branch, base): return True, "", "abc123"
+        def delete(branch): return True, ""
+        return create, delete
+
+    def test_transitions_pending_children_to_ready(self, repo):
+        parent = make_task(role=AgentRole.MANAGER)
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        create, delete = self._make_git_ops()
+        child = make_task(title="child", status=TaskStatus.PENDING, branch="")
+        child.parent_task_id = parent.id
+        child.depth = 1
+        repo.add(child)
+        transitioned = repo.commit_pending_subtree(parent.id)
+        assert child.id in transitioned
+        assert repo.get(child.id).status == TaskStatus.READY
+
+    def test_blocked_pending_child_becomes_blocked_by_task(self, repo):
+        parent = make_task(role=AgentRole.MANAGER)
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        blocker = make_task(title="blocker")
+        repo.add(blocker)
+        child = make_task(title="child", status=TaskStatus.PENDING, branch="")
+        child.parent_task_id = parent.id
+        child.depth = 1
+        repo.add(child)
+        # Wire dependency via the repository — works for both implementations
+        repo.add_dependency(blocker.id, child.id)
+        # Reset child status back to PENDING since add_dependency sets BLOCKED_BY_TASK
+        child_obj = repo.get(child.id)
+        assert child_obj is not None
+        child_obj.status = TaskStatus.PENDING
+        repo.update(child_obj)
+        transitioned = repo.commit_pending_subtree(parent.id)
+        assert child.id in transitioned
+        assert repo.get(child.id).status == TaskStatus.BLOCKED_BY_TASK
+
+    def test_non_pending_children_not_affected(self, repo):
+        parent = make_task(role=AgentRole.MANAGER)
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        ready_child = make_task(title="ready", status=TaskStatus.READY, branch="")
+        ready_child.parent_task_id = parent.id
+        repo.add(ready_child)
+        repo.commit_pending_subtree(parent.id)
+        assert repo.get(ready_child.id).status == TaskStatus.READY
+
+    def test_deep_subtree_all_transitioned(self, repo):
+        parent = make_task(role=AgentRole.MANAGER)
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        child = make_task(title="child", status=TaskStatus.PENDING, branch="")
+        child.parent_task_id = parent.id
+        child.depth = 1
+        repo.add(child)
+        grandchild = make_task(title="grandchild",
+                               status=TaskStatus.PENDING, branch="")
+        grandchild.parent_task_id = child.id
+        grandchild.depth = 2
+        repo.add(grandchild)
+        transitioned = repo.commit_pending_subtree(parent.id)
+        assert child.id in transitioned
+        assert grandchild.id in transitioned
+        assert repo.get(child.id).status == TaskStatus.READY
+        assert repo.get(grandchild.id).status == TaskStatus.READY
+
+    def test_empty_subtree_returns_empty_list(self, repo):
+        parent = make_task(role=AgentRole.MANAGER)
+        parent.branch = "mm/feature/foo"
+        repo.add(parent)
+        result = repo.commit_pending_subtree(parent.id)
+        assert result == []
+
+    def test_raises_on_unknown_root(self, repo):
+        with pytest.raises(KeyError):
+            repo.commit_pending_subtree("nonexistent")

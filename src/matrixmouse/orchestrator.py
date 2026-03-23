@@ -37,11 +37,18 @@ from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.repository.task_repository import TaskRepository
-from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
+from matrixmouse.repository.workspace_state_repository import (
+    WorkspaceStateRepository,
+    SessionContext, 
+    SessionMode,
+    BRANCH_SETUP_TOOLS,
+    PLANNING_TOOLS,
+)
 from matrixmouse.router import Router
 from matrixmouse.scheduling import Scheduler
 from matrixmouse.stuck import StuckDetector
 from matrixmouse.task import AgentRole, Task, TaskStatus
+from matrixmouse.tools import tools_for_names
 from matrixmouse.tools._safety import reconfigure_for_task
 from matrixmouse.repository import SQLiteTaskRepository, SQLiteWorkspaceStateRepository
 
@@ -664,6 +671,35 @@ class Orchestrator:
         to do next based on task status after return.
         """
         agent = agent_for_role(task.role)
+
+        # --- Session mode: BRANCH_SETUP ---
+        # Manager tasks with no branch assigned enter a restricted session
+        # where they can only read task info and call set_branch.
+        if (task.role == AgentRole.MANAGER
+                and not task.branch
+                and task.status != TaskStatus.PENDING):
+            existing_ctx = self._ws_state_repo.get_session_context(task.id)
+            if existing_ctx is None or existing_ctx.mode == SessionMode.NORMAL:
+                self._ws_state_repo.set_session_context(
+                    task.id,
+                    SessionContext(
+                        mode=SessionMode.BRANCH_SETUP,
+                        allowed_tools=set(BRANCH_SETUP_TOOLS),
+                        system_prompt_addendum=(
+                            "\n\n--- BRANCH SETUP REQUIRED ---\n"
+                            "This task has no git branch assigned yet. "
+                            "Before doing any other work:\n"
+                            "1. Use get_task_info to understand the task intent.\n"
+                            "2. Choose a short, descriptive branch slug "
+                            "(e.g. 'refactor/foobar' or 'fix/login-timeout').\n"
+                            "3. Call set_branch(task_id, slug) to create the branch.\n"
+                            "Once the branch is set, call declare_complete — "
+                            "the task will resume normally in the next turn.\n"
+                            "--- END BRANCH SETUP ---"
+                        ),
+                    ),
+                )
+
         messages = self._load_or_build_messages(task, agent)
 
         self._update_status(
@@ -739,7 +775,22 @@ class Orchestrator:
         from matrixmouse.comms import poll_interjection, get_manager
         from matrixmouse import memory
 
-        task_tools.configure(self.queue, task.id, self.config)
+        comms_tools.configure(self.config)
+
+        # --- Check for active session context ---
+        session_ctx = self._ws_state_repo.get_session_context(task.id)
+
+        cwd = None
+        if task.repo:
+            repo_root = self.paths.workspace_root / task.repo[0]
+            if repo_root.exists():
+                cwd = repo_root
+
+        task_tools.configure(
+            self.queue, task.id, self.config,
+            cwd=cwd, ws_state_repo=self._ws_state_repo
+        )
+
         comms_tools.configure(self.config)
 
         def _persist_messages(messages: list) -> None:
@@ -760,18 +811,39 @@ class Orchestrator:
 
         def _should_yield_now() -> bool:
             return self._should_yield(task)
+        
+        # Determine tool list — session context overrides role default
+        if session_ctx and session_ctx.mode != SessionMode.NORMAL:
+            tools = tools_for_names(session_ctx.allowed_tools)
+        else:
+            tools = tools_for_role_list(task.role)
+
+        # Determine system prompt — inject addendum if session active
+        system_prompt_addendum = (
+            session_ctx.system_prompt_addendum
+            if session_ctx and session_ctx.system_prompt_addendum
+            else ""
+        )
+        # Append system prompt addendum
+        if system_prompt_addendum and messages:
+            first = messages[0]
+            if isinstance(first, dict) and first.get("role") == "system":
+                messages[0] = {
+                    **first,
+                    "content": first["content"] + system_prompt_addendum,
+                }
 
         current_repo = task.repo[0] if task.repo else None
         scoped_comms = functools.partial(
             poll_interjection, current_repo=current_repo
         )
 
+        repo_paths: RepoPaths | None = None
         if current_repo:
-            repo_paths: RepoPaths = self.paths.repo_paths(current_repo)
+            repo_paths = self.paths.repo_paths(current_repo)
             memory.configure(repo_paths.agent_notes)
         else:
             memory.configure(self.paths.agent_notes)
-            repo_paths = None
 
         detector = StuckDetector(role=task.role)
         context_manager = ContextManager(
@@ -784,7 +856,7 @@ class Orchestrator:
         loop = AgentLoop(
             model=self._router.model_for_role(task.role),
             messages=messages,
-            tools=tools_for_role_list(task.role),
+            tools=tools,
             allowed_tools=agent.allowed_tools,
             config=self.config,
             paths=repo_paths or self.paths,
@@ -826,6 +898,30 @@ class Orchestrator:
         For Critic tasks: approve()/deny() in task_tools already updated
         all task states — nothing further to do here.
         """
+        # Check for PLANNING session — commit pending subtree first
+        session_ctx = self._ws_state_repo.get_session_context(task.id)
+        if (session_ctx
+                and session_ctx.mode == SessionMode.PLANNING
+                and task.role == AgentRole.MANAGER):
+            try:
+                transitioned = self.queue.commit_pending_subtree(task.id)
+                logger.info(
+                    "PLANNING commit: %d task(s) transitioned from PENDING "
+                    "for Manager task [%s].",
+                    len(transitioned), task.id,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to commit PLANNING subtree for task [%s]: %s",
+                    task.id, e,
+                )
+            self._ws_state_repo.clear_session_context(task.id)
+
+        # Check for BRANCH_SETUP — just clear the context, branch is now set
+        if (session_ctx
+                and session_ctx.mode == SessionMode.BRANCH_SETUP):
+            self._ws_state_repo.clear_session_context(task.id)
+
         if task.role in (AgentRole.CODER, AgentRole.WRITER):
             self._create_critic_review(task, result)
             return
@@ -950,6 +1046,59 @@ class Orchestrator:
                     f"({result.turns_taken} turns): {task.title}"
                 )
 
+                # --- PLANNING session turn limit ---
+                session_ctx = self._ws_state_repo.get_session_context(task.id)
+                if (session_ctx
+                        and session_ctx.mode == SessionMode.PLANNING
+                        and task.role == AgentRole.MANAGER):
+                    try:
+                        transitioned = self.queue.commit_pending_subtree(task.id)
+                        logger.info(
+                            "Planning turn limit: committed %d pending task(s) "
+                            "for [%s].",
+                            len(transitioned), task.id,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to commit partial plan for [%s]: %s",
+                            task.id, e,
+                        )
+                    self._ws_state_repo.clear_session_context(task.id)
+                    m.emit("planning_turn_limit_reached", {
+                        "task_id":     task.id,
+                        "task_title":  task.title,
+                        "turns_taken": result.turns_taken,
+                        "choices": [
+                            {
+                                "value": "extend",
+                                "label": "Give Manager more planning turns",
+                                "description": (
+                                    f"Allow the Manager another "
+                                    f"{self.config.manager_planning_max_turns} "
+                                    f"turns to complete the plan."
+                                ),
+                            },
+                            {
+                                "value": "commit",
+                                "label": "Commit plan as-is",
+                                "description": (
+                                    "Accept the partial plan and move all "
+                                    "created tasks to the scheduler."
+                                ),
+                            },
+                            {
+                                "value": "cancel",
+                                "label": "Cancel planning task",
+                                "description": (
+                                    "Cancel the Manager task and discard "
+                                    "the partial plan."
+                                ),
+                            },
+                        ],
+                    })
+                    return  # don't emit the generic turn_limit_reached event
+
+                # --- Critic turn limit ---
                 if task.role == AgentRole.CRITIC:
                     # Critic-specific modal: three options
                     # 1. Approve the reviewed task (skip further Critic review)
@@ -1091,7 +1240,7 @@ class Orchestrator:
             from matrixmouse import comms as comms_module
             m = comms_module.get_manager()
             if m:
-                m.notify(f"Task complete: {task.title}")
+                m.notify(f"Task complete: {task.title}", f"{task.description[:80]}...")
                 m.emit("complete", {
                     "task_id":    task.id,
                     "task_title": task.title,

@@ -922,3 +922,59 @@ class SQLiteTaskRepository(TaskRepository):
 
         return subtasks
     
+    
+    def commit_pending_subtree(self, root_task_id: str) -> list[str]:
+        if not self.get(root_task_id):
+            raise KeyError(f"Task '{root_task_id}' not found.")
+
+        now = _now_iso()
+        conn = self._conn()
+        transitioned = []
+
+        with conn:
+            # Find all PENDING descendants via recursive CTE
+            rows = conn.execute(
+                """
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM tasks WHERE parent_task_id = ?
+                    UNION ALL
+                    SELECT t.id FROM tasks t
+                    JOIN descendants d ON t.parent_task_id = d.id
+                )
+                SELECT id FROM descendants
+                JOIN tasks USING (id)
+                WHERE status = ?
+                """,
+                (root_task_id, TaskStatus.PENDING.value),
+            ).fetchall()
+
+            for row in rows:
+                task_id = row["id"]
+                # Check if task has any non-terminal blockers
+                has_blockers = conn.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM task_dependencies td
+                        JOIN tasks t ON t.id = td.blocking_task_id
+                        WHERE td.blocked_task_id = ?
+                        AND t.status NOT IN (?, ?)
+                    )
+                    """,
+                    (task_id, *_TERMINAL),
+                ).fetchone()[0]
+
+                new_status = (
+                    TaskStatus.BLOCKED_BY_TASK.value
+                    if has_blockers
+                    else TaskStatus.READY.value
+                )
+                conn.execute(
+                    """
+                    UPDATE tasks SET status = ?, last_modified = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (new_status, now, task_id, TaskStatus.PENDING.value),
+                )
+                transitioned.append(task_id)
+
+        return transitioned

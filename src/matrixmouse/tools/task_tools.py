@@ -38,6 +38,7 @@ from typing import Optional
 
 from matrixmouse.config import MatrixMouseConfig
 from matrixmouse.repository.task_repository import TaskRepository
+from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
 from matrixmouse.utils.task_utils import validate_branch_slug
 from matrixmouse.tools.git_tools import (
     branch_exists,
@@ -58,13 +59,14 @@ _queue: Optional[TaskRepository] = None
 _active_task_id: Optional[str] = None
 _config: Optional[MatrixMouseConfig] = None
 _cwd: Path | None = None
-
+_ws_state_repo: WorkspaceStateRepository | None = None
 
 def configure(
     queue: TaskRepository,
     active_task_id: str | None = None,
     config: MatrixMouseConfig | None = None,
     cwd: Path | None = None,
+    ws_state_repo: WorkspaceStateRepository | None = None,
 ) -> None:
     """
     Inject the task repository, active task ID, config, and working directory.
@@ -78,11 +80,12 @@ def configure(
         cwd:            Working directory (repo root) for git operations.
                         If None, set_branch will be unavailable.
     """
-    global _queue, _active_task_id, _config, _cwd
+    global _queue, _active_task_id, _config, _cwd, _ws_state_repo
     _queue = queue
     _active_task_id = active_task_id
     _config = config
     _cwd = cwd
+    _ws_state_repo = ws_state_repo
     logger.debug(
         "task_tools configured. Active task: %s cwd: %s",
         active_task_id, cwd,
@@ -182,6 +185,7 @@ def create_task(
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
     queue = _require_queue()
+    _enter_planning_mode_if_needed()
 
     if not title.strip():
         return "ERROR: Task title cannot be empty."
@@ -412,6 +416,7 @@ def split_task(
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
     queue = _require_queue()
+    _enter_planning_mode_if_needed()
 
     if not task_id:
         return "ERROR: task_id is required."
@@ -1037,3 +1042,40 @@ def _emit_decomposition_confirmation(
         logger.warning(
             "Failed to emit decomposition_confirmation_required: %s", e
         )
+
+def _enter_planning_mode_if_needed() -> None:
+    """
+    Transition the active Manager task into PLANNING session mode
+    on first call to split_task or create_task.
+    """
+    if not _active_task_id:
+        return
+    
+    from matrixmouse.repository.workspace_state_repository import (
+        SessionContext, SessionMode, PLANNING_TOOLS
+    )
+    
+    if _ws_state_repo is None:
+        return
+    existing = _ws_state_repo.get_session_context(_active_task_id)
+    if existing and existing.mode == SessionMode.PLANNING:
+        return  # already in PLANNING
+    _ws_state_repo.set_session_context(
+        _active_task_id,
+        SessionContext(
+            mode=SessionMode.PLANNING,
+            allowed_tools=set(PLANNING_TOOLS),
+            system_prompt_addendum=(
+                "\n\n--- PLANNING MODE ---\n"
+                "You are building a task plan. All tasks you create are "
+                "in PENDING state and not yet visible to the scheduler. "
+                "Continue planning — create tasks, wire dependencies, "
+                "set priorities — then call declare_complete when your "
+                "plan is fully specified. The plan will be committed "
+                "atomically when you declare complete.\n"
+                "--- END PLANNING MODE ---"
+            ),
+            turn_limit_override=_config.manager_planning_max_turns
+            if _config else 10,
+        ),
+    )

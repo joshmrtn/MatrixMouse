@@ -531,6 +531,43 @@ class InMemoryTaskRepository(TaskRepository):
 
         return [copy.copy(t) for t in subtasks]
 
+
+    def commit_pending_subtree(self, root_task_id: str) -> list[str]:
+        if root_task_id not in self._tasks:
+            raise KeyError(f"Task '{root_task_id}' not found.")
+
+        now = _now_iso()
+        transitioned = []
+
+        def collect_pending_descendants(task_id: str) -> list[str]:
+            result = []
+            for t in self._tasks.values():
+                if t.parent_task_id == task_id and t.status == TaskStatus.PENDING:
+                    result.append(t.id)
+                    result.extend(collect_pending_descendants(t.id))
+            return result
+
+        pending_ids = collect_pending_descendants(root_task_id)
+
+        for task_id in pending_ids:
+            task = self._tasks[task_id]
+            blockers = self._blocked_by.get(task_id, set())
+            has_blockers = any(
+                self._tasks[bid].status not in _TERMINAL
+                for bid in blockers
+                if bid in self._tasks
+            )
+            task.status = (
+                TaskStatus.BLOCKED_BY_TASK
+                if has_blockers
+                else TaskStatus.READY
+            )
+            task.last_modified = now
+            transitioned.append(task_id)
+
+        return transitioned
+    
+    
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
