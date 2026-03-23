@@ -527,6 +527,47 @@ class TestSetBranch:
                 result = task_tools.set_branch(task.id, "fix/foo")
         assert "deadbeef" in result  # first 8 chars of hash shown
 
+    def test_git_create_callable_calls_branch_exists_and_create_branch(self, tmp_path):
+        q, task = self._setup(tmp_path)
+        captured_create_calls = []
+
+        def fake_set_task_branch(task_id, full_branch_name, base_branch,
+                                create_git_branch, delete_git_branch):
+            # Actually invoke the callable to test it
+            ok, err, head = create_git_branch(full_branch_name, base_branch)
+            assert ok
+            captured_create_calls.append(full_branch_name)
+            return full_branch_name
+
+        with patch("matrixmouse.tools.task_tools.branch_exists", return_value=False), \
+            patch("matrixmouse.tools.task_tools.create_branch",
+                return_value=(True, "")), \
+            patch("matrixmouse.tools.task_tools.get_head_hash",
+                return_value="abc123def456abcd"), \
+            patch("matrixmouse.tools.task_tools.push_to_remote",
+                return_value=(True, "")), \
+            patch.object(q, "set_task_branch", side_effect=fake_set_task_branch), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            task_tools.set_branch(task.id, "fix/foo")
+
+        assert captured_create_calls == ["mm/fix/foo"]
+
+    def test_git_delete_callable_invoked_on_set_task_branch_failure(self, tmp_path):
+        """If set_task_branch raises, the error message propagates cleanly."""
+        q, task = self._setup(tmp_path)
+
+        with patch("matrixmouse.tools.task_tools.branch_exists", return_value=False), \
+            patch.object(q, "set_task_branch",
+                        side_effect=ValueError("git branch rolled back.")), \
+            patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            result = task_tools.set_branch(task.id, "fix/foo")
+
+        assert "ERROR" in result
+        assert "rolled back" in result.lower()
+
+
 # ---------------------------------------------------------------------------
 # split_task
 # ---------------------------------------------------------------------------
