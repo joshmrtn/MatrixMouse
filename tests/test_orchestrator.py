@@ -1010,4 +1010,138 @@ class TestSessionModeWiring:
                     pass
 
         mock_verify.assert_not_called()
+
+    def test_checkout_failure_triggers_human_intervention(self, tmp_path):
+        """If git checkout fails after branch verification, task is blocked."""
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
+                        repo=["repo"])
+        orch.queue.add(task)
+
+        with patch("matrixmouse.orchestrator.ensure_branch_from_mirror",
+                return_value=(True, "mm/feature/foo")), \
+            patch("matrixmouse.orchestrator._git",
+                return_value=(False, "fatal: unable to checkout")), \
+            patch("matrixmouse.comms.get_manager", return_value=None):
+            orch._run_task(task)
+
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.BLOCKED_BY_HUMAN
+        
+
+class TestWipCommitWiring:
+    def test_wip_commit_callable_called_after_dispatch(self, tmp_path):
+        """wip_commit is called once per turn after tool dispatch."""
+        from matrixmouse.loop import AgentLoop, LoopExitReason
+        from types import SimpleNamespace
+
+        wip_calls = []
+
+        def fake_wip():
+            wip_calls.append(1)
+
+        # Build a loop that runs one turn then declares complete
+        messages = [{"role": "system", "content": "prompt"}]
+        loop = AgentLoop(
+            model="test",
+            messages=messages,
+            config=make_config(),
+            paths=MagicMock(),
+            wip_commit=fake_wip,
+        )
+
+        fake_response = SimpleNamespace(
+            message=SimpleNamespace(
+                content="done",
+                thinking=None,
+                tool_calls=[
+                    SimpleNamespace(
+                        function=SimpleNamespace(
+                            name="declare_complete",
+                            arguments={"summary": "all done"},
+                        )
+                    )
+                ],
+            )
+        )
+
+        with patch.object(loop, "_chat_completion",
+                          return_value=fake_response):
+            result = loop.run()
+
+        # declare_complete exits before wip_commit fires
+        assert result.exit_reason == LoopExitReason.COMPLETE
+        # WIP commit should NOT fire on declare_complete exit
+        assert len(wip_calls) == 0
+
+    def test_wip_commit_fires_after_normal_tool_call(self, tmp_path):
+        """wip_commit fires after a non-exit tool call turn."""
+        from matrixmouse.loop import AgentLoop, LoopExitReason
+        from matrixmouse.tools import TOOL_REGISTRY
+        from types import SimpleNamespace
+
+        wip_calls = []
+
+        def fake_wip():
+            wip_calls.append(1)
+
+        messages = [{"role": "system", "content": "prompt"}]
+        loop = AgentLoop(
+            model="test",
+            messages=messages,
+            config=make_config(),
+            paths=MagicMock(),
+            wip_commit=fake_wip,
+        )
+
+        turn = 0
+        def fake_response():
+            nonlocal turn
+            turn += 1
+            if turn == 1:
+                # First turn: normal tool call
+                return SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="",
+                        thinking=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="get_git_status",
+                                    arguments={},
+                                )
+                            )
+                        ],
+                    )
+                )
+            else:
+                # Second turn: declare complete
+                return SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="done",
+                        thinking=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="declare_complete",
+                                    arguments={"summary": "done"},
+                                )
+                            )
+                        ],
+                    )
+                )
+
+        with patch.object(loop, "_chat_completion",
+                          side_effect=fake_response), \
+             patch.dict(TOOL_REGISTRY,
+                        {"get_git_status": lambda: "clean"}):
+            result = loop.run()
+
+        assert result.exit_reason == LoopExitReason.COMPLETE
+        # WIP commit fires after turn 1 (normal tool), not after turn 2 (exit)
+        assert len(wip_calls) == 1
         

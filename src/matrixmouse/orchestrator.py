@@ -49,7 +49,7 @@ from matrixmouse.scheduling import Scheduler
 from matrixmouse.stuck import StuckDetector
 from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.tools import tools_for_names
-from matrixmouse.tools.git_tools import ensure_branch_from_mirror, MIRROR_REMOTE
+from matrixmouse.tools.git_tools import ensure_branch_from_mirror, MIRROR_REMOTE, _git
 from matrixmouse.tools._safety import reconfigure_for_task
 from matrixmouse.repository import SQLiteTaskRepository, SQLiteWorkspaceStateRepository
 
@@ -675,6 +675,7 @@ class Orchestrator:
         if task.branch and task.repo:
             repo_root = self.paths.workspace_root / task.repo[0]
             if repo_root.exists():
+                # Step 1: ensure branch exists locally (recreate from mirror if missing)
                 ok, err = ensure_branch_from_mirror(
                     task.branch, MIRROR_REMOTE, repo_root
                 )
@@ -693,10 +694,31 @@ class Orchestrator:
                         ),
                     )
                     return
+
+                # Step 2: checkout the branch — no-op if already on it,
+                # but required for context switches between tasks.
+                # Failure here is catastrophic: the agent would work in
+                # the wrong branch. Block immediately.
+                ok, err = _git(["checkout", task.branch], cwd=repo_root)
+                if not ok:
+                    logger.error(
+                        "Cannot start task [%s] — git checkout of branch '%s' "
+                        "failed: %s. Blocking for human intervention.",
+                        task.id, task.branch, err,
+                    )
+                    self._request_human_intervention(
+                        task, None,
+                        reason=(
+                            f"git checkout of branch '{task.branch}' failed: {err}. "
+                            f"Workspace may be in an inconsistent state — "
+                            f"manual intervention required."
+                        ),
+                    )
+                    return
             else:
                 logger.warning(
                     "Repo root '%s' does not exist for task [%s] — "
-                    "skipping branch verification.",
+                    "skipping branch verification and checkout.",
                     repo_root, task.id,
                 )
 
@@ -824,13 +846,32 @@ class Orchestrator:
 
         comms_tools.configure(self.config)
 
-        def _persist_messages(messages: list) -> None:
-            """
-            Write context_messages back to the task and flush to disk.
+        wip_commit_fn = None
+        if cwd is not None and task.branch:
+            from matrixmouse.tools.git_tools import wip_commit_and_push
+            push_to_origin = getattr(self.config, "push_wip_to_remote", False)
 
-            TODO: Give each task its own dedicated file to avoid the
-            write bottleneck when many tasks are active concurrently.
-            """
+            def _wip_commit() -> None:
+                ok, msg = wip_commit_and_push(
+                    branch=task.branch,
+                    mirror_remote=MIRROR_REMOTE,
+                    cwd=cwd,
+                    push_to_origin=push_to_origin,
+                )
+                if not ok:
+                    logger.error(
+                        "WIP commit failed for task [%s]: %s",
+                        task.id, msg,
+                    )
+                else:
+                    logger.debug(
+                        "WIP commit for task [%s]: %s", task.id, msg
+                    )
+
+            wip_commit_fn = _wip_commit
+
+        def _persist_messages(messages: list) -> None:
+            """Write context_messages back to the task and persist to database"""
             task.context_messages = list(messages)
             try:
                 self.queue.update(task)
@@ -896,6 +937,7 @@ class Orchestrator:
             comms=scoped_comms,
             emit=comms_manager.emit if comms_manager else lambda t, d: None,
             persist=_persist_messages,
+            wip_commit=wip_commit_fn,
             should_yield=_should_yield_now,
             stream=self._router.stream_for_role(task.role),
             think=self._router.think_for_role(task.role),

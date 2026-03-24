@@ -80,6 +80,7 @@ class AgentLoop:
         comms=None,             # callable: () -> str | None
         emit=None,
         persist=None,           # callable: (messages: list) -> None
+        wip_commit=None,        # callable: () -> None - WIP commit after dispatch
         should_yield=None,      # callable: () -> bool
         stream: bool = True,    # stream tokens to web UI
         think: bool = False,    # enable extended thinking
@@ -94,6 +95,7 @@ class AgentLoop:
         self.paths = paths
         self._emit = emit or _noop_emit
         self._persist = persist or _noop_persist
+        self._wip_commit = wip_commit or _noop_wip_commit
         self._should_yield = should_yield or _noop_should_yield
         self.stream = stream
         self.think = think
@@ -192,12 +194,14 @@ class AgentLoop:
                 if exit_result is not None:
                     return exit_result
             else:
-                # No tool calls and no declare_complete — model produced a
-                # plain text response. Log it and continue; the model may
-                # be reasoning before its next tool call.
                 logger.debug("No tool calls in turn %d.", self._turns)
 
-             # --- Yield check (time slice/ preemption) ---
+            # --- WIP commit after every inference dispatch ---
+            # Runs after tool dispatch completes so the working tree
+            # reflects the full result of this turn before we commit.
+            self._wip_commit()
+
+            # --- Yield check (time slice / preemption) ---
             if self._should_yield():
                 logger.info(
                     "Yield signal received after turn %d. "
@@ -416,3 +420,7 @@ def _noop_persist(messages: list) -> None:
 def _noop_should_yield() -> bool:
     """Never yields until scheduler is wired in."""
     return False
+
+def _noop_wip_commit() -> None:
+    """No-op until git_tools is wired in."""
+    pass
