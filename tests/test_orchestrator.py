@@ -1277,3 +1277,342 @@ class TestMergeUp:
         assert updated is not None
         assert updated.role == AgentRole.CODER
         assert updated.status != TaskStatus.COMPLETE
+
+class TestGetMergeTarget:
+    def test_returns_parent_branch_when_parent_has_branch(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        parent = make_task(role=AgentRole.MANAGER, branch="mm/feature/parent")
+        child = make_task(role=AgentRole.CODER)
+        child.parent_task_id = parent.id
+        orch.queue.add(parent)
+        orch.queue.add(child)
+        assert orch._get_merge_target(child) == "mm/feature/parent"
+
+    def test_returns_default_target_when_no_parent(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.default_merge_target = "mm/dev"
+        task = make_task(role=AgentRole.CODER)
+        orch.queue.add(task)
+        assert orch._get_merge_target(task) == "mm/dev"
+
+    def test_returns_none_when_no_parent_and_no_default(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.default_merge_target = ""
+        task = make_task(role=AgentRole.CODER)
+        orch.queue.add(task)
+        assert orch._get_merge_target(task) is None
+
+    def test_returns_none_when_parent_has_no_branch(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.default_merge_target = ""
+        parent = make_task(role=AgentRole.MANAGER, branch="")
+        child = make_task(role=AgentRole.CODER)
+        child.parent_task_id = parent.id
+        orch.queue.add(parent)
+        orch.queue.add(child)
+        assert orch._get_merge_target(child) is None
+
+    def test_returns_none_when_parent_not_found(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.default_merge_target = ""
+        task = make_task(role=AgentRole.CODER)
+        task.parent_task_id = "nonexistent"
+        orch.queue.add(task)
+        assert orch._get_merge_target(task) is None
+
+
+class TestIsProtectedBranch:
+    def test_main_is_protected_by_default(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.protected_branches = ["main", "master", "develop"]
+        assert orch._is_protected_branch("main") is True
+
+    def test_agent_branch_is_not_protected(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.protected_branches = ["main", "master"]
+        assert orch._is_protected_branch("mm/feature/foo") is False
+
+    def test_empty_protected_list(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.protected_branches = []
+        assert orch._is_protected_branch("main") is False
+
+
+class TestRunMergeUp:
+    def test_returns_queued_when_lock_busy(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
+                         repo=["repo"])
+        orch.queue.add(task)
+        # Pre-lock the branch
+        orch._ws_state_repo.acquire_merge_lock("mm/dev", "other-task")
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        success, info = orch._run_merge_up(task, "mm/dev", repo_dir)
+        assert not success
+        assert info == "QUEUED"
+        # Task should be enqueued
+        assert orch._ws_state_repo.dequeue_next_merge_waiter("mm/dev") == task.id
+
+    def test_returns_conflict_on_merge_conflict(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
+                         repo=["repo"])
+        orch.queue.add(task)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        from matrixmouse.tools.git_tools import _git as real_git
+
+        def mock_git(args, cwd):
+            if args[0] == "checkout":
+                return True, ""
+            if args[0] == "merge":
+                if "--abort" in args:
+                    return True, ""
+                return False, "CONFLICT (content): Merge conflict in foo.py"
+            return True, ""
+
+        with patch("matrixmouse.tools.git_tools._git", side_effect=mock_git), \
+             patch("matrixmouse.tools.merge_tools.get_conflicted_files",
+                   return_value=["foo.py"]):
+            success, info = orch._run_merge_up(task, "mm/dev", repo_dir)
+
+        assert not success
+        assert info.startswith("CONFLICT:")
+        assert "foo.py" in info
+        # Lock should still be held
+        assert orch._ws_state_repo.get_merge_lock_holder("mm/dev") == task.id
+
+    def test_releases_lock_on_clean_merge(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
+                         repo=["repo"])
+        orch.queue.add(task)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        def mock_git(args, cwd):
+            return True, "merge successful"
+
+        with patch("matrixmouse.tools.git_tools._git", side_effect=mock_git), \
+             patch("matrixmouse.tools.git_tools.push_to_remote",
+                   return_value=(True, "")):
+            success, info = orch._run_merge_up(task, "mm/dev", repo_dir)
+
+        assert success
+        assert info == ""
+        assert orch._ws_state_repo.get_merge_lock_holder("mm/dev") is None
+
+    def test_checkout_failure_releases_lock(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
+                         repo=["repo"])
+        orch.queue.add(task)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        def mock_git(args, cwd):
+            if args[0] == "checkout":
+                return False, "fatal: checkout failed"
+            return True, ""
+
+        with patch("matrixmouse.tools.git_tools._git", side_effect=mock_git):
+            success, info = orch._run_merge_up(task, "mm/dev", repo_dir)
+
+        assert not success
+        assert "CHECKOUT_FAILED" in info
+        # Lock should be released on checkout failure
+        assert orch._ws_state_repo.get_merge_lock_holder("mm/dev") is None
+
+    def test_handle_no_merge_target_works_without_comms(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo")
+        orch.queue.add(task)
+        with patch("matrixmouse.comms.get_manager", return_value=None):
+            orch._handle_no_merge_target(task)
+        t = orch.queue.get(task.id)
+        assert t is not None
+        assert t.status == TaskStatus.BLOCKED_BY_HUMAN
+
+    def test_transition_to_merge_agent_handles_update_failure(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
+                        repo=["repo"])
+        orch.queue.add(task)
+        orch._ws_state_repo.acquire_merge_lock("mm/dev", task.id)
+        (tmp_path / "repo").mkdir()
+
+        with patch.object(orch.queue, "update",
+                        side_effect=Exception("DB error")), \
+            patch("matrixmouse.comms.get_manager", return_value=None):
+            orch._transition_to_merge_agent(
+                task, "mm/dev", tmp_path / "repo", ["foo.py"]
+            )
+
+        # Lock should be released on failure
+        assert orch._ws_state_repo.get_merge_lock_holder("mm/dev") is None
+        t = orch.queue.get(task.id)
+        assert t is not None
+        assert t.status == TaskStatus.BLOCKED_BY_HUMAN
+
+
+class TestReplayMergeDecisions:
+    def test_replays_ours_decision(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MERGE)
+        task.merge_resolution_decisions = [
+            {"file": "foo.py", "resolution": "ours", "content": None}
+        ]
+        orch.queue.add(task)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        calls = []
+        def mock_run(args, **kwargs):
+            calls.append(args)
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=mock_run):
+            orch._replay_merge_decisions(task, repo_dir)
+
+        checkout_calls = [c for c in calls if "checkout" in c]
+        assert any("--ours" in c for c in checkout_calls)
+
+    def test_replays_theirs_decision(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MERGE)
+        task.merge_resolution_decisions = [
+            {"file": "bar.py", "resolution": "theirs", "content": None}
+        ]
+        orch.queue.add(task)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        calls = []
+        def mock_run(args, **kwargs):
+            calls.append(args)
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=mock_run):
+            orch._replay_merge_decisions(task, repo_dir)
+
+        checkout_calls = [c for c in calls if "checkout" in c]
+        assert any("--theirs" in c for c in checkout_calls)
+
+    def test_replays_manual_decision(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MERGE)
+        task.merge_resolution_decisions = [
+            {"file": "baz.py", "resolution": "manual",
+             "content": "merged content"}
+        ]
+        orch.queue.add(task)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "baz.py").write_text("original")
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+            orch._replay_merge_decisions(task, repo_dir)
+
+        assert (repo_dir / "baz.py").read_text() == "merged content"
+
+    def test_noop_on_empty_decisions(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.MERGE)
+        task.merge_resolution_decisions = []
+        orch.queue.add(task)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        with patch("subprocess.run") as mock_run:
+            orch._replay_merge_decisions(task, repo_dir)
+
+        mock_run.assert_not_called()
+
+
+class TestMergeTurnLimit:
+    def test_merge_turn_limit_emits_correct_event(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.merge_conflict_max_turns = 5
+        task = make_task(role=AgentRole.MERGE, branch="mm/feature/foo",
+                         repo=["repo"])
+        task.preemptable = False
+        orch.queue.add(task)
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        result = make_loop_result(
+            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            turns=5,
+        )
+        mock_comms = MagicMock()
+
+        with patch("matrixmouse.comms.get_manager",
+                   return_value=mock_comms), \
+             patch.object(orch, "_get_merge_target",
+                          return_value="mm/dev"), \
+             patch("matrixmouse.orchestrator._git",
+                   return_value=(True, "")):
+            orch._handle_turn_limit(task, result)
+
+        emitted = [c.args[0] for c in mock_comms.emit.call_args_list]
+        assert "merge_conflict_resolution_turn_limit_reached" in emitted
+        assert "turn_limit_reached" not in emitted
+        assert "critic_turn_limit_reached" not in emitted
+
+    def test_merge_turn_limit_aborts_merge(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.merge_conflict_max_turns = 5
+        task = make_task(role=AgentRole.MERGE, branch="mm/feature/foo",
+                         repo=["repo"])
+        task.preemptable = False
+        orch.queue.add(task)
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        result = make_loop_result(
+            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            turns=5,
+        )
+        git_calls = []
+
+        def mock_git(args, cwd):
+            git_calls.append(args)
+            return True, ""
+
+        with patch("matrixmouse.comms.get_manager", return_value=MagicMock()), \
+             patch.object(orch, "_get_merge_target", return_value="mm/dev"), \
+             patch("matrixmouse.tools.git_tools._git", side_effect=mock_git):
+            orch._handle_turn_limit(task, result)
+
+        abort_calls = [c for c in git_calls if "merge" in c and "--abort" in c]
+        assert len(abort_calls) == 1
+
+    def test_merge_turn_limit_marks_blocked_by_human(self, tmp_path):
+        orch = make_orchestrator(tmp_path)
+        orch.config.merge_conflict_max_turns = 5
+        task = make_task(role=AgentRole.MERGE, branch="mm/feature/foo",
+                         repo=["repo"])
+        task.preemptable = False
+        orch.queue.add(task)
+
+        (tmp_path / "repo").mkdir()
+        result = make_loop_result(
+            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            turns=5,
+        )
+
+        with patch("matrixmouse.comms.get_manager",
+                   return_value=MagicMock()), \
+             patch.object(orch, "_get_merge_target", return_value=None), \
+             patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+            orch._handle_turn_limit(task, result)
+
+        t = orch.queue.get(task.id)
+        assert t is not None
+        assert t.status == TaskStatus.BLOCKED_BY_HUMAN

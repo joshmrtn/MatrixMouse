@@ -51,15 +51,24 @@ from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_task(**kwargs) -> Task:
-    defaults = dict(
-        title="merge task",
-        description="resolve conflicts",
-        role=AgentRole.MERGE,
-        repo=["repo"],
+def make_task(
+    title: str = "Test task",
+    description: str = "Do the thing carefully.",
+    role: AgentRole = AgentRole.CODER,
+    repo: list[str] | None = None,
+    importance=0.5,
+    urgency=0.5,
+    **kwargs,
+) -> Task:
+    return Task(
+        title=title,
+        description=description,
+        role=role,
+        repo=repo if repo is not None else ["repo"],
+        importance=importance,
+        urgency=urgency,
+        **kwargs,
     )
-    defaults.update(kwargs)
-    return Task(**defaults)
 
 
 def make_conflicted_file(path: Path, ours: str, theirs: str) -> None:
@@ -275,3 +284,8 @@ class TestGetConflictedFiles:
             result = get_conflicted_files(tmp_path)
         assert result == []
         
+class TestRequireCwd:
+    def test_raises_when_not_configured(self):
+        merge_tools._cwd = None
+        with pytest.raises(RuntimeError, match="not configured"):
+            merge_tools._require_cwd()

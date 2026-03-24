@@ -1676,7 +1676,45 @@ class Orchestrator:
                         ],
                     })
                     return  # don't emit the generic turn_limit_reached event
+                # --- Merge turn limit ---
+                if task.role == AgentRole.MERGE:
+                    parent_branch = self._get_merge_target(task)
+                    # Abort the in-progress merge
+                    if task.repo:
+                        repo_root = self.paths.workspace_root / task.repo[0]
+                        if repo_root.exists():
+                            from matrixmouse.tools.git_tools import _git
+                            _git(["merge", "--abort"], cwd=repo_root)
+                            _git(["checkout", task.branch], cwd=repo_root)
 
+                    m.emit("merge_conflict_resolution_turn_limit_reached", {
+                        "task_id":         task.id,
+                        "task_title":      task.title,
+                        "turns_taken":     result.turns_taken,
+                        "parent_branch":   parent_branch or "",
+                        "resolved_so_far": task.merge_resolution_decisions,
+                        "choices": [
+                            {
+                                "value": "extend",
+                                "label": "Give Merge Agent more turns",
+                                "description": (
+                                    f"Allow another "
+                                    f"{self.config.merge_conflict_max_turns} "
+                                    f"turns. Previously resolved conflicts will "
+                                    f"be automatically re-applied."
+                                ),
+                            },
+                            {
+                                "value": "abort",
+                                "label": "Abort merge",
+                                "description": (
+                                    "Cancel the merge. Task stays complete on "
+                                    "its own branch. Manual merge required."
+                                ),
+                            },
+                        ],
+                    })
+                    return
                 # --- Critic turn limit ---
                 if task.role == AgentRole.CRITIC:
                     # Critic-specific modal: three options
@@ -1726,45 +1764,7 @@ class Orchestrator:
                         "turns_taken": result.turns_taken,
                         "turn_limit":  task.turn_limit or self.config.agent_max_turns,
                     })
-                # --- Merge turn limit ---
-                if task.role == AgentRole.MERGE:
-                    parent_branch = self._get_merge_target(task)
-                    # Abort the in-progress merge
-                    if task.repo:
-                        repo_root = self.paths.workspace_root / task.repo[0]
-                        if repo_root.exists():
-                            from matrixmouse.tools.git_tools import _git
-                            _git(["merge", "--abort"], cwd=repo_root)
-                            _git(["checkout", task.branch], cwd=repo_root)
-
-                    m.emit("merge_conflict_resolution_turn_limit_reached", {
-                        "task_id":         task.id,
-                        "task_title":      task.title,
-                        "turns_taken":     result.turns_taken,
-                        "parent_branch":   parent_branch or "",
-                        "resolved_so_far": task.merge_resolution_decisions,
-                        "choices": [
-                            {
-                                "value": "extend",
-                                "label": "Give Merge Agent more turns",
-                                "description": (
-                                    f"Allow another "
-                                    f"{self.config.merge_conflict_max_turns} "
-                                    f"turns. Previously resolved conflicts will "
-                                    f"be automatically re-applied."
-                                ),
-                            },
-                            {
-                                "value": "abort",
-                                "label": "Abort merge",
-                                "description": (
-                                    "Cancel the merge. Task stays complete on "
-                                    "its own branch. Manual merge required."
-                                ),
-                            },
-                        ],
-                    })
-                    return
+                
         except Exception as e:
             logger.warning("Failed to send turn limit notification: %s", e)
 
