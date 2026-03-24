@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -846,10 +847,57 @@ class Orchestrator:
 
         comms_tools.configure(self.config)
 
+        # Configure merge tools for MERGE role
+        if task.role == AgentRole.MERGE:
+            from matrixmouse.tools.merge_tools import (
+                configure as configure_merge_tools,
+                get_conflicted_files,
+            )
+            # Re-run the merge to reproduce conflict state
+            if cwd and task.branch:
+                parent_branch = self._get_merge_target(task)
+                if parent_branch:
+                    from matrixmouse.tools.git_tools import _git
+                    _git(["checkout", parent_branch], cwd=cwd)
+                    _git(
+                        ["merge", "--no-ff", task.branch,
+                         "-m", f"Merge: {task.title} ({task.id[:8]})"],
+                        cwd=cwd,
+                    )
+                    conflicted = get_conflicted_files(cwd)
+                else:
+                    conflicted = []
+            else:
+                conflicted = []
+
+            # Replay prior decisions silently
+            if task.merge_resolution_decisions and cwd:
+                self._replay_merge_decisions(task, cwd)
+                # Refresh conflict list after replay
+                if cwd:
+                    conflicted = get_conflicted_files(cwd)
+
+            configure_merge_tools(
+                cwd=cwd,
+                conflicted_files=conflicted,
+                task_id=task.id,
+                queue=self.queue,
+            )
+
+        # Select model — merge resolution always uses the top model
+        if task.role == AgentRole.MERGE:
+            merge_model = (
+                self.config.merge_resolution_model
+                or self._router.model_for_role(AgentRole.CODER)
+            )
+            model = merge_model
+        else:
+            model = self._router.model_for_role(task.role)
+
         wip_commit_fn = None
         if cwd is not None and task.branch:
             from matrixmouse.tools.git_tools import wip_commit_and_push
-            push_to_origin = getattr(self.config, "push_wip_to_remote", False)
+            push_to_origin = self.config.push_wip_to_remote
 
             def _wip_commit() -> None:
                 ok, msg = wip_commit_and_push(
@@ -968,31 +1016,28 @@ class Orchestrator:
         review task, update workspace state with the completion timestamp
         and summary.
 
-        For Critic tasks: approve()/deny() in task_tools already updated
-        all task states — nothing further to do here.
+        For Critic tasks: approve() triggers merge-up, deny() task state is 
+        handled by task_tools.
+
+        For Merge tasks: mark COMPLETE directly once merge is successful.
         """
-        # Check for PLANNING session — commit pending subtree first
+        from matrixmouse.repository.workspace_state_repository import SessionMode
+
+        # --- Clear any active session context ---
         session_ctx = self._ws_state_repo.get_session_context(task.id)
-        if (session_ctx
-                and session_ctx.mode == SessionMode.PLANNING
-                and task.role == AgentRole.MANAGER):
+        if session_ctx and session_ctx.mode == SessionMode.PLANNING:
             try:
                 transitioned = self.queue.commit_pending_subtree(task.id)
                 logger.info(
-                    "PLANNING commit: %d task(s) transitioned from PENDING "
-                    "for Manager task [%s].",
+                    "PLANNING commit: %d task(s) transitioned for [%s].",
                     len(transitioned), task.id,
                 )
             except Exception as e:
                 logger.error(
-                    "Failed to commit PLANNING subtree for task [%s]: %s",
+                    "Failed to commit PLANNING subtree for [%s]: %s",
                     task.id, e,
                 )
-            self._ws_state_repo.clear_session_context(task.id)
-
-        # Check for BRANCH_SETUP — just clear the context, branch is now set
-        if (session_ctx
-                and session_ctx.mode == SessionMode.BRANCH_SETUP):
+        if session_ctx:
             self._ws_state_repo.clear_session_context(task.id)
 
         if task.role in (AgentRole.CODER, AgentRole.WRITER):
@@ -1011,8 +1056,6 @@ class Orchestrator:
                     )
             self.queue.mark_complete(task.id)
             self._notify_task_complete(task)
-
-            # If this was a scheduled review task, update workspace state
             if task.title.startswith("[Manager Review]"):
                 self._on_manager_review_complete(
                     result.completion_summary or ""
@@ -1021,7 +1064,11 @@ class Orchestrator:
             return
 
         if task.role == AgentRole.CRITIC:
-            logger.info("Critic task [%s] complete.", task.id)
+            self._handle_critic_complete(task, result)
+            return
+
+        if task.role == AgentRole.MERGE:
+            self._handle_merge_complete(task, result)
             return
 
         logger.warning(
@@ -1031,6 +1078,465 @@ class Orchestrator:
         self.queue.mark_complete(task.id)
         self._notify_task_complete(task)
 
+
+    def _handle_critic_complete(
+        self, task: Task, result: LoopResult
+    ) -> None:
+        """
+        Handle Critic task completion — run merge-up on the reviewed task.
+
+        The reviewed task stays BLOCKED_BY_TASK until the merge succeeds.
+        On clean merge: mark reviewed task COMPLETE.
+        On conflict: transition reviewed task to MERGE role.
+        On no merge target: block reviewed task for human input.
+        """
+        logger.info("Critic task [%s] complete.", task.id)
+
+        if not task.reviews_task_id:
+            logger.warning(
+                "Critic task [%s] has no reviews_task_id — nothing to merge.",
+                task.id,
+            )
+            return
+
+        reviewed_task = self.queue.get(task.reviews_task_id)
+        if reviewed_task is None:
+            logger.error(
+                "Reviewed task '%s' not found for Critic [%s].",
+                task.reviews_task_id, task.id,
+            )
+            return
+
+        # Determine merge target
+        parent_branch = self._get_merge_target(reviewed_task)
+
+        if parent_branch is None:
+            # No merge target — block for human
+            self._handle_no_merge_target(reviewed_task)
+            return
+
+        # Check for protected branch — skip to PR flow
+        if self._is_protected_branch(parent_branch):
+            logger.info(
+                "Parent branch '%s' is protected — skipping merge, "
+                "going to PR flow for task [%s].",
+                parent_branch, reviewed_task.id,
+            )
+            # PR flow is handled in 8.5 — for now block with notification
+            self.queue.mark_blocked_by_human(
+                reviewed_task.id,
+                reason=f"Merge target '{parent_branch}' is protected. PR required.",
+            )
+            try:
+                from matrixmouse import comms as comms_module
+                m = comms_module.get_manager()
+                if m:
+                    m.emit("pr_required", {
+                        "task_id":       reviewed_task.id,
+                        "task_title":    reviewed_task.title,
+                        "branch":        reviewed_task.branch,
+                        "parent_branch": parent_branch,
+                    })
+            except Exception as e:
+                logger.warning("Failed to emit pr_required: %s", e)
+            return
+
+        # Get repo root
+        if not reviewed_task.repo:
+            logger.error(
+                "Reviewed task [%s] has no repo — cannot merge.",
+                reviewed_task.id,
+            )
+            self._request_human_intervention(
+                reviewed_task, None,
+                reason="Task has no repo configured — cannot determine merge location.",
+            )
+            return
+
+        repo_root = self.paths.workspace_root / reviewed_task.repo[0]
+        if not repo_root.exists():
+            self._request_human_intervention(
+                reviewed_task, None,
+                reason=f"Repo root '{repo_root}' does not exist.",
+            )
+            return
+
+        # Run merge-up
+        success, info = self._run_merge_up(reviewed_task, parent_branch, repo_root)
+
+        if success:
+            # Clean merge — mark reviewed task complete
+            # remove_dependency was already called by approve() in task_tools
+            # so reviewed_task should now be READY — just mark complete
+            self.queue.mark_complete(reviewed_task.id)
+            self._notify_task_complete(reviewed_task)
+            logger.info(
+                "Task [%s] merged and marked COMPLETE.", reviewed_task.id
+            )
+            return
+
+        if info == "QUEUED":
+            # Lock busy — task stays BLOCKED_BY_TASK, will be unblocked
+            # when the lock is released and granted to this task
+            logger.info(
+                "Task [%s] queued for merge into '%s'.",
+                reviewed_task.id, parent_branch,
+            )
+            return
+
+        if info.startswith("CONFLICT:"):
+            files_str = info[len("CONFLICT:"):]
+            conflicted_files = [f for f in files_str.split(",") if f]
+            self._transition_to_merge_agent(
+                reviewed_task, parent_branch, repo_root, conflicted_files
+            )
+            return
+
+        # Other failure (checkout failed, etc.)
+        self._ws_state_repo.release_merge_lock(parent_branch, reviewed_task.id)
+        self._request_human_intervention(
+            reviewed_task, None,
+            reason=f"Merge failed: {info}",
+        )
+
+
+    def _handle_merge_complete(
+        self, task: Task, result: LoopResult
+    ) -> None:
+        """
+        Handle MergeAgent task completion.
+
+        The MergeAgent called declare_complete after resolving all conflicts
+        and git merge --continue was called automatically by resolve_conflict.
+        Release the merge lock, push the parent branch to mirror, and mark
+        the task COMPLETE.
+        """
+        logger.info("Merge task [%s] complete.", task.id)
+
+        parent_branch = self._get_merge_target(task)
+        if parent_branch:
+            repo_root = (
+                self.paths.workspace_root / task.repo[0]
+                if task.repo else None
+            )
+            if repo_root and repo_root.exists():
+                from matrixmouse.tools.git_tools import push_to_remote
+                push_ok, push_err = push_to_remote(
+                    parent_branch, MIRROR_REMOTE, repo_root
+                )
+                if not push_ok:
+                    logger.warning(
+                        "Post-merge push failed for '%s': %s",
+                        parent_branch, push_err,
+                    )
+            self._ws_state_repo.release_merge_lock(parent_branch, task.id)
+            logger.info(
+                "Merge lock released on '%s' by task [%s].",
+                parent_branch, task.id,
+            )
+
+        self.queue.mark_complete(task.id)
+        self._notify_task_complete(task)
+
+
+    def _get_merge_target(self, task: Task) -> str | None:
+        """
+        Determine the merge target branch for a task.
+
+        Returns the parent task's branch if the task has a parent,
+        the configured default_merge_target if set, or None.
+
+        Args:
+            task: The task to find a merge target for.
+
+        Returns:
+            Branch name to merge into, or None if no target is configured.
+        """
+        if task.parent_task_id:
+            parent = self.queue.get(task.parent_task_id)
+            if parent and parent.branch:
+                return parent.branch
+
+        default_target = self.config.default_merge_target
+        if default_target:
+            return default_target
+
+        return None
+
+
+    def _is_protected_branch(self, branch: str) -> bool:
+        """
+        Return True if branch is in the protected_branches config list.
+
+        Protected branches require a PR rather than a direct merge.
+        Branch protection API caching (8.5) will extend this method.
+
+        Args:
+            branch: Branch name to check.
+        """
+        protected = self.config.protected_branches
+        return branch in protected
+
+    def _run_merge_up(
+        self,
+        task: Task,
+        parent_branch: str,
+        repo_root: Path,
+    ) -> tuple[bool, str]:
+        """
+        Attempt to merge task.branch into parent_branch.
+
+        Acquires the merge lock for parent_branch, runs git merge --no-ff,
+        and returns (success, error_or_conflict_info).
+
+        On clean merge: releases lock, pushes parent to mirror, returns (True, "").
+        On conflict:    leaves lock held, returns (False, conflicted_files_str).
+        On lock busy:   enqueues task and returns (False, "QUEUED").
+
+        Args:
+            task:          The task whose branch is being merged.
+            parent_branch: The branch to merge into.
+            repo_root:     Repository root path.
+
+        Returns:
+            (True, "")              — clean merge succeeded
+            (False, "QUEUED")       — lock busy, task enqueued
+            (False, "CONFLICT:...")  — merge conflict, files listed after colon
+        """
+        from matrixmouse.tools.git_tools import _git, push_to_remote
+
+        # --- Acquire merge lock ---
+        acquired = self._ws_state_repo.acquire_merge_lock(
+            parent_branch, task.id
+        )
+        if not acquired:
+            logger.info(
+                "Merge lock on '%s' is held — enqueuing task [%s].",
+                parent_branch, task.id,
+            )
+            self._ws_state_repo.enqueue_merge_waiter(parent_branch, task.id)
+            return False, "QUEUED"
+
+        logger.info(
+            "Merge lock acquired on '%s' for task [%s].",
+            parent_branch, task.id,
+        )
+
+        # --- Checkout parent branch ---
+        ok, err = _git(["checkout", parent_branch], cwd=repo_root)
+        if not ok:
+            self._ws_state_repo.release_merge_lock(parent_branch, task.id)
+            return False, f"CHECKOUT_FAILED:{err}"
+
+        # --- Run merge ---
+        ok, output = _git(
+            ["merge", "--no-ff", task.branch,
+            "-m", f"Merge: {task.title} ({task.id[:8]})"],
+            cwd=repo_root,
+        )
+
+        if ok:
+            # Clean merge — push parent to mirror, release lock
+            push_ok, push_err = push_to_remote(
+                parent_branch, MIRROR_REMOTE, repo_root
+            )
+            if not push_ok:
+                logger.warning(
+                    "Post-merge push to mirror failed for '%s': %s",
+                    parent_branch, push_err,
+                )
+            self._ws_state_repo.release_merge_lock(parent_branch, task.id)
+            logger.info(
+                "Clean merge of '%s' into '%s' for task [%s].",
+                task.branch, parent_branch, task.id,
+            )
+            return True, ""
+
+        # --- Conflict detected ---
+        from matrixmouse.tools.merge_tools import get_conflicted_files
+        conflicted = get_conflicted_files(repo_root)
+
+        # Abort the merge — it will be re-run when MergeAgent takes over
+        _git(["merge", "--abort"], cwd=repo_root)
+
+        # Checkout back to task branch so the workspace is clean
+        _git(["checkout", task.branch], cwd=repo_root)
+
+        logger.info(
+            "Merge conflict detected for task [%s]. "
+            "Conflicted files: %s. Lock held.",
+            task.id, conflicted,
+        )
+        # Lock is intentionally NOT released — held until MergeAgent resolves
+        return False, f"CONFLICT:{','.join(conflicted)}"
+
+    def _replay_merge_decisions(
+        self, task: Task, repo_root: Path
+    ) -> None:
+        """
+        Silently re-apply stored merge resolution decisions.
+
+        Called at the start of a resumed MERGE session to fast-forward
+        the conflict state to where the agent left off. Decisions are
+        applied without adding new messages to context — the agent's
+        existing context_messages already document the session history.
+
+        Args:
+            task:      The MERGE task with stored decisions.
+            repo_root: Repository root.
+        """
+        import subprocess
+        for decision in task.merge_resolution_decisions:
+            file = decision.get("file")
+            resolution = decision.get("resolution")
+            content = decision.get("content")
+
+            if not file or not resolution:
+                continue
+
+            try:
+                if resolution == "ours":
+                    subprocess.run(
+                        ["git", "checkout", "--ours", "--", file],
+                        cwd=repo_root, capture_output=True,
+                    )
+                elif resolution == "theirs":
+                    subprocess.run(
+                        ["git", "checkout", "--theirs", "--", file],
+                        cwd=repo_root, capture_output=True,
+                    )
+                elif resolution == "manual" and content:
+                    (repo_root / file).write_text(content, encoding="utf-8")
+
+                subprocess.run(
+                    ["git", "add", "--", file],
+                    cwd=repo_root, capture_output=True,
+                )
+                logger.debug(
+                    "Replayed merge decision for '%s' (%s) on task [%s].",
+                    file, resolution, task.id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to replay merge decision for '%s' on task [%s]: %s",
+                    file, task.id, e,
+                )
+
+    def _handle_no_merge_target(self, task: Task) -> None:
+        """
+        Handle a completed task with no merge target.
+
+        Called when a top-level task has no parent branch and no
+        default_merge_target is configured. Blocks the task and prompts
+        the operator to specify a merge target or create a PR.
+        """
+        self.queue.mark_blocked_by_human(
+            task.id,
+            reason=(
+                "Task complete but no merge target configured. "
+                "Specify a target branch or create a PR via the UI."
+            ),
+        )
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.notify_blocked(
+                    f"Task [{task.id}] needs a merge target: {task.title}"
+                )
+                m.emit("merge_target_required", {
+                    "task_id":     task.id,
+                    "task_title":  task.title,
+                    "branch":      task.branch,
+                    "options": [
+                        {
+                            "value": "specify_target",
+                            "label": "Specify merge target",
+                            "description": "Choose a branch to merge this work into.",
+                        },
+                        {
+                            "value": "create_pr",
+                            "label": "Create pull request",
+                            "description": "Push and open a PR on the remote provider.",
+                        },
+                    ],
+                })
+        except Exception as e:
+            logger.warning("Failed to emit merge_target_required: %s", e)
+
+
+    def _transition_to_merge_agent(
+        self,
+        task: Task,
+        parent_branch: str,
+        repo_root: Path,
+        conflicted_files: list[str],
+    ) -> None:
+        """
+        Mutate task to MERGE role and re-queue for conflict resolution.
+
+        Called when _run_merge_up returns a CONFLICT result. Appends a
+        conflict notification to context_messages, sets role=MERGE and
+        preemptable=False, and transitions task to READY so the scheduler
+        picks it up.
+
+        Args:
+            task:             The task with merge conflicts.
+            parent_branch:    The branch the merge was targeting.
+            repo_root:        Repository root path.
+            conflicted_files: List of files with conflicts.
+        """
+        file_list = "\n".join(f"  - {f}" for f in conflicted_files)
+        task.context_messages.append({
+            "role":    "user",
+            "content": (
+                f"[Merge Conflict Detected]\n"
+                f"Task has been transitioned to Merge Agent for conflict "
+                f"resolution.\n\n"
+                f"Merging: {task.branch} → {parent_branch}\n\n"
+                f"Conflicted files:\n{file_list}\n\n"
+                f"Use show_conflict(file) to inspect each conflict, then "
+                f"resolve_conflict(file, resolution) to apply your decision. "
+                f"The merge will be finalised automatically when all conflicts "
+                f"are resolved."
+            ),
+        })
+        task.role = AgentRole.MERGE
+        task.preemptable = False
+
+        try:
+            self.queue.update(task)
+            self.queue.mark_ready(task.id)
+        except Exception as e:
+            logger.error(
+                "Failed to transition task [%s] to MERGE role: %s",
+                task.id, e,
+            )
+            self._ws_state_repo.release_merge_lock(parent_branch, task.id)
+            self._request_human_intervention(
+                task, None,
+                reason=f"Failed to transition to merge resolution: {e}",
+            )
+            return
+
+        logger.info(
+            "Task [%s] transitioned to MERGE role. "
+            "Conflicts: %s",
+            task.id, conflicted_files,
+        )
+
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.emit("merge_conflict_detected", {
+                    "task_id":         task.id,
+                    "task_title":      task.title,
+                    "parent_branch":   parent_branch,
+                    "conflicted_files": conflicted_files,
+                })
+        except Exception as e:
+            logger.warning("Failed to emit merge_conflict_detected: %s", e)
     def _create_critic_review(self, task: Task, result: LoopResult) -> None:
         """
         Create a Critic review task for a completed Coder or Writer task.
@@ -1220,6 +1726,45 @@ class Orchestrator:
                         "turns_taken": result.turns_taken,
                         "turn_limit":  task.turn_limit or self.config.agent_max_turns,
                     })
+                # --- Merge turn limit ---
+                if task.role == AgentRole.MERGE:
+                    parent_branch = self._get_merge_target(task)
+                    # Abort the in-progress merge
+                    if task.repo:
+                        repo_root = self.paths.workspace_root / task.repo[0]
+                        if repo_root.exists():
+                            from matrixmouse.tools.git_tools import _git
+                            _git(["merge", "--abort"], cwd=repo_root)
+                            _git(["checkout", task.branch], cwd=repo_root)
+
+                    m.emit("merge_conflict_resolution_turn_limit_reached", {
+                        "task_id":         task.id,
+                        "task_title":      task.title,
+                        "turns_taken":     result.turns_taken,
+                        "parent_branch":   parent_branch or "",
+                        "resolved_so_far": task.merge_resolution_decisions,
+                        "choices": [
+                            {
+                                "value": "extend",
+                                "label": "Give Merge Agent more turns",
+                                "description": (
+                                    f"Allow another "
+                                    f"{self.config.merge_conflict_max_turns} "
+                                    f"turns. Previously resolved conflicts will "
+                                    f"be automatically re-applied."
+                                ),
+                            },
+                            {
+                                "value": "abort",
+                                "label": "Abort merge",
+                                "description": (
+                                    "Cancel the merge. Task stays complete on "
+                                    "its own branch. Manual merge required."
+                                ),
+                            },
+                        ],
+                    })
+                    return
         except Exception as e:
             logger.warning("Failed to send turn limit notification: %s", e)
 
@@ -1231,7 +1776,11 @@ class Orchestrator:
         """
         Return True if the orchestrator should yield this task back to
         the scheduler after the current inference boundary.
+        Respects task.preemptable: non-preemptable tasks never yield.
         """
+        if not task.preemptable:
+            return False
+
         if self._scheduler.time_slice_expired(task):
             logger.debug("Time slice expired for task [%s].", task.id)
             return True
@@ -1339,3 +1888,4 @@ class Orchestrator:
             "importance_weight": self.config.priority_importance_weight,
             "urgency_weight":    self.config.priority_urgency_weight,
         }
+    

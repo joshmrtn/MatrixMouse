@@ -16,6 +16,7 @@ configure(cwd) must be called before any tool is used.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -35,10 +36,10 @@ _queue = None  # TaskRepository — for persisting decisions
 
 
 def configure(
-    cwd: Path,
     conflicted_files: list[str],
     task_id: str,
     queue,
+    cwd: Path | None = None,
 ) -> None:
     """
     Configure merge tools for a conflict resolution session.
@@ -201,6 +202,10 @@ def resolve_conflict(
                 )
 
         elif resolution == "manual":
+            if not content:
+                return (
+                    f"ERROR: content must not be empty if resolution is manual"
+                )
             file_path.write_text(content, encoding="utf-8")
 
         # Stage the resolved file
@@ -324,7 +329,7 @@ def _finalise_merge() -> str:
         result = subprocess.run(
             ["git", "merge", "--continue", "--no-edit"],
             cwd=cwd, capture_output=True, text=True,
-            env={**subprocess.os.environ, "GIT_EDITOR": "true"},
+            env={**os.environ, "GIT_EDITOR": "true"},
         )
         if result.returncode != 0:
             return (
