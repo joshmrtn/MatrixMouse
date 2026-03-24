@@ -222,6 +222,32 @@ class WorkspaceStateRepository(ABC):
         """
 
     @abstractmethod
+    def enqueue_merge_waiter(self, branch: str, task_id: str) -> None:
+        """
+        Add task_id to the FIFO queue of tasks waiting to merge into branch.
+
+        Called when a task wants to merge into a branch that is currently
+        locked. The task will be granted the lock automatically when the
+        current holder releases it.
+
+        Args:
+            branch:  The parent branch being merged into.
+            task_id: The task waiting for the lock.
+        """
+
+    @abstractmethod
+    def dequeue_next_merge_waiter(self, branch: str) -> str | None:
+        """
+        Remove and return the next task_id from the merge queue for branch.
+
+        Called by release_merge_lock to grant the lock to the next waiter.
+        Returns None if the queue is empty.
+
+        Args:
+            branch: The parent branch whose queue to pop from.
+        """
+
+    @abstractmethod
     def get_merge_lock_holder(self, branch: str) -> str | None:
         """
         Return the task_id currently holding the merge lock for the given

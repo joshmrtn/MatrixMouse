@@ -42,6 +42,7 @@ class AgentRole(str, Enum):
     CODER   = "coder"
     WRITER  = "writer"
     CRITIC  = "critic"
+    MERGE   = "merge"
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +168,11 @@ class Task:
     time_slice_started: Optional[float] = None
     turn_limit: int = field(default=0)
     preempt: bool = field(default = False)
+    preemptable: bool = field(default=True)
 
     # --- Git ---
     wip_commit_hash: str = field(default="")
+    merge_resolution_decisions: list[dict] = field(default_factory=list)
 
     # --- Critic / review ---
     reviews_task_id: Optional[str] = None
@@ -258,7 +261,9 @@ class Task:
             "time_slice_started":           self.time_slice_started,
             "turn_limit":                   self.turn_limit,
             "preempt":                      self.preempt,
+            "preemptable":                  self.preemptable,
             "wip_commit_hash":              self.wip_commit_hash,
+            "merge_resolution_decisions":   self.merge_resolution_decisions,
             "reviews_task_id":              self.reviews_task_id,
             "last_review_summary":          self.last_review_summary,
             "context_messages":             self.context_messages,
@@ -312,7 +317,9 @@ class Task:
             time_slice_started=data.get("time_slice_started"),
             turn_limit=data.get("turn_limit", 0),
             preempt=data.get("preempt") or False,
+            preemptable=data.get("preemptable", True),
             wip_commit_hash=data.get("wip_commit_hash") or "",
+            merge_resolution_decisions=data.get("merge_resolution_decisions", []),
             reviews_task_id=data.get("reviews_task_id"),
             last_review_summary=data.get("last_review_summary"),
             context_messages=data.get("context_messages", []),

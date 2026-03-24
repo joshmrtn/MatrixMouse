@@ -137,8 +137,8 @@ class TestBranchManagement:
     def test_merge_conflict_max_turns_default(self):
         assert make_config().merge_conflict_max_turns == 5
 
-    def test_conflict_resolution_model_default_empty(self):
-        assert make_config().conflict_resolution_model == ""
+    def test_merge_resolution_model_default_empty(self):
+        assert make_config().merge_resolution_model == ""
 
     def test_push_wip_to_remote_default_false(self):
         assert make_config().push_wip_to_remote is False

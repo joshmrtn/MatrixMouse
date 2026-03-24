@@ -283,13 +283,82 @@ class SQLiteWorkspaceStateRepository(WorkspaceStateRepository):
             )
             return True
 
-    def release_merge_lock(self, branch: str, task_id: str) -> None:
+    def enqueue_merge_waiter(self, branch: str, task_id: str) -> None:
         conn = self._conn()
         with conn:
+            row = conn.execute(
+                "SELECT queue FROM merge_locks WHERE branch = ?",
+                (branch,),
+            ).fetchone()
+            if row is None:
+                # No lock row exists yet — create one with this task in queue
+                # It will be granted the lock immediately on next acquire attempt
+                conn.execute(
+                    "INSERT OR IGNORE INTO merge_locks "
+                    "(branch, locked_by, locked_at, queue) VALUES (?, '', '', ?)",
+                    (branch, json.dumps([task_id])),
+                )
+            else:
+                queue = json.loads(row["queue"] or "[]")
+                if task_id not in queue:
+                    queue.append(task_id)
+                conn.execute(
+                    "UPDATE merge_locks SET queue = ? WHERE branch = ?",
+                    (json.dumps(queue), branch),
+                )
+
+    def dequeue_next_merge_waiter(self, branch: str) -> str | None:
+        conn = self._conn()
+        with conn:
+            row = conn.execute(
+                "SELECT queue FROM merge_locks WHERE branch = ?",
+                (branch,),
+            ).fetchone()
+            if row is None:
+                return None
+            queue = json.loads(row["queue"] or "[]")
+            if not queue:
+                return None
+            next_task_id = queue.pop(0)
             conn.execute(
-                "DELETE FROM merge_locks WHERE branch = ? AND locked_by = ?",
-                (branch, task_id),
+                "UPDATE merge_locks SET queue = ? WHERE branch = ?",
+                (json.dumps(queue), branch),
             )
+            return next_task_id
+
+    def release_merge_lock(self, branch: str, task_id: str) -> None:
+        now = _now_iso()
+        conn = self._conn()
+        with conn:
+            # Check if there's a next waiter before deleting the lock row
+            row = conn.execute(
+                "SELECT queue FROM merge_locks "
+                "WHERE branch = ? AND locked_by = ?",
+                (branch, task_id),
+            ).fetchone()
+            if row is None:
+                return  # not the lock holder — no-op
+
+            queue = json.loads(row["queue"] or "[]")
+            if queue:
+                # Grant lock to next waiter atomically
+                next_task_id = queue.pop(0)
+                conn.execute(
+                    "UPDATE merge_locks SET "
+                    "locked_by = ?, locked_at = ?, queue = ? "
+                    "WHERE branch = ?",
+                    (next_task_id, now, json.dumps(queue), branch),
+                )
+                logger.info(
+                    "Merge lock on '%s' transferred from [%s] to [%s].",
+                    branch, task_id, next_task_id,
+                )
+            else:
+                # No waiters — release entirely
+                conn.execute(
+                    "DELETE FROM merge_locks WHERE branch = ? AND locked_by = ?",
+                    (branch, task_id),
+                )
 
     def get_merge_lock_holder(self, branch: str) -> str | None:
         row = self._conn().execute(

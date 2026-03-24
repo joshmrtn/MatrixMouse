@@ -46,10 +46,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     last_review_summary             TEXT,
     context_messages                TEXT NOT NULL DEFAULT '[]',
     wip_commit_hash                 TEXT NOT NULL DEFAULT '',
+    merge_resolution_decisions      TEXT NOT NULL DEFAULT '[]',
     branch                          TEXT NOT NULL DEFAULT '',
     decomposition_confirmed_depth   INTEGER NOT NULL DEFAULT 0,
     turn_limit                      INTEGER NOT NULL DEFAULT 0,
     preempt                         INTEGER NOT NULL DEFAULT 0,
+    preemptable                     INTEGER NOT NULL DEFAULT 1,
     time_slice_started              REAL,
     started_at                      TEXT,
     completed_at                    TEXT,
@@ -95,8 +97,9 @@ CREATE TABLE IF NOT EXISTS session_contexts (
 -- Stale if locked_by task is terminal, READY, not found, or locked_at > 24h.
 CREATE TABLE IF NOT EXISTS merge_locks (
     branch     TEXT PRIMARY KEY,
-    locked_by  TEXT NOT NULL,  -- task_id holding the lock
-    locked_at  TEXT NOT NULL   -- ISO timestamp
+    locked_by  TEXT NOT NULL,              -- task_id holding the lock
+    locked_at  TEXT NOT NULL,              -- ISO timestamp
+    queue      TEXT NOT NULL DEFAULT '[]'  -- JSON array of waiting task IDs, FIFO
 );
 
 -- Repo metadata: per-repo git provider config and cached protected branches.

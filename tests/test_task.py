@@ -286,6 +286,36 @@ class TestTaskSerialisation:
         del data["pr_poll_next_at"]
         assert Task.from_dict(data).pr_poll_next_at == ""
 
+    def test_preemptable_defaults_true(self):
+        task = make_task()
+        assert task.preemptable is True
+
+    def test_preemptable_roundtrip(self):
+        task = make_task()
+        task.preemptable = False
+        assert Task.from_dict(task.to_dict()).preemptable is False
+
+    def test_preemptable_defaults_true_on_missing_key(self):
+        data = make_task().to_dict()
+        del data["preemptable"]
+        assert Task.from_dict(data).preemptable is True
+
+    def test_merge_resolution_decisions_defaults_empty(self):
+        assert make_task().merge_resolution_decisions == []
+
+    def test_merge_resolution_decisions_roundtrip(self):
+        task = make_task()
+        task.merge_resolution_decisions = [
+            {"file": "foo.py", "resolution": "ours", "content": None}
+        ]
+        restored = Task.from_dict(task.to_dict())
+        assert restored.merge_resolution_decisions[0]["file"] == "foo.py"
+
+    def test_merge_resolution_decisions_defaults_empty_on_missing_key(self):
+        data = make_task().to_dict()
+        del data["merge_resolution_decisions"]
+        assert Task.from_dict(data).merge_resolution_decisions == []
+
 # ---------------------------------------------------------------------------
 # TaskStatus helpers
 # ---------------------------------------------------------------------------
@@ -343,3 +373,12 @@ class TestLastModified:
     def test_restored_from_dict(self):
         task = make_task()
         assert Task.from_dict(task.to_dict()).last_modified == task.last_modified
+
+class TestAgentRoleMerge:
+    def test_merge_role_value(self):
+        assert AgentRole.MERGE.value == "merge"
+
+    def test_merge_role_roundtrip_in_task(self):
+        task = make_task(role=AgentRole.MERGE)
+        restored = Task.from_dict(task.to_dict())
+        assert restored.role == AgentRole.MERGE

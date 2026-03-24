@@ -316,6 +316,14 @@ class MatrixMouseConfig(BaseSettings):
             "Common alternatives: 'bot', 'agent', 'matrixmouse'."
         ),
     )
+    default_merge_target: str = Field(
+        default="",
+        description=(
+            "Default branch to merge completed top-level tasks into when "
+            "they have no parent task. Empty string means no automatic merge — "
+            "the operator is prompted via modal to specify a target or create a PR."
+        ),
+    )
     protected_branches: list[str] = Field(
         default=["main", "master", "develop", "release"],
         description=(
@@ -332,7 +340,7 @@ class MatrixMouseConfig(BaseSettings):
             "before the task is escalated to BLOCKED_BY_HUMAN."
         ),
     )
-    conflict_resolution_model: str = Field(
+    merge_resolution_model: str = Field(
         default="",
         description=(
             "Model to use for merge conflict resolution. "

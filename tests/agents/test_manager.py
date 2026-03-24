@@ -48,6 +48,9 @@ from matrixmouse.orchestrator import _build_review_task
 from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
+from matrixmouse.repository.memory_workspace_state_repository import (
+    InMemoryWorkspaceStateRepository,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -79,88 +82,6 @@ def make_config(upcoming_tasks=20) -> MagicMock:
     cfg.manager_review_upcoming_tasks = upcoming_tasks
     return cfg
 
-class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
-    def __init__(self):
-        self._store: dict = {}
-        self._stale: dict = {}
-        self._repo_metadata: dict = {}
-        self._sessions: dict = {}
-        self._merge_locks: dict = {}
-
-    def get(self, key):
-        return self._store.get(key)
-
-    def set(self, key, value):
-        self._store[key] = value
-
-    def delete(self, key):
-        self._store.pop(key, None)
-
-    def get_stale_clarification_task(self, blocked_task_id):
-        return self._stale.get(blocked_task_id)
-
-    def register_stale_clarification_task(self, blocked_task_id, manager_task_id):
-        self._stale[blocked_task_id] = manager_task_id
-
-    def clear_stale_clarification_task(self, blocked_task_id):
-        self._stale.pop(blocked_task_id, None)
-
-    def all_stale_clarification_tasks(self):
-        return dict(self._stale)
-    
-
-    # Session contexts
-    def get_session_context(self, task_id):
-        return self._sessions.get(task_id)
-
-    def set_session_context(self, task_id, ctx):
-        self._sessions[task_id] = ctx
-
-    def clear_session_context(self, task_id):
-        self._sessions.pop(task_id, None)
-
-    def get_active_session_contexts(self):
-        return list(self._sessions.items())
-
-    # Merge locks
-    def acquire_merge_lock(self, branch, task_id):
-        if branch in self._merge_locks:
-            return False
-        self._merge_locks[branch] = task_id
-        return True
-
-    def release_merge_lock(self, branch, task_id):
-        if self._merge_locks.get(branch) == task_id:
-            del self._merge_locks[branch]
-
-    def get_merge_lock_holder(self, branch):
-        return self._merge_locks.get(branch)
-
-    # Repo metadata
-    def get_repo_metadata(self, repo_name):
-        return self._repo_metadata.get(repo_name)
-
-    def set_repo_metadata(self, repo_name, provider, remote_url):
-        existing = self._repo_metadata.get(repo_name, {})
-        self._repo_metadata[repo_name] = {
-            **existing,
-            "provider": provider,
-            "remote_url": remote_url,
-        }
-
-    def get_protected_branches_cached(self, repo_name):
-        meta = self._repo_metadata.get(repo_name)
-        if not meta or not meta.get("cache_timestamp"):
-            return None
-        return meta.get("protected_branches", []), meta["cache_timestamp"]
-
-    def set_protected_branches_cached(self, repo_name, branches):
-        existing = self._repo_metadata.get(repo_name, {})
-        self._repo_metadata[repo_name] = {
-            **existing,
-            "protected_branches": branches,
-            "cache_timestamp": datetime.now(timezone.utc).isoformat(),
-        }
 
 # ---------------------------------------------------------------------------
 # build_system_prompt — structure

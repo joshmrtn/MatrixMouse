@@ -35,6 +35,7 @@ Submodules:
 import logging
 logger = logging.getLogger(__name__)
 
+from matrixmouse.task import AgentRole
 from matrixmouse.tools.file_tools import read_file, str_replace, append_to_file
 from matrixmouse.tools.task_tools import (
     declare_complete,
@@ -70,6 +71,7 @@ from matrixmouse.tools.navigation_tools import (
 )
 from matrixmouse.tools.test_tools import run_tests, run_single_test
 from matrixmouse.tools.comms_tools import request_clarification
+from matrixmouse.tools.merge_tools import show_conflict, resolve_conflict
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,9 @@ TOOLS = [
     get_git_status,
     push_branch,
     clone_repo,
+    # merge_tools
+    show_conflict,
+    resolve_conflict,
     # code_tools
     get_function_def,
     get_function_list,
@@ -252,6 +257,11 @@ _CRITIC_TOOLS: frozenset[str] = frozenset({
     #       questions mid-review as that would stall task completion.
 })
 
+_MERGE_TOOLS: frozenset[str] = frozenset({
+    "show_conflict",
+    "resolve_conflict",
+})
+
 _ROLE_TOOL_SETS: dict = {}  # populated after imports resolve
 
 
@@ -267,6 +277,7 @@ def _build_role_tool_sets() -> None:
         AgentRole.CODER:   _CODER_TOOLS,
         AgentRole.WRITER:  _WRITER_TOOLS,
         AgentRole.CRITIC:  _CRITIC_TOOLS,
+        AgentRole.MERGE:   _MERGE_TOOLS,
     }
 
 
@@ -289,7 +300,6 @@ def tools_for_role(role: "AgentRole") -> frozenset[str]:
             Returns an empty frozenset for unknown roles, which will
             block all tool calls and is logged as a warning.
     """
-    from matrixmouse.task import AgentRole
     result = _ROLE_TOOL_SETS.get(role)
     if result is None:
         logger.warning(
@@ -301,7 +311,7 @@ def tools_for_role(role: "AgentRole") -> frozenset[str]:
     return result
 
 
-def tools_for_role_list(role: "AgentRole") -> list:
+def tools_for_role_list(role: AgentRole) -> list:
     """
     Return the subset of TOOLS permitted for a given role.
 

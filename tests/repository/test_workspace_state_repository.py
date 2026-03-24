@@ -47,17 +47,30 @@ from matrixmouse.repository.sqlite_workspace_state_repository import (
 from matrixmouse.repository.workspace_state_repository import (
     WorkspaceStateRepository,
 )
+# Remove the local class definition entirely, replace with:
+from matrixmouse.repository.memory_workspace_state_repository import (
+    InMemoryWorkspaceStateRepository,
+)
 
 
-@pytest.fixture
-def ws_repo(tmp_path) -> WorkspaceStateRepository:
+@pytest.fixture(params=["sqlite", "memory"])
+def ws_repo(request, tmp_path):
+    if request.param == "sqlite":
+        db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
+        db_path.parent.mkdir(parents=True)
+        return SQLiteWorkspaceStateRepository(db_path)
+    else:
+        return InMemoryWorkspaceStateRepository()
+
+@pytest.fixture(params=["sqlite"])
+def ws_repo_with_tasks(request, tmp_path):
+    """
+    Workspace state repo alongside a task repo sharing the same DB.
+    SQLite-only — the shared database is required for cross-repo FK constraints
+    and stale lock detection that checks task status via JOIN.
+    """
     db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
-    return SQLiteWorkspaceStateRepository(db_path)
-
-@pytest.fixture
-def ws_repo_with_tasks(tmp_path):
-    """Workspace state repo alongside a task repo sharing the same DB."""
-    db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
+    db_path.parent.mkdir(parents=True)
     task_repo = SQLiteTaskRepository(db_path)
     ws_repo = SQLiteWorkspaceStateRepository(db_path)
     return ws_repo, task_repo
@@ -400,3 +413,50 @@ class TestRepoMetadata:
         ws_repo.set_repo_metadata("repo-b", "gitlab", "https://gitlab.com/b")
         assert ws_repo.get_repo_metadata("repo-a")["provider"] == "github"
         assert ws_repo.get_repo_metadata("repo-b")["provider"] == "gitlab"
+
+class TestMergeLockQueue:
+    def test_enqueue_adds_waiter(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        next_id = ws_repo.dequeue_next_merge_waiter("mm/feature/foo")
+        assert next_id == "task2"
+
+    def test_fifo_ordering_preserved(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task3")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task4")
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task2"
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task3"
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task4"
+
+    def test_dequeue_returns_none_on_empty(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") is None
+
+    def test_release_grants_lock_to_next_waiter(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.release_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.get_merge_lock_holder("mm/feature/foo") == "task2"
+
+    def test_release_with_no_waiters_frees_lock(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.release_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.get_merge_lock_holder("mm/feature/foo") is None
+
+    def test_release_grants_first_waiter_only(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task3")
+        ws_repo.release_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.get_merge_lock_holder("mm/feature/foo") == "task2"
+        # task3 still waiting
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task3"
+
+    def test_duplicate_not_enqueued(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task2"
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") is None
