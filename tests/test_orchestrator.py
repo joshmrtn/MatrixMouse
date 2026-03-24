@@ -955,3 +955,59 @@ class TestSessionModeWiring:
         task = make_task(role=AgentRole.CODER, branch="")
         orch.queue.add(task)
         assert orch._ws_state_repo.get_session_context(task.id) is None
+
+    def test_branch_missing_triggers_human_intervention(self, tmp_path):
+        """If branch cannot be recreated from mirror, task is blocked."""
+        # Create the repo directory so the branch check runs
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/missing",
+                        repo=["repo"])
+        orch.queue.add(task)
+
+        with patch("matrixmouse.orchestrator.ensure_branch_from_mirror",
+                return_value=(False, "fetch failed: no such ref")), \
+            patch("matrixmouse.comms.get_manager", return_value=None):
+            orch._run_task(task)
+
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.BLOCKED_BY_HUMAN
+
+    def test_branchless_task_skips_verification(self, tmp_path):
+        """Tasks with no branch set skip the mirror verification entirely."""
+        orch = make_orchestrator(tmp_path)
+        # Manager task with no branch — enters BRANCH_SETUP instead
+        task = make_task(role=AgentRole.MANAGER, branch="")
+        orch.queue.add(task)
+
+        with patch("matrixmouse.orchestrator.ensure_branch_from_mirror") as mock_verify:
+            with patch.object(orch, "_run_agent",
+                            side_effect=Exception("stop here")), \
+                patch("matrixmouse.comms.get_manager", return_value=None):
+                try:
+                    orch._run_task(task)
+                except Exception:
+                    pass
+
+        mock_verify.assert_not_called()
+
+    def test_task_with_branch_but_no_repo_skips_verification(self, tmp_path):
+        """Tasks with a branch but empty repo list skip mirror verification."""
+        orch = make_orchestrator(tmp_path)
+        task = make_task(role=AgentRole.CODER, branch="mm/feature/foo", repo=[])
+        orch.queue.add(task)
+
+        with patch("matrixmouse.orchestrator.ensure_branch_from_mirror") as mock_verify:
+            with patch.object(orch, "_run_agent",
+                            side_effect=Exception("stop here")), \
+                patch("matrixmouse.comms.get_manager", return_value=None):
+                try:
+                    orch._run_task(task)
+                except Exception:
+                    pass
+
+        mock_verify.assert_not_called()
+        

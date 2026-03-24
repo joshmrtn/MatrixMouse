@@ -173,6 +173,87 @@ class TestBranchExists:
         assert branch_exists("mm/nonexistent/branch", git_repo) is False
 
 
+class TestEnsureBranchFromMirror:
+    def test_noop_when_branch_exists_locally(self, git_repo_with_mirror):
+        repo, _ = git_repo_with_mirror
+        base = "master" if branch_exists("master", repo) else "main"
+        from matrixmouse.tools.git_tools import ensure_branch_from_mirror
+        ok, result = ensure_branch_from_mirror(base, MIRROR_REMOTE, repo)
+        assert ok
+        assert result == base
+
+    def test_recreates_branch_from_mirror(self, git_repo_with_mirror):
+        repo, mirror = git_repo_with_mirror
+        base = "master" if branch_exists("master", repo) else "main"
+
+        # Create a branch on the mirror that doesn't exist locally
+        subprocess.run(
+            ["git", "branch", "mm/test/remote-only"],
+            cwd=repo, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", MIRROR_REMOTE, "mm/test/remote-only"],
+            cwd=repo, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "branch", "-D", "mm/test/remote-only"],
+            cwd=repo, capture_output=True,
+        )
+        assert not branch_exists("mm/test/remote-only", repo)
+
+        from matrixmouse.tools.git_tools import ensure_branch_from_mirror
+        ok, result = ensure_branch_from_mirror(
+            "mm/test/remote-only", MIRROR_REMOTE, repo
+        )
+        assert ok
+        assert branch_exists("mm/test/remote-only", repo)
+
+    def test_returns_error_when_mirror_missing_branch(self, git_repo_with_mirror):
+        repo, _ = git_repo_with_mirror
+        from matrixmouse.tools.git_tools import ensure_branch_from_mirror
+        ok, err = ensure_branch_from_mirror(
+            "mm/nonexistent/branch", MIRROR_REMOTE, repo
+        )
+        assert not ok
+        assert "fetch" in err.lower() or "mirror" in err.lower()
+
+    def test_returns_error_when_remote_missing(self, git_repo):
+        from matrixmouse.tools.git_tools import ensure_branch_from_mirror
+        ok, err = ensure_branch_from_mirror(
+            "mm/test/branch", "no-such-remote", git_repo
+        )
+        assert not ok
+
+    def test_returns_error_when_checkout_fails_after_fetch(self, git_repo_with_mirror):
+        repo, mirror = git_repo_with_mirror
+        base = "master" if branch_exists("master", repo) else "main"
+
+        # Create branch on mirror
+        subprocess.run(["git", "branch", "mm/test/checkout-fail"], cwd=repo,
+                    capture_output=True)
+        subprocess.run(["git", "push", MIRROR_REMOTE, "mm/test/checkout-fail"],
+                    cwd=repo, capture_output=True)
+        subprocess.run(["git", "branch", "-D", "mm/test/checkout-fail"],
+                    cwd=repo, capture_output=True)
+
+        from matrixmouse.tools.git_tools import ensure_branch_from_mirror
+
+        # Patch _git to let fetch succeed but fail on checkout
+        original_git = git_tools._git
+        def mock_git(args, cwd):
+            if args[0] == "checkout":
+                return False, "fatal: mock checkout failure"
+            return original_git(args, cwd)
+
+        with patch("matrixmouse.tools.git_tools._git", side_effect=mock_git):
+            ok, err = ensure_branch_from_mirror(
+                "mm/test/checkout-fail", MIRROR_REMOTE, repo
+            )
+
+        assert not ok
+        assert "checkout" in err.lower() or "create local branch" in err.lower()
+
+
 # ---------------------------------------------------------------------------
 # create_branch
 # ---------------------------------------------------------------------------

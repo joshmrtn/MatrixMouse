@@ -49,6 +49,7 @@ from matrixmouse.scheduling import Scheduler
 from matrixmouse.stuck import StuckDetector
 from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.tools import tools_for_names
+from matrixmouse.tools.git_tools import ensure_branch_from_mirror, MIRROR_REMOTE
 from matrixmouse.tools._safety import reconfigure_for_task
 from matrixmouse.repository import SQLiteTaskRepository, SQLiteWorkspaceStateRepository
 
@@ -670,6 +671,36 @@ class Orchestrator:
         Returns normally in all cases — the caller (run()) decides what
         to do next based on task status after return.
         """
+
+        if task.branch and task.repo:
+            repo_root = self.paths.workspace_root / task.repo[0]
+            if repo_root.exists():
+                ok, err = ensure_branch_from_mirror(
+                    task.branch, MIRROR_REMOTE, repo_root
+                )
+                if not ok:
+                    logger.error(
+                        "Cannot resume task [%s] — branch '%s' missing and "
+                        "recreation from mirror failed: %s. "
+                        "Blocking for human intervention.",
+                        task.id, task.branch, err,
+                    )
+                    self._request_human_intervention(
+                        task, None,
+                        reason=(
+                            f"Branch '{task.branch}' not found locally and "
+                            f"could not be recreated from mirror: {err}"
+                        ),
+                    )
+                    return
+            else:
+                logger.warning(
+                    "Repo root '%s' does not exist for task [%s] — "
+                    "skipping branch verification.",
+                    repo_root, task.id,
+                )
+
+
         agent = agent_for_role(task.role)
 
         # --- Session mode: BRANCH_SETUP ---

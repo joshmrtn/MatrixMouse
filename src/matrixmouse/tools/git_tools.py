@@ -180,6 +180,61 @@ def branch_exists(branch_name: str, cwd: Path) -> bool:
     )
     return success and bool(output.strip())
 
+def ensure_branch_from_mirror(
+    branch_name: str,
+    mirror_remote: str,
+    cwd: Path,
+) -> tuple[bool, str]:
+    """
+    Ensure a branch exists locally, recreating from mirror if missing.
+
+    Called at task startup (resume after service restart, or first run
+    on a new worker). If the branch already exists locally, this is a
+    no-op. If it is missing, it is recreated by fetching from the mirror
+    and checking out a local tracking branch.
+
+    Args:
+        branch_name:   Full branch name to verify/recreate.
+        mirror_remote: Remote name for the local mirror (e.g. 'mm-mirror').
+        cwd:           Repository root.
+
+    Returns:
+        (True, branch_name) if the branch exists or was recreated.
+        (False, error_message) if recreation failed.
+    """
+    if branch_exists(branch_name, cwd):
+        logger.debug("Branch '%s' exists locally — no action needed.", branch_name)
+        return True, branch_name
+
+    logger.info(
+        "Branch '%s' not found locally — attempting to recreate from mirror.",
+        branch_name,
+    )
+
+    # Fetch the branch from the mirror
+    ok, err = _git(["fetch", mirror_remote, branch_name], cwd=cwd)
+    if not ok:
+        return False, (
+            f"Failed to fetch '{branch_name}' from mirror '{mirror_remote}': {err}"
+        )
+
+    # Create a local tracking branch from the fetched ref
+    ok, err = _git(
+        ["checkout", "-b", branch_name,
+         f"{mirror_remote}/{branch_name}"],
+        cwd=cwd,
+    )
+    if not ok:
+        return False, (
+            f"Failed to create local branch '{branch_name}' "
+            f"from '{mirror_remote}/{branch_name}': {err}"
+        )
+
+    logger.info(
+        "Branch '%s' recreated from mirror '%s'.",
+        branch_name, mirror_remote,
+    )
+    return True, branch_name
 
 def create_branch(
     branch_name: str,
