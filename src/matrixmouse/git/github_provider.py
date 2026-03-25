@@ -292,9 +292,22 @@ class GitHubProvider(GitRemoteProvider):
             f"/repos/{repo}/pulls/{pr_number}/comments"
         )
 
-        # Group inline comments by review_id → file → list of comment dicts
+        # Index all comments by id for reply lookup.
+        comments_by_id: dict[int, dict[str, Any]] = {
+            c["id"]: c for c in inline_comments if "id" in c
+        }
+
+        # Group top-level inline comments by review_id → file.
+        # Replies (in_reply_to_id set) are attached to their parent comment
+        # rather than listed separately, preserving the full thread context.
         by_review: dict[int, dict[str, list[dict[str, Any]]]] = {}
         for comment in inline_comments:
+            if comment.get("in_reply_to_id"):
+                # Reply — attach to parent's "_replies" list
+                parent = comments_by_id.get(comment["in_reply_to_id"])
+                if parent is not None:
+                    parent.setdefault("_replies", []).append(comment)
+                continue
             review_id: int = comment.get("pull_request_review_id") or 0
             path: str = comment.get("path", "")
             by_review.setdefault(review_id, {}).setdefault(path, []).append(comment)
@@ -409,6 +422,13 @@ def _format_review(
 
             lines.append(f"{indent}{line_label} | {source_line}")
             lines.append(f"{indent}{caret_pad}^ [{tag}]: {rendered_body}")
+
+            # Render reply thread collapsed under the parent comment
+            for reply in comment.get("_replies", []):
+                reply_author: str = reply.get("user", {}).get("login", "unknown")
+                reply_body: str = (reply.get("body") or "").strip()
+                lines.append(f"{indent}  > {reply_author}: {reply_body}")
+
             has_content = True
 
     # General review body
