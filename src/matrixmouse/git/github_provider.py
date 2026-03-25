@@ -439,11 +439,13 @@ def _format_review(
         has_content = True
 
     if not has_content:
-        if state == "APPROVED":
+        if state in ("APPROVED", "CHANGES_REQUESTED"):
+            # Always emit the header for explicit review decisions even
+            # when the reviewer left no written feedback.
             lines.append("  No comments.")
             return "\n".join(lines)
-        # Dismissed or commented reviews with no body and no inline
-        # comments add no value; drop them.
+        # COMMENTED or DISMISSED with no body and no inline comments
+        # adds no useful signal; drop it.
         return ""
 
     return "\n".join(lines)
@@ -467,7 +469,7 @@ def _extract_source_line(diff_hunk: str) -> str:
         return ""
     last_line = diff_hunk.splitlines()[-1]
     # Strip leading diff sigil (+, -, space) and any CR
-    return last_line.lstrip("+-").rstrip("\r")
+    return last_line.lstrip("+-").lstrip(" ").rstrip("\r")
 
 
 def _classify_comment(body: str) -> tuple[str, str]:
