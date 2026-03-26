@@ -174,6 +174,9 @@ class Task:
     wip_commit_hash: str = field(default="")
     merge_resolution_decisions: list[dict] = field(default_factory=list)
 
+    # --- Pending tool calls (decision replay) ---
+    pending_tool_calls: list[dict] = field(default_factory=list)
+
     # --- Critic / review ---
     reviews_task_id: Optional[str] = None
     last_review_summary: Optional[str] = None
@@ -264,6 +267,7 @@ class Task:
             "preemptable":                  self.preemptable,
             "wip_commit_hash":              self.wip_commit_hash,
             "merge_resolution_decisions":   self.merge_resolution_decisions,
+            "pending_tool_calls":           self.pending_tool_calls,
             "reviews_task_id":              self.reviews_task_id,
             "last_review_summary":          self.last_review_summary,
             "context_messages":             self.context_messages,
@@ -320,6 +324,7 @@ class Task:
             preemptable=data.get("preemptable", True),
             wip_commit_hash=data.get("wip_commit_hash") or "",
             merge_resolution_decisions=data.get("merge_resolution_decisions", []),
+            pending_tool_calls=data.get("pending_tool_calls", []),
             reviews_task_id=data.get("reviews_task_id"),
             last_review_summary=data.get("last_review_summary"),
             context_messages=data.get("context_messages", []),

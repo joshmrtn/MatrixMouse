@@ -133,12 +133,14 @@ def make_orchestrator(tmp_path: Path, **config_kwargs) -> Orchestrator:
 
 def make_loop_result(
     exit_reason=LoopExitReason.COMPLETE,
+    decision_type="",
     turns=5,
     summary="done",
     messages=None,
 ) -> LoopResult:
     return LoopResult(
         exit_reason=exit_reason,
+        decision_type=decision_type,
         messages=messages or [{"role": "user", "content": "go"}],
         turns_taken=turns,
         completion_summary=summary,
@@ -205,10 +207,11 @@ class TestHandleTurnLimit:
         task = make_task()
         orch.queue.add(task)
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED, turns=50
+            exit_reason=LoopExitReason.DECISION, turns=50,
+            decision_type="turn_limit_reached"
         )
         with patch("matrixmouse.comms.get_manager", return_value=None):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
         updated_task = orch.queue.get(task.id)
         assert updated_task is not None
         assert updated_task.status == TaskStatus.BLOCKED_BY_HUMAN
@@ -218,11 +221,12 @@ class TestHandleTurnLimit:
         task = make_task()
         orch.queue.add(task)
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED, turns=50
+            exit_reason=LoopExitReason.DECISION, turns=50,
+            decision_type="turn_limit_reached"
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
         emitted_types = [c.args[0] for c in mock_comms.emit.call_args_list]
         assert "turn_limit_reached" in emitted_types
 
@@ -231,11 +235,12 @@ class TestHandleTurnLimit:
         task = make_task(title="My stuck task")
         orch.queue.add(task)
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED, turns=50
+            exit_reason=LoopExitReason.DECISION, turns=50,
+            decision_type="turn_limit_reached"
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
         mock_comms.notify_blocked.assert_called_once()
         call_args = mock_comms.notify_blocked.call_args[0][0]
         assert "My stuck task" in call_args or task.id in call_args
@@ -245,11 +250,12 @@ class TestHandleTurnLimit:
         task = make_task(role=AgentRole.CODER)
         orch.queue.add(task)
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED, turns=42
+            exit_reason=LoopExitReason.DECISION, turns=42,
+            decision_type="turn_limit_reached"
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
         emit_data = {
             c.args[1]["task_id"]: c.args[1]
             for c in mock_comms.emit.call_args_list
@@ -846,12 +852,13 @@ class TestSessionModeWiring:
         )
 
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             turns=10,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
 
         # Pending task committed
         t = orch.queue.get(subtask.id)
@@ -1058,7 +1065,7 @@ class TestWipCommitWiring:
 
         assert result.exit_reason == LoopExitReason.COMPLETE
         # WIP commit fires after turn 1 (normal tool), not after turn 2 (exit)
-        assert len(wip_calls) == 1
+        assert len(wip_calls) >= 1 # We now WIP commit after every dispatch & loop
         
 
 class TestMergeUp:
@@ -1546,7 +1553,8 @@ class TestMergeTurnLimit:
         repo_dir.mkdir()
 
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             turns=5,
         )
         mock_comms = MagicMock()
@@ -1557,7 +1565,7 @@ class TestMergeTurnLimit:
                           return_value="mm/dev"), \
              patch("matrixmouse.orchestrator._git",
                    return_value=(True, "")):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
 
         emitted = [c.args[0] for c in mock_comms.emit.call_args_list]
         assert "merge_conflict_resolution_turn_limit_reached" in emitted
@@ -1576,7 +1584,8 @@ class TestMergeTurnLimit:
         repo_dir.mkdir()
 
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             turns=5,
         )
         git_calls = []
@@ -1588,7 +1597,7 @@ class TestMergeTurnLimit:
         with patch("matrixmouse.comms.get_manager", return_value=MagicMock()), \
              patch.object(orch, "_get_merge_target", return_value="mm/dev"), \
              patch("matrixmouse.tools.git_tools._git", side_effect=mock_git):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
 
         abort_calls = [c for c in git_calls if "merge" in c and "--abort" in c]
         assert len(abort_calls) == 1
@@ -1603,7 +1612,8 @@ class TestMergeTurnLimit:
 
         (tmp_path / "repo").mkdir()
         result = make_loop_result(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             turns=5,
         )
 
@@ -1611,7 +1621,7 @@ class TestMergeTurnLimit:
                    return_value=MagicMock()), \
              patch.object(orch, "_get_merge_target", return_value=None), \
              patch("matrixmouse.orchestrator._git", return_value=(True, "")):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
 
         t = orch.queue.get(task.id)
         assert t is not None

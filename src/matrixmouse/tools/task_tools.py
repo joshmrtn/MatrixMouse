@@ -50,6 +50,27 @@ from matrixmouse.tools.git_tools import (
 
 logger = logging.getLogger(__name__)
 
+class DecisionRequiredException(Exception):
+    """
+    Raised by a tool when a human decision is required before the tool
+    can execute.
+
+    The AgentLoop catches this in _dispatch_tools and exits with
+    LoopExitReason.DECISION. The tool call is NOT executed — it remains
+    at the front of task.pending_tool_calls for replay after the human
+    decision is resolved.
+
+    Args:
+        decision_type: Maps to the event name emitted by the orchestrator,
+            e.g. "decomposition_confirmation_required".
+        payload: Arbitrary dict passed through to the orchestrator so it
+            can emit the correct event with the right data.
+    """
+    def __init__(self, decision_type: str, payload: dict):
+        self.decision_type = decision_type
+        self.payload = payload
+        super().__init__(decision_type)
+
 
 # ---------------------------------------------------------------------------
 # Module-level state — set by configure()
@@ -454,25 +475,23 @@ def split_task(
     # have been granted on this branch, each granting depth_limit additional levels.
     allowed_depth = depth_limit + (parent.decomposition_confirmed_depth * depth_limit)
     if parent.depth >= allowed_depth:
-        import uuid
-        confirmation_id = uuid.uuid4().hex[:16]
         logger.info(
-            "Depth limit reached for task [%s] at depth %d. "
-            "Emitting decomposition_confirmation_required (confirmation_id=%s).",
-            task_id, parent.depth, confirmation_id,
+            "Depth limit reached for task [%s] at depth %d — "
+            "raising DecisionRequiredException.",
+            task_id, parent.depth,
         )
-        _emit_decomposition_confirmation(
-            task_id=task_id,
-            depth=parent.depth,
-            proposed_subtasks=subtasks,
-            confirmation_id=confirmation_id,
-        )
-        return (
-            f"PENDING_CONFIRMATION:{confirmation_id}\n"
-            f"Task '{task_id}' is at decomposition depth {parent.depth}, "
-            f"which requires human confirmation before splitting further.\n"
-            f"A confirmation request has been sent. Resume after the operator "
-            f"confirms or denies the split."
+        raise DecisionRequiredException(
+            decision_type="decomposition_confirmation_required",
+            payload={
+                "task_id":           task_id,
+                "task_title":        parent.title,
+                "current_depth":     parent.depth,
+                "allowed_depth":     allowed_depth,
+                "proposed_subtasks": [
+                    {"title": s.get("title", ""), "role": s.get("role", "")}
+                    for s in subtasks
+                ],
+            },
         )
 
     # --- Validate all subtasks before creating any ---
@@ -1005,43 +1024,6 @@ def deny(feedback: str) -> str:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _emit_decomposition_confirmation(
-    task_id: str,
-    depth: int,
-    proposed_subtasks: list[dict],
-    confirmation_id: str,
-) -> None:
-    """
-    Emit a decomposition_confirmation_required WebSocket event.
-
-    Called by split_task when depth limit is reached. The UI renders
-    a confirmation modal for the human operator. The agent receives a
-    PENDING_CONFIRMATION sentinel and waits for the operator response
-    to be injected into its context.
-
-    Args:
-        task_id (str): ID of the task being split.
-        depth (int): Current depth of the task in the decomposition tree.
-        proposed_subtasks (list[dict]): The subtask specs the Manager
-            proposed, shown in the confirmation modal.
-        confirmation_id (str): Unique ID for this confirmation request,
-            used to match the response back to the pending split.
-    """
-    try:
-        from matrixmouse.comms import get_manager
-        m = get_manager()
-        if m:
-            m.emit("decomposition_confirmation_required", {
-                "task_id":           task_id,
-                "depth":             depth,
-                "proposed_subtasks": proposed_subtasks,
-                "confirmation_id":   confirmation_id,
-            })
-    except Exception as e:
-        logger.warning(
-            "Failed to emit decomposition_confirmation_required: %s", e
-        )
 
 def _enter_planning_mode_if_needed() -> None:
     """

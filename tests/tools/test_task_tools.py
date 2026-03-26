@@ -678,10 +678,12 @@ class TestSplitTask:
     def test_depth_limit_triggers_pending_confirmation(self, tmp_path):
         parent_task = make_task(title="parent", depth=3)
         q, parent = self._setup_with_cwd(tmp_path, parent_task)
+        from matrixmouse.tools.task_tools import DecisionRequiredException
         with self._mock_add_subtasks(q, []):
-            with patch.object(task_tools, "_emit_decomposition_confirmation"):
-                result = task_tools.split_task(parent.id, self._subtasks())
-        assert "PENDING_CONFIRMATION" in result
+            with pytest.raises(DecisionRequiredException) as exc_info:
+                task_tools.split_task(parent.id, self._subtasks())
+        assert exc_info.value.decision_type == "decomposition_confirmation_required"
+        assert exc_info.value.payload["task_id"] == parent.id
 
     def test_depth_limit_respects_confirmed_depth(self, tmp_path):
         # depth=3, confirmed_depth=1 means allowed_depth = 3 + 3 = 6

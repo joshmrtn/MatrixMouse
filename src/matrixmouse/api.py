@@ -212,11 +212,6 @@ class TurnLimitResponseRequest(BaseModel):
     note: str = ""       # required for respec, optional for extend/cancel
     extend_by: int = 0   # only used when action="extend", 0 means use config default
 
-class DecompositionConfirmRequest(BaseModel):
-    confirmation_id: str
-    confirmed: bool
-    reason: str = ""     # required when confirmed=False
-
 class WorkspaceInterjectionRequest(BaseModel):
     message: str
 
@@ -237,6 +232,7 @@ class DecisionRequest(BaseModel):
     decision_type: str   # maps to the emitted event name, e.g. "pr_approval_required"
     choice: str          # one of the offered choice values, e.g. "approve"
     note: str = ""       # optional free-form human text
+    metadata: dict = {}  # decision-type-specific structured data
  
 # ---------------------------------------------------------------------------
 # Health
@@ -586,18 +582,6 @@ async def interject(body: InterjectionRequest):
     logger.info("Interjection received via API (%s): %s", scope, msg[:80])
     return {"ok": True}
 
-
-@app.post("/tasks/{task_id}/turn-limit-response")
-async def turn_limit_response(task_id: str, body: TurnLimitResponseRequest):
-    """
-    Respond to a turn limit notification for a blocked task.
- 
-    Deprecated: use POST /tasks/{task_id}/decision with
-    decision_type="turn_limit_reached" instead.
-    TODO Kept for backwards compatibility - removed in the UI rewrite branch.
-    """
-    return await _handle_turn_limit_response(task_id, body.action, body.note, body.extend_by)
- 
  
 async def _handle_turn_limit_response(
     task_id: str,
@@ -685,71 +669,6 @@ async def _handle_turn_limit_response(
             detail=f"Invalid action '{action}'. Valid: extend, respec, cancel."
         )
  
-
-@app.post("/tasks/{task_id}/decomposition-confirm")
-async def decomposition_confirm(task_id: str, body: DecompositionConfirmRequest):
-    """
-    Respond to a decomposition depth limit confirmation request.
-
-    Called by the UI confirmation modal when the Manager tries to split
-    a task that has reached decomposition_depth_limit.
-
-    If confirmed=True, grants one additional depth confirmation on the
-    task's branch (decomposition_confirmed_depth += 1) and injects an
-    approval message into the Manager's context so it can proceed.
-
-    If confirmed=False, injects a denial message so the Manager knows
-    not to split further on this branch.
-
-    The confirmation_id must match the one emitted in the
-    decomposition_confirmation_required event.
-    """
-    queue = _require_queue()
-    task = queue.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
-
-    if body.confirmed:
-        task.decomposition_confirmed_depth += 1
-        queue.update(task)
-
-        # Find the active Manager task and inject the confirmation
-        _inject_decomposition_response(
-            queue=queue,
-            confirmation_id=body.confirmation_id,
-            approved=True,
-            reason=body.reason,
-        )
-        logger.info(
-            "Decomposition confirmed for task [%s] "
-            "(confirmed_depth now %d).",
-            task_id, task.decomposition_confirmed_depth,
-        )
-        return {
-            "ok": True,
-            "confirmed": True,
-            "decomposition_confirmed_depth": task.decomposition_confirmed_depth,
-        }
-    else:
-        if not body.reason.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="reason is required when confirmed=False."
-            )
-        _inject_decomposition_response(
-            queue=queue,
-            confirmation_id=body.confirmation_id,
-            approved=False,
-            reason=body.reason,
-        )
-        logger.info(
-            "Decomposition denied for task [%s]. Reason: %s",
-            task_id, body.reason,
-        )
-        return {
-            "ok": True,
-            "confirmed": False,
-        }
 
 # ---------------------------------------------------------------------------
 # Interjection routing
@@ -948,18 +867,6 @@ async def answer_task(task_id: str, body: TaskAnswerRequest):
         "unblocked": was_blocked,
     }
 
-
-@app.post("/tasks/{task_id}/critic-review-response")
-async def critic_review_response(task_id: str, body: CriticReviewResponseRequest):
-    """
-    Respond to a Critic turn-limit escalation.
- 
-    Deprecated: use POST /tasks/{task_id}/decision with
-    decision_type="critic_turn_limit_reached" instead.
-    TODO: Kept for backwards compatibility - removed in the UI rewrite branch.
-    """
-    return await _handle_critic_review_response(task_id, body.action, body.feedback)
- 
  
 @app.post("/tasks/{task_id}/decision")
 async def task_decision(task_id: str, body: DecisionRequest):
@@ -1229,7 +1136,8 @@ async def task_decision(task_id: str, body: DecisionRequest):
     # Generic turn limit
     # ------------------------------------------------------------------
     elif dt == "turn_limit_reached":
-        return await _handle_turn_limit_response(task_id, choice, note)
+        extend_by = int(body.metadata.get("extend_by", 0))
+        return await _handle_turn_limit_response(task_id, choice, note, extend_by)
  
     # ------------------------------------------------------------------
     # Merge conflict turn limit
@@ -1327,7 +1235,82 @@ async def task_decision(task_id: str, body: DecisionRequest):
                 detail=f"Invalid choice '{choice}' for planning_turn_limit_reached. "
                        f"Valid: extend, commit, cancel.",
             )
- 
+        
+    # ------------------------------------------------------------------
+    # Decomposition confirmation
+    # ------------------------------------------------------------------
+    elif dt == "decomposition_confirmation_required":
+        if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN.",
+            )
+
+        if choice == "allow":
+            # Increment confirmed depth so the replayed split_task call
+            # passes the depth check on resume.
+            task.decomposition_confirmed_depth += 1
+            if note:
+                task.context_messages.append({
+                    "role": "user",
+                    "content": f"[Operator note on decomposition approval]: {note}",
+                })
+            # Return to READY — pending_tool_calls replay handles the rest.
+            task.status = TaskStatus.READY
+            queue.update(task)
+            notify_task_available()
+            logger.info(
+                "Decomposition approved for task [%s] "
+                "(confirmed_depth now %d).",
+                task_id, task.decomposition_confirmed_depth,
+            )
+            return {
+                "ok": True,
+                "action": "allow",
+                "decomposition_confirmed_depth": task.decomposition_confirmed_depth,
+                "task_id": task_id,
+            }
+
+        elif choice == "deny":
+            if not note:
+                raise HTTPException(
+                    status_code=400,
+                    detail="note is required when denying decomposition — "
+                           "provide a reason for the Manager.",
+                )
+            # Clear pending_tool_calls so the split_task replay doesn't run.
+            # Inject a denial message so the agent knows to work within
+            # the current depth.
+            task.pending_tool_calls = []
+            task.context_messages.append({
+                "role": "user",
+                "content": (
+                    "[Decomposition denied by operator]\n"
+                    "You may not decompose this task further. "
+                    "Complete the work within the current task depth, "
+                    "adjusting scope or descriptions as needed."
+                    + (f"\nOperator note: {note}" if note else "")
+                ),
+            })
+            task.status = TaskStatus.READY
+            queue.update(task)
+            notify_task_available()
+            logger.info(
+                "Decomposition denied for task [%s].", task_id
+            )
+            return {
+                "ok": True,
+                "action": "deny",
+                "task_id": task_id,
+            }
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid choice '{choice}' for "
+                       f"decomposition_confirmation_required. Valid: allow, deny.",
+            )
+        
     # ------------------------------------------------------------------
     # Unknown decision type
     # ------------------------------------------------------------------

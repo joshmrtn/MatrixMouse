@@ -1120,9 +1120,9 @@ class Orchestrator:
             )
             return
 
-        # --- Turn limit ---
-        if result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED:
-            self._handle_turn_limit(task, result)
+        # --- Decision required ---
+        if result.exit_reason == LoopExitReason.DECISION:
+            self._handle_decision(task, result)
             return
 
         # --- Error ---
@@ -1287,6 +1287,16 @@ class Orchestrator:
         )
         comms_manager = get_manager()
 
+        def _persist_pending_calls(calls: list[dict]) -> None:
+            task.pending_tool_calls = list(calls)
+            try:
+                self.queue.update(task)
+            except Exception as e:
+                logger.warning(
+                    "Failed to persist pending_tool_calls for task [%s]: %s",
+                    task.id, e,
+                )
+
         loop = AgentLoop(
             model=self._router.model_for_role(task.role),
             messages=messages,
@@ -1299,6 +1309,7 @@ class Orchestrator:
             comms=scoped_comms,
             emit=comms_manager.emit if comms_manager else lambda t, d: None,
             persist=_persist_messages,
+            persist_pending=_persist_pending_calls,
             wip_commit=wip_commit_fn,
             should_yield=_should_yield_now,
             stream=self._router.stream_for_role(task.role),
@@ -1306,6 +1317,25 @@ class Orchestrator:
             current_repo=current_repo,
             task_turn_limit=task.turn_limit,
         )
+
+        # If the task has pending tool calls from an interrupted turn
+        # (resumed after a DECISION), replay them before starting the loop.
+        # The loop's first action will be to dispatch the pending calls
+        # rather than making a new inference call.
+        if task.pending_tool_calls:
+            logger.info(
+                "Task [%s] resuming with %d pending tool call(s) — replaying.",
+                task.id, len(task.pending_tool_calls),
+            )
+            replay_result = loop._dispatch_tools(
+                tool_calls=[],
+                pending_tool_calls=list(task.pending_tool_calls),
+            )
+            if replay_result is not None:
+                # Replay itself hit another exit condition
+                self._update_status(turns=replay_result.turns_taken)
+                return RunResult(loop_result=replay_result, detector=detector)
+            # Replay completed cleanly — proceed with normal loop
 
         result = loop.run()
         self._update_status(turns=result.turns_taken)
@@ -2046,28 +2076,61 @@ class Orchestrator:
             logger.warning("Failed to emit critic_review_created event: %s", e)
 
     # -----------------------------------------------------------------------
-    # Turn limit handling
+    # Decision handling
     # -----------------------------------------------------------------------
 
-    def _handle_turn_limit(self, task: Task, result: LoopResult) -> None:
+    def _handle_decision(self, task: Task, result: LoopResult) -> None:
         """
-        Handle a task that has reached its turn limit.
+        Handle a DECISION exit from the agent loop.
 
-        For Critic tasks, emits a Critic-specific event with the three-option
-        modal data (approve task / give Critic more turns / block task).
+        Dispatches to the appropriate handler based on result.decision_type.
+        All decision types result in the task being BLOCKED_BY_HUMAN until
+        the human responds via POST /tasks/{task_id}/decision.
 
-        For all other roles, emits the standard turn_limit_reached event
-        with extend/respec/cancel options.
+        Args:
+            task:   The task that needs a decision.
+            result: LoopResult with decision_type and decision_payload.
+        """
+        dt = result.decision_type
+
+        if dt == "turn_limit_reached":
+            self._handle_turn_limit_decision(task, result)
+        elif dt == "decomposition_confirmation_required":
+            self._handle_decomposition_decision(task, result)
+        else:
+            # Unknown decision type — block for human with context
+            logger.warning(
+                "Unknown decision_type '%s' for task [%s] — blocking for human.",
+                dt, task.id,
+            )
+            self._request_human_intervention(
+                task, result,
+                reason=f"Unknown decision required: {dt}",
+            )
+
+    def _handle_turn_limit_decision(
+        self, task: Task, result: LoopResult
+    ) -> None:
+        """
+        Handle a turn_limit_reached decision.
+
+        Blocks the task and emits the appropriate modal event based on
+        the task's role. Mirrors the previous _handle_turn_limit logic
+        exactly — only the entry point has changed.
         """
         self.queue.mark_blocked_by_human(
             task.id,
-            reason=f"Turn limit reached ({result.turns_taken} turns).",
+            reason=(
+                f"Turn limit reached "
+                f"({result.decision_payload.get('turns_taken', '?')} turns)."
+            ),
         )
         self._update_status(blocked=True)
 
+        turns_taken = result.decision_payload.get("turns_taken", result.turns_taken)
         logger.warning(
             "Turn limit reached — Task [%s] %s | %d turns | Role: %s",
-            task.id, task.title, result.turns_taken, task.role.value,
+            task.id, task.title, turns_taken, task.role.value,
         )
 
         try:
@@ -2076,10 +2139,9 @@ class Orchestrator:
             if m:
                 m.notify_blocked(
                     f"Task [{task.id}] hit turn limit "
-                    f"({result.turns_taken} turns): {task.title}"
+                    f"({turns_taken} turns): {task.title}"
                 )
 
-                # --- PLANNING session turn limit ---
                 session_ctx = self._ws_state_repo.get_session_context(task.id)
                 if (session_ctx
                         and session_ctx.mode == SessionMode.PLANNING
@@ -2100,7 +2162,7 @@ class Orchestrator:
                     m.emit("planning_turn_limit_reached", {
                         "task_id":     task.id,
                         "task_title":  task.title,
-                        "turns_taken": result.turns_taken,
+                        "turns_taken": turns_taken,
                         "choices": [
                             {
                                 "value": "extend",
@@ -2129,11 +2191,10 @@ class Orchestrator:
                             },
                         ],
                     })
-                    return  # don't emit the generic turn_limit_reached event
-                # --- Merge turn limit ---
+                    return
+
                 if task.role == AgentRole.MERGE:
                     parent_branch = self._get_merge_target(task)
-                    # Abort the in-progress merge
                     if task.repo:
                         repo_root = self.paths.workspace_root / task.repo[0]
                         if repo_root.exists():
@@ -2144,7 +2205,7 @@ class Orchestrator:
                     m.emit("merge_conflict_resolution_turn_limit_reached", {
                         "task_id":         task.id,
                         "task_title":      task.title,
-                        "turns_taken":     result.turns_taken,
+                        "turns_taken":     turns_taken,
                         "parent_branch":   parent_branch or "",
                         "resolved_so_far": task.merge_resolution_decisions,
                         "choices": [
@@ -2169,18 +2230,14 @@ class Orchestrator:
                         ],
                     })
                     return
-                # --- Critic turn limit ---
+
                 if task.role == AgentRole.CRITIC:
-                    # Critic-specific modal: three options
-                    # 1. Approve the reviewed task (skip further Critic review)
-                    # 2. Give the Critic more turns
-                    # 3. Block the reviewed task for human resolution
                     reviewed_task_id = task.reviews_task_id or ""
                     m.emit("critic_turn_limit_reached", {
-                        "critic_task_id":   task.id,
-                        "critic_task_title": task.title,
+                        "task_id":          task.id,
+                        "task_title":       task.title,
                         "reviewed_task_id": reviewed_task_id,
-                        "turns_taken":      result.turns_taken,
+                        "turns_taken":      turns_taken,
                         "critic_max_turns": self.config.critic_max_turns,
                         "choices": [
                             {
@@ -2210,17 +2267,90 @@ class Orchestrator:
                             },
                         ],
                     })
-                else:
-                    m.emit("turn_limit_reached", {
-                        "task_id":     task.id,
-                        "task_title":  task.title,
-                        "role":        task.role.value,
-                        "turns_taken": result.turns_taken,
-                        "turn_limit":  task.turn_limit or self.config.agent_max_turns,
-                    })
-                
+                    return
+
+                m.emit("turn_limit_reached", {
+                    "task_id":     task.id,
+                    "task_title":  task.title,
+                    "role":        task.role.value,
+                    "turns_taken": turns_taken,
+                    "turn_limit":  task.turn_limit or self.config.agent_max_turns,
+                })
+
         except Exception as e:
             logger.warning("Failed to send turn limit notification: %s", e)
+
+    def _handle_decomposition_decision(
+        self, task: Task, result: LoopResult
+    ) -> None:
+        """
+        Handle a decomposition_confirmation_required decision.
+
+        Blocks the task and emits the event so the human can approve or
+        deny further decomposition. On approval, the orchestrator increments
+        decomposition_confirmed_depth and unblocks the task — the pending
+        split_task call replays automatically from pending_tool_calls.
+
+        Args:
+            task:   The Manager task that hit the depth limit.
+            result: LoopResult carrying the decision_payload from split_task.
+        """
+        payload = result.decision_payload
+
+        self.queue.mark_blocked_by_human(
+            task.id,
+            reason=(
+                f"Decomposition depth limit reached at depth "
+                f"{payload.get('current_depth', '?')}. "
+                f"Human confirmation required."
+            ),
+        )
+        self._update_status(blocked=True)
+
+        logger.info(
+            "Decomposition depth limit — Task [%s] blocked at depth %d.",
+            task.id, payload.get("current_depth", 0),
+        )
+
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.notify_blocked(
+                    f"Task [{task.id}] needs decomposition approval: {task.title}"
+                )
+                depth_limit = getattr(self.config, "decomposition_depth_limit", 3)
+                m.emit("decomposition_confirmation_required", {
+                    "task_id":           task.id,
+                    "task_title":        task.title,
+                    "current_depth":     payload.get("current_depth", 0),
+                    "allowed_depth":     payload.get("allowed_depth", depth_limit),
+                    "proposed_subtasks": payload.get("proposed_subtasks", []),
+                    "choices": [
+                        {
+                            "value": "allow",
+                            "label": "Allow further decomposition",
+                            "description": (
+                                f"Grant another {depth_limit} levels of "
+                                f"decomposition depth for this task."
+                            ),
+                        },
+                        {
+                            "value": "deny",
+                            "label": "Do not decompose further",
+                            "description": (
+                                "The Manager must complete the task within "
+                                "the current depth. The pending split will "
+                                "be cancelled."
+                            ),
+                        },
+                    ],
+                })
+        except Exception as e:
+            logger.warning(
+                "Failed to emit decomposition_confirmation_required: %s", e
+            )
+
 
     # -----------------------------------------------------------------------
     # Time slice and preemption

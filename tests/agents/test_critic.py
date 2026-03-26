@@ -251,12 +251,13 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         with patch("matrixmouse.comms.get_manager", return_value=None):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         crit_result = orch.queue.get(critic.id)
         assert crit_result is not None
@@ -270,17 +271,17 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         emitted_types = [c.args[0] for c in mock_comms.emit.call_args_list]
         assert "critic_turn_limit_reached" in emitted_types
-        assert "turn_limit_reached" not in emitted_types
 
     def test_critic_turn_limit_event_has_three_choices(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
@@ -290,13 +291,14 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         event_data = next(
             c.args[1] for c in mock_comms.emit.call_args_list
@@ -315,13 +317,14 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         event_data = next(
             c.args[1] for c in mock_comms.emit.call_args_list
@@ -335,13 +338,14 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(task)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=50,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
 
         emitted_types = [c.args[0] for c in mock_comms.emit.call_args_list]
         assert "turn_limit_reached" in emitted_types

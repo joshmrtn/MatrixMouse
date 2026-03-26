@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     context_messages                TEXT NOT NULL DEFAULT '[]',
     wip_commit_hash                 TEXT NOT NULL DEFAULT '',
     merge_resolution_decisions      TEXT NOT NULL DEFAULT '[]',
+    pending_tool_calls              TEXT NOT NULL DEFAULT '[]',
     branch                          TEXT NOT NULL DEFAULT '',
     decomposition_confirmed_depth   INTEGER NOT NULL DEFAULT 0,
     turn_limit                      INTEGER NOT NULL DEFAULT 0,
