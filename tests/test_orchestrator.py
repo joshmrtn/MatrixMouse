@@ -1147,7 +1147,7 @@ class TestMergeUp:
             for m in updated.context_messages
         )
 
-    def test_protected_branch_emits_pr_required(self, tmp_path):
+    def test_protected_branch_emits_pr_approval_required(self, tmp_path):
         orch = make_orchestrator(tmp_path)
         reviewed = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
                              repo=["repo"])
@@ -1170,7 +1170,7 @@ class TestMergeUp:
             orch._handle_critic_complete(critic, result)
 
         emitted = [c.args[0] for c in mock_comms.emit.call_args_list]
-        assert "pr_required" in emitted
+        assert "pr_approval_required" in emitted
         t = orch.queue.get(reviewed.id)
         assert t is not None
         assert t.status == TaskStatus.BLOCKED_BY_HUMAN

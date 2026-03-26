@@ -53,6 +53,7 @@ from matrixmouse.tools import tools_for_names
 from matrixmouse.tools.git_tools import ensure_branch_from_mirror, MIRROR_REMOTE, _git
 from matrixmouse.tools._safety import reconfigure_for_task
 from matrixmouse.repository import SQLiteTaskRepository, SQLiteWorkspaceStateRepository
+from matrixmouse.task import PRState
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +336,41 @@ def _build_review_task(
 
 
 # ---------------------------------------------------------------------------
+# Git remote provider helpers
+# ---------------------------------------------------------------------------
+ 
+ 
+def _parse_owner_repo(remote_url: str) -> str:
+    """
+    Extract the "owner/repo" identifier from a git remote URL.
+ 
+    Handles HTTPS and SSH remote formats:
+        https://github.com/owner/repo.git  ->  owner/repo
+        git@github.com:owner/repo.git      ->  owner/repo
+ 
+    Args:
+        remote_url: The remote URL string from repo_metadata.
+ 
+    Returns:
+        "owner/repo" string, or "" if the URL cannot be parsed.
+    """
+    if not remote_url:
+        return ""
+    url = remote_url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    # SSH format: git@github.com:owner/repo
+    if "@" in url and ":" in url:
+        path_part = url.split(":", 1)[-1]
+        return path_part
+    # HTTPS format: https://github.com/owner/repo
+    parts = url.split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return ""
+ 
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -456,6 +492,9 @@ class Orchestrator:
         while True:
             # --- Daily review injection ---
             self._maybe_inject_manager_review()
+ 
+            # --- PR polling ---
+            self._poll_pr_tasks()
 
             decision = self._scheduler.next(self.queue)
 
@@ -569,6 +608,281 @@ class Orchestrator:
         self._ws_state_repo.set_last_review_at()
         self._ws_state_repo.set_last_review_summary(summary)
         logger.info("Manager review complete. last_manager_review_at updated.")
+
+    
+    # -----------------------------------------------------------------------
+    # PR polling
+    # -----------------------------------------------------------------------
+ 
+    def _poll_pr_tasks(self) -> None:
+        """
+        Poll open PRs and transition tasks based on current PR state.
+ 
+        Called at the top of each scheduling cycle. Iterates all tasks with
+        pr_state == PRState.OPEN and pr_poll_next_at <= now, calls the
+        provider for the current state, and routes to the appropriate handler.
+ 
+        Errors from the provider are logged and do not crash the loop —
+        the task stays OPEN and will be retried at the next poll interval.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+ 
+        for task in self.queue.active_tasks():
+            if task.pr_state != PRState.OPEN:
+                continue
+            if task.pr_poll_next_at and task.pr_poll_next_at > now:
+                continue
+            if not task.pr_url:
+                continue
+ 
+            repo_name = task.repo[0] if task.repo else ""
+            provider = self._get_provider(repo_name)
+            if provider is None:
+                continue
+ 
+            try:
+                metadata = self._ws_state_repo.get_repo_metadata(repo_name)
+                owner_repo = _parse_owner_repo(
+                    metadata.get("remote_url", "") if metadata else ""
+                )
+                if not owner_repo:
+                    continue
+ 
+                state_str = provider.get_pr_state(owner_repo, task.pr_url)
+                new_state = PRState(state_str) if state_str else PRState.OPEN
+ 
+                if new_state == PRState.MERGED:
+                    self._handle_pr_merged(task)
+                elif new_state == PRState.CLOSED:
+                    self._handle_pr_closed(task, provider, owner_repo)
+                else:
+                    # Still open — schedule next poll
+                    from datetime import timedelta
+                    next_poll = (
+                        datetime.now(timezone.utc)
+                        + timedelta(minutes=self.config.pr_poll_interval_minutes)
+                    ).isoformat()
+                    task.pr_poll_next_at = next_poll
+                    try:
+                        self.queue.update(task)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to update pr_poll_next_at for task [%s]: %s",
+                            task.id, e,
+                        )
+ 
+            except Exception as e:
+                logger.warning(
+                    "PR poll failed for task [%s] (%s): %s — will retry next cycle.",
+                    task.id, task.pr_url, e,
+                )
+ 
+    def _handle_pr_merged(self, task) -> None:
+        """
+        Handle a PR that has been merged on the remote.
+ 
+        Updates pr_state to MERGED, clears the poll timestamp, and marks
+        the task COMPLETE.
+ 
+        Args:
+            task: The task whose PR was merged.
+        """
+        logger.info("PR merged for task [%s] — marking COMPLETE.", task.id)
+        task.pr_state = PRState.MERGED
+        task.pr_poll_next_at = ""
+        try:
+            self.queue.update(task)
+        except Exception as e:
+            logger.warning(
+                "Failed to update PR state for task [%s]: %s", task.id, e,
+            )
+ 
+        self.queue.mark_complete(task.id)
+        self._notify_task_complete(task)
+ 
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.emit("pr_merged", {
+                    "task_id":    task.id,
+                    "task_title": task.title,
+                    "pr_url":     task.pr_url,
+                })
+        except Exception as e:
+            logger.warning("Failed to emit pr_merged: %s", e)
+ 
+    def _handle_pr_closed(self, task, provider, owner_repo: str) -> None:
+        """
+        Handle a PR that was closed without merging (changes requested).
+ 
+        Fetches review feedback from the provider, injects it into the task's
+        context_messages, updates pr_state to CLOSED, and emits a
+        pr_rejection decision modal so the human can choose whether to let
+        the agent rework the task or keep it blocked for manual resolution.
+ 
+        Args:
+            task:       The task whose PR was closed.
+            provider:   GitRemoteProvider for the repo.
+            owner_repo: "owner/repo" string for API calls.
+        """
+        logger.info(
+            "PR closed without merge for task [%s] — fetching feedback.",
+            task.id,
+        )
+ 
+        feedback = ""
+        try:
+            feedback = provider.get_pr_feedback(owner_repo, task.pr_url)
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch PR feedback for task [%s]: %s", task.id, e,
+            )
+ 
+        task.pr_state = PRState.CLOSED
+        task.pr_poll_next_at = ""
+ 
+        if feedback:
+            task.context_messages.append({
+                "role": "user",
+                "content": (
+                    "[Pull Request Closed — Changes Requested]\n\n"
+                    "Your pull request was closed without merging. "
+                    "The following feedback was left by reviewers:\n\n"
+                    f"{feedback}\n\n"
+                    "Address the feedback above and call declare_complete "
+                    "when the changes are ready for another review."
+                ),
+            })
+ 
+        try:
+            self.queue.update(task)
+        except Exception as e:
+            logger.warning(
+                "Failed to update task [%s] after PR closed: %s", task.id, e,
+            )
+ 
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.emit("pr_rejection", {
+                    "task_id":      task.id,
+                    "task_title":   task.title,
+                    "pr_url":       task.pr_url,
+                    "has_feedback": bool(feedback),
+                    "choices": [
+                        {
+                            "value": "rework",
+                            "label": "Let agent rework",
+                            "description": (
+                                "Unblock the task with the PR feedback injected "
+                                "into context. The agent will address the review "
+                                "comments and request a new PR when ready."
+                            ),
+                        },
+                        {
+                            "value": "manual",
+                            "label": "Resolve manually",
+                            "description": (
+                                "Keep the task blocked. No agent action will be "
+                                "taken. Resolve and re-submit the PR manually."
+                            ),
+                        },
+                    ],
+                })
+        except Exception as e:
+            logger.warning("Failed to emit pr_rejection: %s", e)
+ 
+    def _push_branch_and_create_pr(
+        self, task, parent_branch: str, repo_root
+    ) -> tuple[bool, str]:
+        """
+        Push task.branch to origin and open a PR via the provider.
+ 
+        Called when the human approves a PR via the decision endpoint.
+        Pushes the branch, creates the PR, and stores the resulting
+        URL + state on the task.
+ 
+        Args:
+            task:          The task whose branch is being pushed.
+            parent_branch: The protected base branch for the PR.
+            repo_root:     Repository root Path.
+ 
+        Returns:
+            (True, pr_url) on success, (False, error_message) on failure.
+        """
+        from matrixmouse.tools.git_tools import push_to_remote
+ 
+        repo_name = task.repo[0] if task.repo else ""
+        provider = self._get_provider(repo_name)
+        if provider is None:
+            return False, "No provider configured for this repo."
+ 
+        try:
+            metadata = self._ws_state_repo.get_repo_metadata(repo_name)
+            owner_repo = _parse_owner_repo(
+                metadata.get("remote_url", "") if metadata else ""
+            )
+            if not owner_repo:
+                return False, (
+                    f"Cannot parse owner/repo from remote_url for '{repo_name}'."
+                )
+        except Exception as e:
+            return False, f"Failed to read repo metadata: {e}"
+ 
+        # Push branch to origin (the real remote, not just the local mirror)
+        ok, err = push_to_remote(task.branch, "origin", repo_root)
+        if not ok:
+            return False, f"git push failed: {err}"
+ 
+        try:
+            pr_url = provider.create_pull_request(
+                repo=owner_repo,
+                head=task.branch,
+                base=parent_branch,
+                title=task.title,
+                body=task.description[:2000] if task.description else "",
+            )
+        except Exception as e:
+            return False, f"PR creation failed: {e}"
+ 
+        # Persist PR tracking state on the task
+        from datetime import datetime, timedelta, timezone
+        next_poll = (
+            datetime.now(timezone.utc)
+            + timedelta(minutes=self.config.pr_poll_interval_minutes)
+        ).isoformat()
+ 
+        task.pr_url = pr_url
+        task.pr_state = PRState.OPEN
+        task.pr_poll_next_at = next_poll
+ 
+        try:
+            self.queue.update(task)
+        except Exception as e:
+            logger.warning(
+                "Failed to persist PR state for task [%s]: %s", task.id, e,
+            )
+ 
+        logger.info("PR created for task [%s]: %s", task.id, pr_url)
+ 
+        try:
+            from matrixmouse import comms as comms_module
+            m = comms_module.get_manager()
+            if m:
+                m.emit("pr_created", {
+                    "task_id":    task.id,
+                    "task_title": task.title,
+                    "pr_url":     pr_url,
+                    "base":       parent_branch,
+                })
+        except Exception as e:
+            logger.warning("Failed to emit pr_created: %s", e)
+ 
+        return True, pr_url
+ 
 
     # -----------------------------------------------------------------------
     # Stale clarification handling
@@ -1115,30 +1429,50 @@ class Orchestrator:
             self._handle_no_merge_target(reviewed_task)
             return
 
-        # Check for protected branch — skip to PR flow
-        if self._is_protected_branch(parent_branch):
+        # Check for protected branch — require PR approval before merge
+        repo_name = reviewed_task.repo[0] if reviewed_task.repo else ""
+        if self._is_protected_branch(parent_branch, repo_name):
             logger.info(
-                "Parent branch '%s' is protected — skipping merge, "
-                "going to PR flow for task [%s].",
+                "Parent branch '%s' is protected — requesting PR approval "
+                "for task [%s].",
                 parent_branch, reviewed_task.id,
             )
-            # PR flow is handled in 8.5 — for now block with notification
             self.queue.mark_blocked_by_human(
                 reviewed_task.id,
-                reason=f"Merge target '{parent_branch}' is protected. PR required.",
+                reason=f"Merge target '{parent_branch}' is protected. PR approval required.",
             )
             try:
                 from matrixmouse import comms as comms_module
                 m = comms_module.get_manager()
                 if m:
-                    m.emit("pr_required", {
+                    m.emit("pr_approval_required", {
                         "task_id":       reviewed_task.id,
                         "task_title":    reviewed_task.title,
                         "branch":        reviewed_task.branch,
                         "parent_branch": parent_branch,
+                        "repo":          repo_name,
+                        "choices": [
+                            {
+                                "value": "approve",
+                                "label": "Push branch and open PR",
+                                "description": (
+                                    f"Push '{reviewed_task.branch}' to the remote "
+                                    f"and open a pull request targeting "
+                                    f"'{parent_branch}'."
+                                ),
+                            },
+                            {
+                                "value": "reject",
+                                "label": "Block for manual resolution",
+                                "description": (
+                                    "Keep the task blocked. No PR will be created. "
+                                    "Resolve manually."
+                                ),
+                            },
+                        ],
                     })
             except Exception as e:
-                logger.warning("Failed to emit pr_required: %s", e)
+                logger.warning("Failed to emit pr_approval_required: %s", e)
             return
 
         # Get repo root
@@ -1264,18 +1598,138 @@ class Orchestrator:
         return None
 
 
-    def _is_protected_branch(self, branch: str) -> bool:
+    def _is_protected_branch(self, branch: str, repo_name: str = "") -> bool:
         """
-        Return True if branch is in the protected_branches config list.
+        Return True if branch is protected.
 
-        Protected branches require a PR rather than a direct merge.
-        Branch protection API caching (8.5) will extend this method.
+        Check order:
+            1. config.protected_branches list (fast, no I/O)
+            2. Cached protected branches in repo_metadata (no API call if fresh)
+            3. Live API call via GitRemoteProvider (updates cache on miss)
+
+        Falls back gracefully at each step — if no provider is configured or
+        the API call fails, the config list result is returned.
 
         Args:
-            branch: Branch name to check.
+            branch:    Branch name to check.
+            repo_name: Repo root name (e.g. "MatrixMouse"). Used to look up
+                    repo_metadata for cache and provider. Optional — if
+                    empty, only the config list is checked.
         """
-        protected = self.config.protected_branches
-        return branch in protected
+        # Step 1: config list
+        if branch in self.config.protected_branches:
+            return True
+
+        if not repo_name:
+            return False
+
+        # Step 2: check cache (respects branch_protection_cache_ttl_minutes)
+        try:
+            result = self._ws_state_repo.get_protected_branches_cached(repo_name)
+            print(f"DEBUG: {result}")
+            if result is not None:
+                branches, cache_timestamp = result
+                if cache_timestamp:
+                    from datetime import datetime, timezone, timedelta
+                    try:
+                        cached_at = datetime.fromisoformat(cache_timestamp)
+                        if cached_at.tzinfo is None:
+                            cached_at = cached_at.replace(tzinfo=timezone.utc)
+                        ttl = timedelta(
+                            minutes=self.config.branch_protection_cache_ttl_minutes
+                        )
+                        if datetime.now(timezone.utc) - cached_at < ttl:
+                            return branch in branches
+                        # Cache expired — fall through to live API call
+                    except (ValueError, TypeError):
+                        pass
+        except Exception as e:
+            logger.warning(
+                "Failed to read branch protection cache for '%s': %s",
+                repo_name, e,
+            )
+
+        # Step 3: live API call
+        provider = self._get_provider(repo_name)
+        if provider is None:
+            return False
+
+        try:
+            metadata = self._ws_state_repo.get_repo_metadata(repo_name)
+            owner_repo = _parse_owner_repo(
+                metadata.get("remote_url", "") if metadata else ""
+            )
+            if not owner_repo:
+                return False
+
+            is_protected = provider.is_branch_protected(owner_repo, branch)
+
+            # Update cache with all protected branches for this repo so
+            # subsequent checks on sibling branches also hit the cache.
+            # If the broader fetch fails, skip — cache update is best-effort.
+            try:
+                from matrixmouse.git.github_provider import GitHubProvider
+                if isinstance(provider, GitHubProvider):
+                    branches_data = provider._get(
+                        f"/repos/{owner_repo}/branches?protected=true&per_page=100"
+                    )
+                    protected_names = [
+                        b["name"] for b in branches_data if isinstance(b, dict)
+                    ]
+                    self._ws_state_repo.set_protected_branches_cached(
+                        repo_name,
+                        protected_names,
+                    )
+            except Exception:
+                pass
+
+            return is_protected
+
+        except Exception as e:
+            logger.warning(
+                "Branch protection API check failed for '%s'/'%s': %s. "
+                "Falling back to config list.",
+                repo_name, branch, e,
+            )
+            return False
+
+    def _get_provider(self, repo_name: str):
+        """
+        Return a GitRemoteProvider for the named repo, or None.
+
+        Looks up repo_metadata to determine provider type and remote URL.
+        Returns None if no provider is configured or the token is missing.
+
+        Args:
+            repo_name: Repo root name (e.g. "MatrixMouse").
+
+        Returns:
+            GitRemoteProvider instance, or None.
+        """
+        try:
+            metadata = self._ws_state_repo.get_repo_metadata(repo_name)
+            if not metadata:
+                return None
+            provider_type = metadata.get("provider", "")
+            if provider_type == "github":
+                import os
+                from matrixmouse.git.github_provider import GitHubProvider
+                token = os.environ.get("GITHUB_TOKEN", "")
+                if not token:
+                    logger.warning(
+                        "GITHUB_TOKEN not set — cannot create GitHubProvider "
+                        "for repo '%s'.", repo_name,
+                    )
+                    return None
+                return GitHubProvider(token=token)
+            # Future: elif provider_type == "gitlab": ...
+            return None
+        except Exception as e:
+            logger.warning(
+                "Failed to get provider for repo '%s': %s", repo_name, e,
+            )
+            return None
+                                                                                
 
     def _run_merge_up(
         self,
