@@ -38,11 +38,14 @@ class LoopExitReason(Enum):
     Describes why the agent loop terminated.
     Returned to the orchestrator so it can decide what to do next.
     """
-    COMPLETE           = auto() # agent called declare_complete
-    ESCALATE           = auto() # stuck detector triggered escalation
-    TURN_LIMIT_REACHED = auto() # task turn limit reached, intervention required
-    ERROR              = auto() # unrecoverable error
-    YIELD              = auto() # yield control back to orchestrator
+    COMPLETE  = auto() # agent called declare_complete
+    ESCALATE  = auto() # stuck detector triggered escalation
+    DECISION  = auto() # a tool or turn limit requires a human decision before
+                       # the task can continue — orchestrator blocks the task
+                       # and emits a decision event; on resume the loop replays
+                       # any pending tool calls from the interrupted turn
+    ERROR     = auto() # unrecoverable error
+    YIELD     = auto() # yield control back to orchestrator
 
 
 @dataclass
@@ -51,11 +54,12 @@ class LoopResult:
     The outcome of a single agent loop run.
     Returned to the orchestrator after the loop exits.
     """
-    exit_reason: LoopExitReason
-    messages: list          # full message history at time of exit
-    turns_taken: int
-    completion_summary: str = ""   # populated when exit_reason is COMPLETE
-
+    exit_reason:      LoopExitReason
+    messages:         list   # full message history at time of exit
+    turns_taken:      int
+    completion_summary: str  = ""   # populated when exit_reason is COMPLETE
+    decision_type:    str    = ""   # populated when exit_reason is DECISION
+    decision_payload: dict   = field(default_factory=dict)
 
 class AgentLoop:
     """
@@ -80,6 +84,8 @@ class AgentLoop:
         comms=None,             # callable: () -> str | None
         emit=None,
         persist=None,           # callable: (messages: list) -> None
+        persist_pending=None,   # callable (calls: list[dict]) -> None
+        wip_commit=None,        # callable: () -> None - WIP commit after dispatch
         should_yield=None,      # callable: () -> bool
         stream: bool = True,    # stream tokens to web UI
         think: bool = False,    # enable extended thinking
@@ -94,6 +100,8 @@ class AgentLoop:
         self.paths = paths
         self._emit = emit or _noop_emit
         self._persist = persist or _noop_persist
+        self._persist_pending = persist_pending or _noop_persist_pending
+        self._wip_commit = wip_commit or _noop_wip_commit
         self._should_yield = should_yield or _noop_should_yield
         self.stream = stream
         self.think = think
@@ -130,9 +138,14 @@ class AgentLoop:
             if self._turns >= _max:
                 logger.warning("Turn limit (%d) reached. Exiting loop.", _max)
                 return LoopResult(
-                    exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+                    exit_reason=LoopExitReason.DECISION,
                     messages=self.messages,
                     turns_taken=self._turns,
+                    decision_type="turn_limit_reached",
+                    decision_payload={
+                        "turns_taken": self._turns,
+                        "turn_limit":  _max,
+                    },
                 )
 
             # --- Human interjection check ---
@@ -192,12 +205,16 @@ class AgentLoop:
                 if exit_result is not None:
                     return exit_result
             else:
-                # No tool calls and no declare_complete — model produced a
-                # plain text response. Log it and continue; the model may
-                # be reasoning before its next tool call.
                 logger.debug("No tool calls in turn %d.", self._turns)
 
-             # --- Yield check (time slice/ preemption) ---
+            # --- WIP commit ---
+            # If there were tool calls, each successful dispatch already
+            # committed inside _dispatch_tools. This call handles the
+            # no-tool-calls case (pure text turns) and is a safe no-op
+            # if nothing has changed in the working tree.
+            self._wip_commit()
+
+            # --- Yield check (time slice / preemption) ---
             if self._should_yield():
                 logger.info(
                     "Yield signal received after turn %d. "
@@ -218,6 +235,9 @@ class AgentLoop:
             turns_taken=self._turns,
         )
 
+    def _persist_pending_calls(self, calls: list[dict]) -> None:
+        """Delegate to the injected persist_pending callable."""
+        self._persist_pending(calls)
 
     def _chat_completion(self):
         """
@@ -298,22 +318,61 @@ class AgentLoop:
 
 
 
-    def _dispatch_tools(self, tool_calls) -> LoopResult | None:
+    def _dispatch_tools(
+        self,
+        tool_calls,
+        pending_tool_calls: list[dict] | None = None,
+    ) -> LoopResult | None:
         """
         Execute each tool call in the response and append results to history.
 
-        Returns a LoopResult if the loop should exit (declare_complete or
-        escalation), or None to continue the loop.
+        Handles three exit conditions:
+            - declare_complete  → COMPLETE
+            - DecisionRequiredException → DECISION (human approval required)
+            - stuck detector    → ESCALATE
+
+        When a DecisionRequiredException is raised, all tool calls that have
+        not yet been dispatched (including the blocking one) are stored in
+        pending_tool_calls via self._persist_pending so the orchestrator can
+        replay them after the human decision is resolved.
+
+        A WIP commit is made after each successful tool dispatch so the
+        workspace is always consistent when a task is blocked or switched.
+
+        Args:
+            tool_calls: Tool call objects from the model response.
+            pending_tool_calls: Remaining calls to dispatch, used when
+                resuming after a DECISION. None on a fresh turn.
+
+        Returns:
+            LoopResult if the loop should exit, None to continue.
         """
-        for call in tool_calls:
-            name = call.function.name
-            arguments = call.function.arguments
+        from matrixmouse.tools.task_tools import DecisionRequiredException
+
+        # On a fresh turn, store the full list before dispatching any.
+        # On resume (pending_tool_calls provided), we're replaying — list
+        # is already persisted on the task, caller passes remaining calls.
+        calls_to_dispatch = list(pending_tool_calls or [
+            {"name": c.function.name, "arguments": c.function.arguments}
+            for c in tool_calls
+        ])
+
+        if pending_tool_calls is None and calls_to_dispatch:
+            # Persist the full pending list before any dispatch so a crash
+            # mid-turn never loses the call sequence.
+            self._persist_pending(calls_to_dispatch)
+
+        while calls_to_dispatch:
+            call_dict = calls_to_dispatch[0]
+            name      = call_dict["name"]
+            arguments = call_dict["arguments"]
 
             # --- declare_complete is a special exit signal, not a real tool ---
             if name == "declare_complete":
                 summary = arguments.get("summary", "")
                 logger.info("Agent declared task complete. Summary: %s", summary)
                 self._is_done = True
+                self._persist_pending([])  # clear pending queue
                 return LoopResult(
                     exit_reason=LoopExitReason.COMPLETE,
                     messages=self.messages,
@@ -328,15 +387,11 @@ class AgentLoop:
                     f"Allowed tools: {sorted(self._allowed_tools)}."
                 )
                 had_error = True
-                logger.warning(
-                    "Tool '%s' blocked by allowed_tools enforcement.", name
-                )
-                self.messages.append({
-                    "role": "tool",
-                    "name": name,
-                    "content": result,
-                })
+                logger.warning("Tool '%s' blocked by allowed_tools enforcement.", name)
+                self.messages.append({"role": "tool", "name": name, "content": result})
                 self._persist(self.messages)
+                calls_to_dispatch.pop(0)
+                self._persist_pending(calls_to_dispatch)
                 if self._check_stuck(name, arguments, had_error):
                     return LoopResult(
                         exit_reason=LoopExitReason.ESCALATE,
@@ -344,7 +399,6 @@ class AgentLoop:
                         turns_taken=self._turns,
                     )
                 continue
-
 
             # --- Normal tool dispatch ---
             had_error = False
@@ -358,18 +412,45 @@ class AgentLoop:
                 try:
                     result = func(**arguments)
                     logger.info("Tool: %s(%s) → %s", name, arguments, str(result)[:120])
+                except DecisionRequiredException as exc:
+                    # Tool requires human approval before proceeding.
+                    # The tool call has NOT been executed — it stays at the
+                    # front of pending_tool_calls for replay after approval.
+                    logger.info(
+                        "Tool '%s' raised DecisionRequiredException: %s",
+                        name, exc.decision_type,
+                    )
+                    # Append a placeholder tool result so message history
+                    # is coherent (the model sees its call was received).
+                    self.messages.append({
+                        "role":    "tool",
+                        "name":    name,
+                        "content": (
+                            f"[Awaiting human approval — decision_type="
+                            f"{exc.decision_type}]"
+                        ),
+                    })
+                    self._persist(self.messages)
+                    # pending queue already has this call at front — leave it.
+                    return LoopResult(
+                        exit_reason=LoopExitReason.DECISION,
+                        messages=self.messages,
+                        turns_taken=self._turns,
+                        decision_type=exc.decision_type,
+                        decision_payload=exc.payload,
+                    )
                 except Exception as e:
                     result = f"ERROR calling {name}: {e}"
                     had_error = True
                     logger.warning("Tool %s raised: %s", name, e)
 
-            self.messages.append({
-                "role": "tool",
-                "name": name,
-                "content": str(result),
-            })
-
+            self.messages.append({"role": "tool", "name": name, "content": str(result)})
             self._persist(self.messages)
+
+            # Successful dispatch — pop from pending, WIP commit, continue.
+            calls_to_dispatch.pop(0)
+            self._persist_pending(calls_to_dispatch)
+            self._wip_commit()
 
             # --- Stuck check after each tool call ---
             if self._check_stuck(name, arguments, had_error):
@@ -380,8 +461,9 @@ class AgentLoop:
                     turns_taken=self._turns,
                 )
 
+        self._persist_pending([])  # turn complete — clear pending queue
         return None  # continue the loop
-
+    
 
 # TODO: replace noop stubs when subsystems are ready.
 
@@ -416,3 +498,11 @@ def _noop_persist(messages: list) -> None:
 def _noop_should_yield() -> bool:
     """Never yields until scheduler is wired in."""
     return False
+
+def _noop_wip_commit() -> None:
+    """No-op until git_tools is wired in."""
+    pass
+
+def _noop_persist_pending(calls: list) -> None:
+    """No-op until orchestrator wires in pending_tool_calls persistence."""
+    pass

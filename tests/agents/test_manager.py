@@ -48,6 +48,9 @@ from matrixmouse.orchestrator import _build_review_task
 from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
+from matrixmouse.repository.memory_workspace_state_repository import (
+    InMemoryWorkspaceStateRepository,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -79,31 +82,6 @@ def make_config(upcoming_tasks=20) -> MagicMock:
     cfg.manager_review_upcoming_tasks = upcoming_tasks
     return cfg
 
-class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
-    def __init__(self):
-        self._store: dict = {}
-        self._stale: dict = {}
-
-    def get(self, key):
-        return self._store.get(key)
-
-    def set(self, key, value):
-        self._store[key] = value
-
-    def delete(self, key):
-        self._store.pop(key, None)
-
-    def get_stale_clarification_task(self, blocked_task_id):
-        return self._stale.get(blocked_task_id)
-
-    def register_stale_clarification_task(self, blocked_task_id, manager_task_id):
-        self._stale[blocked_task_id] = manager_task_id
-
-    def clear_stale_clarification_task(self, blocked_task_id):
-        self._stale.pop(blocked_task_id, None)
-
-    def all_stale_clarification_tasks(self):
-        return dict(self._stale)
 
 # ---------------------------------------------------------------------------
 # build_system_prompt — structure

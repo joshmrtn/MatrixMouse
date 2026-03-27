@@ -133,25 +133,21 @@ class TestBuildInitialMessages:
             msgs = agent.build_initial_messages(task)
             assert isinstance(msgs, list)
 
-    def test_at_least_two_messages_for_all_roles(self):
+    def test_build_initial_messages_starts_with_system_for_all_roles(self):
         for role in AgentRole:
             agent = agent_for_role(role)
             task = make_task(role=role)
             msgs = agent.build_initial_messages(task)
-            assert len(msgs) >= 2, \
-                f"{role} returned fewer than 2 messages"
-
+            assert len(msgs) >= 1, \
+                f"{role} returned no messages"
+            assert msgs[0]["role"] == "system", \
+                f"{role} first message is not system prompt"
+        
     def test_first_message_is_system(self):
         for role in AgentRole:
             agent = agent_for_role(role)
             msgs = agent.build_initial_messages(make_task(role=role))
             assert msgs[0]["role"] == "system"
-
-    def test_second_message_is_user(self):
-        for role in AgentRole:
-            agent = agent_for_role(role)
-            msgs = agent.build_initial_messages(make_task(role=role))
-            assert msgs[1]["role"] == "user"
 
     def test_system_content_matches_build_system_prompt(self):
         for role in AgentRole:

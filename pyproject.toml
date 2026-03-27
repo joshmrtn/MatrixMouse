@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "matrixmouse"
-version = "0.2.5"
+version = "0.3.0"
 authors = [
   { name="Josh Martin", email="" },
 ]
@@ -37,7 +37,7 @@ matrixmouse = "matrixmouse.main:main"
 matrixmouse-service = "matrixmouse._service:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-cov>=7.1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -35,6 +35,7 @@ Submodules:
 import logging
 logger = logging.getLogger(__name__)
 
+from matrixmouse.task import AgentRole
 from matrixmouse.tools.file_tools import read_file, str_replace, append_to_file
 from matrixmouse.tools.task_tools import (
     declare_complete,
@@ -47,13 +48,12 @@ from matrixmouse.tools.task_tools import (
     deny,
 )
 from matrixmouse.tools.git_tools import (
-    create_task_branch,
-    commit_progress,
+    git_commit,
     get_git_diff,
     get_git_log,
     get_git_status,
     push_branch,
-    open_pull_request,
+    clone_repo,
 )
 from matrixmouse.tools.code_tools import (
     get_function_def,
@@ -71,6 +71,7 @@ from matrixmouse.tools.navigation_tools import (
 )
 from matrixmouse.tools.test_tools import run_tests, run_single_test
 from matrixmouse.tools.comms_tools import request_clarification
+from matrixmouse.tools.merge_tools import show_conflict, resolve_conflict
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +93,15 @@ TOOLS = [
     approve,
     deny,
     # git_tools
-    create_task_branch,
-    commit_progress,
+    git_commit,
     get_git_diff,
     get_git_log,
     get_git_status,
     push_branch,
-    open_pull_request,
+    clone_repo,
+    # merge_tools
+    show_conflict,
+    resolve_conflict,
     # code_tools
     get_function_def,
     get_function_list,
@@ -168,13 +171,12 @@ _CODER_TOOLS: frozenset[str] = frozenset({
     "str_replace",
     "append_to_file",
     # Git tools
-    "create_task_branch",
-    "commit_progress",
+    "git_commit",
     "get_git_diff",
     "get_git_log",
     "get_git_status",
     "push_branch",
-    "open_pull_request",
+    "clone_repo",
     # Code tools
     "get_function_def",
     "get_function_list",
@@ -204,13 +206,12 @@ _WRITER_TOOLS: frozenset[str] = frozenset({
     "str_replace",
     "append_to_file",
     # Git tools
-    "create_task_branch",
-    "commit_progress",
+    "git_commit",
     "get_git_diff",
     "get_git_log",
     "get_git_status",
     "push_branch",
-    "open_pull_request",
+    "clone_repo",
     # Navigation (Writers need to explore the project for context)
     "get_project_directory_structure",
     "get_file_summary",
@@ -256,6 +257,11 @@ _CRITIC_TOOLS: frozenset[str] = frozenset({
     #       questions mid-review as that would stall task completion.
 })
 
+_MERGE_TOOLS: frozenset[str] = frozenset({
+    "show_conflict",
+    "resolve_conflict",
+})
+
 _ROLE_TOOL_SETS: dict = {}  # populated after imports resolve
 
 
@@ -271,6 +277,7 @@ def _build_role_tool_sets() -> None:
         AgentRole.CODER:   _CODER_TOOLS,
         AgentRole.WRITER:  _WRITER_TOOLS,
         AgentRole.CRITIC:  _CRITIC_TOOLS,
+        AgentRole.MERGE:   _MERGE_TOOLS,
     }
 
 
@@ -293,7 +300,6 @@ def tools_for_role(role: "AgentRole") -> frozenset[str]:
             Returns an empty frozenset for unknown roles, which will
             block all tool calls and is logged as a warning.
     """
-    from matrixmouse.task import AgentRole
     result = _ROLE_TOOL_SETS.get(role)
     if result is None:
         logger.warning(
@@ -305,7 +311,7 @@ def tools_for_role(role: "AgentRole") -> frozenset[str]:
     return result
 
 
-def tools_for_role_list(role: "AgentRole") -> list:
+def tools_for_role_list(role: AgentRole) -> list:
     """
     Return the subset of TOOLS permitted for a given role.
 
@@ -321,3 +327,9 @@ def tools_for_role_list(role: "AgentRole") -> list:
     """
     allowed = tools_for_role(role)
     return [fn for fn in TOOLS if fn.__name__ in allowed]
+
+
+def tools_for_names(names: set[str]) -> list:
+    """Return tool functions matching the given name set."""
+    all_tools = {fn.__name__: fn for fn in TOOLS}
+    return [all_tools[n] for n in names if n in all_tools]

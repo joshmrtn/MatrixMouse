@@ -33,12 +33,43 @@ Do not add file, git, or navigation tools here.
 """
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from matrixmouse.config import MatrixMouseConfig
 from matrixmouse.repository.task_repository import TaskRepository
+from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
+from matrixmouse.utils.task_utils import validate_branch_slug
+from matrixmouse.tools.git_tools import (
+    branch_exists,
+    create_branch,
+    push_to_remote,
+    get_head_hash,
+    MIRROR_REMOTE,
+)
 
 logger = logging.getLogger(__name__)
+
+class DecisionRequiredException(Exception):
+    """
+    Raised by a tool when a human decision is required before the tool
+    can execute.
+
+    The AgentLoop catches this in _dispatch_tools and exits with
+    LoopExitReason.DECISION. The tool call is NOT executed — it remains
+    at the front of task.pending_tool_calls for replay after the human
+    decision is resolved.
+
+    Args:
+        decision_type: Maps to the event name emitted by the orchestrator,
+            e.g. "decomposition_confirmation_required".
+        payload: Arbitrary dict passed through to the orchestrator so it
+            can emit the correct event with the right data.
+    """
+    def __init__(self, decision_type: str, payload: dict):
+        self.decision_type = decision_type
+        self.payload = payload
+        super().__init__(decision_type)
 
 
 # ---------------------------------------------------------------------------
@@ -48,32 +79,38 @@ logger = logging.getLogger(__name__)
 _queue: Optional[TaskRepository] = None
 _active_task_id: Optional[str] = None
 _config: Optional[MatrixMouseConfig] = None
-
+_cwd: Path | None = None
+_ws_state_repo: WorkspaceStateRepository | None = None
 
 def configure(
     queue: TaskRepository,
-    active_task_id: Optional[str] = None,
-    config: Optional[MatrixMouseConfig] = None,
+    active_task_id: str | None = None,
+    config: MatrixMouseConfig | None = None,
+    cwd: Path | None = None,
+    ws_state_repo: WorkspaceStateRepository | None = None,
 ) -> None:
     """
-    Inject the task repository, active task ID, and config.
+    Inject the task repository, active task ID, config, and working directory.
 
-    Called by the orchestrator at the start of each task so tools
-    can read and mutate the correct task and respect config values
-    such as decomposition_depth_limit.
+    Called by the orchestrator at the start of each task.
 
     Args:
         queue:          The workspace-level TaskRepository.
         active_task_id: ID of the task currently being worked on.
-        config:         MatrixMouseConfig instance. Used for depth
-                        limit enforcement in split_task. If None,
-                        split_task falls back to the default value of 3.
+        config:         MatrixMouseConfig instance.
+        cwd:            Working directory (repo root) for git operations.
+                        If None, set_branch will be unavailable.
     """
-    global _queue, _active_task_id, _config
+    global _queue, _active_task_id, _config, _cwd, _ws_state_repo
     _queue = queue
     _active_task_id = active_task_id
     _config = config
-    logger.debug("task_tools configured. Active task: %s", active_task_id)
+    _cwd = cwd
+    _ws_state_repo = ws_state_repo
+    logger.debug(
+        "task_tools configured. Active task: %s cwd: %s",
+        active_task_id, cwd,
+    )
 
 
 def _require_queue() -> TaskRepository:
@@ -83,6 +120,14 @@ def _require_queue() -> TaskRepository:
             "Call task_tools.configure(queue, task_id) at task start."
         )
     return _queue
+
+def _require_cwd() -> Path:
+    if _cwd is None:
+        raise RuntimeError(
+            "task_tools not configured. "
+            "Call task_tools.configure(cwd=...) at task start."
+        )
+    return _cwd
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +206,7 @@ def create_task(
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
     queue = _require_queue()
+    _enter_planning_mode_if_needed()
 
     if not title.strip():
         return "ERROR: Task title cannot be empty."
@@ -202,6 +248,143 @@ def create_task(
         f"Title: {task.title}\n"
         f"Role:  {role_enum.value}\n"
         f"Repo:  {', '.join(repo)}"
+    )
+
+
+def set_branch(task_id: str, slug: str) -> str:
+    """
+    Assign a git branch to a task and create it in the repository.
+
+    Call this before decomposing a task or doing any file work. The branch
+    name is permanent — it cannot be changed after assignment.
+
+    The full branch name is constructed as '<prefix>/<slug>', e.g. if the
+    prefix is 'mm' and the slug is 'refactor/foobar', the branch becomes
+    'mm/refactor/foobar'.
+
+    Slug rules:
+        - Lowercase letters, digits, hyphens, and forward slashes only
+        - No consecutive hyphens or slashes
+        - No leading or trailing hyphens or slashes
+        - Maximum 50 characters
+
+    Only available when the task has no branch assigned. Once a branch is
+    set, this tool is removed from your available tools.
+
+    Args:
+        task_id (str): ID of the task to assign the branch to. This is
+            typically the current active task, but may be any task you
+            are planning for.
+        slug (str): Human-meaningful branch slug, e.g. 'refactor/foobar'
+            or 'fix/login-timeout'. Do not include the prefix.
+
+    Returns:
+        str: The full branch name on success, or an error message.
+    """
+    from matrixmouse.task import TaskStatus
+
+    queue = _require_queue()
+
+    if not task_id:
+        return "ERROR: task_id is required."
+    if not slug or not slug.strip():
+        return "ERROR: slug cannot be empty."
+    try:
+        cwd = _require_cwd()
+    except RuntimeError as e:
+        return f"ERROR: Working directory not configured: {e}"
+
+    task = queue.get(task_id)
+    if task is None:
+        return f"ERROR: Task '{task_id}' not found."
+    if task.branch:
+        return (
+            f"ERROR: Task '{task_id}' already has branch '{task.branch}'. "
+            f"Branch names are permanent and cannot be changed."
+        )
+
+    prefix = _config.agent_branch_prefix if _config is not None else "mm"
+    try:
+        full_branch_name = validate_branch_slug(slug.strip(), prefix)
+    except ValueError as e:
+        return f"ERROR: {e}"
+    
+    if branch_exists(full_branch_name, cwd):
+        return (
+            f"ERROR: Branch '{full_branch_name}' already exists in the repository. "
+            f"Choose a different slug."
+        )
+
+    # Determine base branch
+    base_branch: str | None = None
+    if task.parent_task_id:
+        parent = queue.get(task.parent_task_id)
+        if parent and parent.branch:
+            base_branch = parent.branch
+
+    if not base_branch:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd, capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip() not in ("HEAD", ""):
+            base_branch = result.stdout.strip()
+        else:
+            return (
+                "ERROR: Could not determine base branch. "
+                "Ensure the repo is on a named branch."
+            )
+
+    def git_create(branch_name: str, base: str) -> tuple[bool, str, str]:
+        if branch_exists(branch_name, cwd):
+            return False, f"Branch '{branch_name}' already exists.", ""
+        ok, err = create_branch(branch_name, base, cwd)
+        if not ok:
+            return False, err, ""
+        head = get_head_hash(cwd) or ""
+        push_ok, push_err = push_to_remote(branch_name, MIRROR_REMOTE, cwd)
+        if not push_ok:
+            logger.warning(
+                "Branch '%s' created but mirror push failed: %s. "
+                "Will sync on next WIP commit.",
+                branch_name, push_err,
+            )
+        return True, "", head
+
+    def git_delete(branch_name: str) -> tuple[bool, str]:
+        import subprocess as _sp
+        result = _sp.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=cwd, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return False, result.stderr.strip()
+        return True, ""
+
+    try:
+        queue.set_task_branch(
+            task_id=task_id,
+            full_branch_name=full_branch_name,
+            base_branch=base_branch,
+            create_git_branch=git_create,
+            delete_git_branch=git_delete,
+        )
+    except (KeyError, ValueError) as e:
+        return f"ERROR: {e}"
+
+    updated = queue.get(task_id)
+    head_short = (updated.wip_commit_hash[:8]
+                  if updated and updated.wip_commit_hash else "unknown")
+
+    logger.info(
+        "Branch '%s' assigned to task [%s] from base '%s'.",
+        full_branch_name, task_id, base_branch,
+    )
+    return (
+        f"OK: Branch '{full_branch_name}' created from '{base_branch}' "
+        f"and assigned to task '{task_id}'.\n"
+        f"Baseline commit: {head_short}"
     )
 
 
@@ -254,11 +437,16 @@ def split_task(
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
     queue = _require_queue()
+    _enter_planning_mode_if_needed()
 
     if not task_id:
         return "ERROR: task_id is required."
     if not subtasks:
         return "ERROR: subtasks list cannot be empty."
+    try:
+        cwd = _require_cwd()
+    except RuntimeError as e:
+        return f"ERROR: Working directory not configured: {e}"
 
     parent = queue.get(task_id)
     if parent is None:
@@ -274,6 +462,12 @@ def split_task(
         return (
             f"ERROR: Task '{task_id}' is {parent.status.value} and cannot be split."
         )
+    
+    if not parent.branch:
+        return (
+            f"ERROR: Task '{task_id}' has no branch assigned. "
+            f"Call set_branch() to assign a branch before decomposing."
+        )
 
     # --- Depth limit check ---
     depth_limit = _config.decomposition_depth_limit if _config is not None else 3
@@ -281,25 +475,23 @@ def split_task(
     # have been granted on this branch, each granting depth_limit additional levels.
     allowed_depth = depth_limit + (parent.decomposition_confirmed_depth * depth_limit)
     if parent.depth >= allowed_depth:
-        import uuid
-        confirmation_id = uuid.uuid4().hex[:16]
         logger.info(
-            "Depth limit reached for task [%s] at depth %d. "
-            "Emitting decomposition_confirmation_required (confirmation_id=%s).",
-            task_id, parent.depth, confirmation_id,
+            "Depth limit reached for task [%s] at depth %d — "
+            "raising DecisionRequiredException.",
+            task_id, parent.depth,
         )
-        _emit_decomposition_confirmation(
-            task_id=task_id,
-            depth=parent.depth,
-            proposed_subtasks=subtasks,
-            confirmation_id=confirmation_id,
-        )
-        return (
-            f"PENDING_CONFIRMATION:{confirmation_id}\n"
-            f"Task '{task_id}' is at decomposition depth {parent.depth}, "
-            f"which requires human confirmation before splitting further.\n"
-            f"A confirmation request has been sent. Resume after the operator "
-            f"confirms or denies the split."
+        raise DecisionRequiredException(
+            decision_type="decomposition_confirmation_required",
+            payload={
+                "task_id":           task_id,
+                "task_title":        parent.title,
+                "current_depth":     parent.depth,
+                "allowed_depth":     allowed_depth,
+                "proposed_subtasks": [
+                    {"title": s.get("title", ""), "role": s.get("role", "")}
+                    for s in subtasks
+                ],
+            },
         )
 
     # --- Validate all subtasks before creating any ---
@@ -361,15 +553,47 @@ def split_task(
         )
         task_objects.append(subtask)
 
+    def git_create(branch_name: str, base: str) -> tuple[bool, str, str]:
+        ok, err = create_branch(branch_name, base, cwd)
+        if not ok:
+            return False, err, ""
+        head = get_head_hash(cwd) or ""
+        push_ok, push_err = push_to_remote(branch_name, MIRROR_REMOTE, cwd)
+        if not push_ok:
+            logger.warning(
+                "Branch '%s' created but mirror push failed: %s.",
+                branch_name, push_err,
+            )
+        return True, "", head
+
+    def git_delete(branch_name: str) -> tuple[bool, str]:
+        import subprocess as _sp
+        result = _sp.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=cwd, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return False, result.stderr.strip()
+        return True, ""
+
+
+    if not parent.branch:
+        return (
+            f"ERROR: Task '{task_id}' has no branch assigned. "
+            f"Call set_branch() before decomposing."
+        )
+
     try:
-        created = queue.add_subtasks(task_id, task_objects)
+        created = queue.add_subtasks(
+            task_id,
+            task_objects,
+            create_git_branch=git_create,
+            delete_git_branch=git_delete,
+        )
     except ValueError as e:
         return f"ERROR: {e}"
     except Exception as e:
-        logger.error(
-            "Unexpected error during split_task on task [%s]: %s",
-            task_id, e,
-        )
+        logger.error("Unexpected error in split_task [%s]: %s", task_id, e)
         return f"ERROR: Failed to create subtasks: {e}"
 
     lines = [
@@ -380,9 +604,9 @@ def split_task(
     ]
     for subtask in created:
         lines.append(
-            f"  [{subtask.id}] ({subtask.role.value}) {subtask.title}"
+            f"  [{subtask.id}] ({subtask.role.value}) {subtask.title} "
+            f"branch={subtask.branch}"
         )
-
     return "\n".join(lines)
 
 
@@ -475,26 +699,33 @@ def update_task(
         task.notes = (task.notes + f"\n{notes}").strip() if task.notes else notes
         changes.append("notes")
 
-    # --- Dependency graph updates ---
+    # --- Apply non-dependency field changes ---
+    non_dep_changes = [c for c in changes 
+                       if "blocked_by" not in c and "status" not in c]
+
+    if non_dep_changes:
+        try:
+            queue.update(task)
+        except Exception as e:
+            return f"ERROR: Failed to save task: {e}"
+
+    # --- Dependency graph updates (handle their own persistence) ---
     if remove_blocked_by:
         for dep_id in remove_blocked_by:
             queue.remove_dependency(dep_id, task_id)
-        changes.append("blocked_by (removed)")
-
-        # If task was BLOCKED_BY_TASK and is now unblocked, set to READY
-        if (task.status == TaskStatus.BLOCKED_BY_TASK
+        # Check if unblocked
+        refreshed = queue.get(task_id)
+        if (refreshed is not None
+                and refreshed.status == TaskStatus.BLOCKED_BY_TASK
                 and queue.is_ready(task_id)):
-            task.status = TaskStatus.READY
-            queue.update(task)
+            refreshed.status = TaskStatus.READY
+            queue.update(refreshed)
             changes.append("status → READY")
 
     if add_blocked_by:
         for dep_id in add_blocked_by:
             if queue.get(dep_id) is None:
-                return (
-                    f"ERROR: Cannot add dependency on '{dep_id}' "
-                    f"— task not found."
-                )
+                return f"ERROR: Cannot add dependency on '{dep_id}' — task not found."
         try:
             for dep_id in add_blocked_by:
                 queue.add_dependency(dep_id, task_id)
@@ -504,11 +735,6 @@ def update_task(
 
     if not changes:
         return "No changes specified. Provide at least one field to update."
-
-    try:
-        queue.update(task)
-    except Exception as e:
-        return f"ERROR: Failed to save task: {e}"
 
     logger.info(
         "Task [%s] updated by Manager. Fields changed: %s",
@@ -768,7 +994,13 @@ def deny(feedback: str) -> str:
     # Remove Critic task from reviewed task's blocked_by and set back to READY
     try:
         queue.remove_dependency(_active_task_id, reviewed_task.id)
-        queue.update(reviewed_task)
+        # Re-fetch to get status updated by remove_dependency
+        refreshed = queue.get(reviewed_task.id)
+        if refreshed is None:
+            return f"Error: Reviewed task '{reviewed_task.id}' disappeared."
+        # Apply the context message we added to the refereshed copy
+        refreshed.context_messages = reviewed_task.context_messages
+        queue.update(refreshed)
     except Exception as e:
         return f"ERROR: Failed to return reviewed task to READY: {e}"
 
@@ -793,39 +1025,39 @@ def deny(feedback: str) -> str:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _emit_decomposition_confirmation(
-    task_id: str,
-    depth: int,
-    proposed_subtasks: list[dict],
-    confirmation_id: str,
-) -> None:
+def _enter_planning_mode_if_needed() -> None:
     """
-    Emit a decomposition_confirmation_required WebSocket event.
-
-    Called by split_task when depth limit is reached. The UI renders
-    a confirmation modal for the human operator. The agent receives a
-    PENDING_CONFIRMATION sentinel and waits for the operator response
-    to be injected into its context.
-
-    Args:
-        task_id (str): ID of the task being split.
-        depth (int): Current depth of the task in the decomposition tree.
-        proposed_subtasks (list[dict]): The subtask specs the Manager
-            proposed, shown in the confirmation modal.
-        confirmation_id (str): Unique ID for this confirmation request,
-            used to match the response back to the pending split.
+    Transition the active Manager task into PLANNING session mode
+    on first call to split_task or create_task.
     """
-    try:
-        from matrixmouse.comms import get_manager
-        m = get_manager()
-        if m:
-            m.emit("decomposition_confirmation_required", {
-                "task_id":           task_id,
-                "depth":             depth,
-                "proposed_subtasks": proposed_subtasks,
-                "confirmation_id":   confirmation_id,
-            })
-    except Exception as e:
-        logger.warning(
-            "Failed to emit decomposition_confirmation_required: %s", e
-        )
+    if not _active_task_id:
+        return
+    
+    from matrixmouse.repository.workspace_state_repository import (
+        SessionContext, SessionMode, PLANNING_TOOLS
+    )
+    
+    if _ws_state_repo is None:
+        return
+    existing = _ws_state_repo.get_session_context(_active_task_id)
+    if existing and existing.mode == SessionMode.PLANNING:
+        return  # already in PLANNING
+    _ws_state_repo.set_session_context(
+        _active_task_id,
+        SessionContext(
+            mode=SessionMode.PLANNING,
+            allowed_tools=set(PLANNING_TOOLS),
+            system_prompt_addendum=(
+                "\n\n--- PLANNING MODE ---\n"
+                "You are building a task plan. All tasks you create are "
+                "in PENDING state and not yet visible to the scheduler. "
+                "Continue planning — create tasks, wire dependencies, "
+                "set priorities — then call declare_complete when your "
+                "plan is fully specified. The plan will be committed "
+                "atomically when you declare complete.\n"
+                "--- END PLANNING MODE ---"
+            ),
+            turn_limit_override=_config.manager_planning_max_turns
+            if _config else 10,
+        ),
+    )

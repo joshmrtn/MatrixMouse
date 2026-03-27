@@ -204,6 +204,107 @@ def _verify_git(repo_root: Path) -> None:
         logger.info("Git repository confirmed at %s", repo_root)
 
 
+MIRROR_REMOTE = "mm-mirror"
+
+def _ensure_mirror(repo_root: Path, workspace_root: Path, repo_name: str) -> None:
+    """
+    Ensure the local bare mirror exists and is registered as a remote.
+
+    The mirror lives at /var/lib/matrixmouse-mirrors/<repo_name>.git.
+    If it doesn't exist, it is created as a bare clone of the repo.
+    If the remote 'mm-mirror' is not registered, it is added.
+
+    This is idempotent — safe to call on every setup_repo invocation.
+
+    Args:
+        repo_root:      Root directory of the repo.
+        workspace_root: Workspace root (used to build MatrixMousePaths).
+        repo_name:      Name of the repo (directory name).
+    """
+    import subprocess
+    from matrixmouse.config import MatrixMousePaths
+
+    ws_paths = MatrixMousePaths(workspace_root=workspace_root)
+    mirror_path = ws_paths.mirror_path(repo_name)
+
+    env = _git_env_for_init()
+
+    # Create bare mirror if it doesn't exist
+    if not mirror_path.exists():
+        mirror_path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "clone", "--bare", str(repo_root), str(mirror_path)],
+            capture_output=True, text=True, env=env,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "Failed to create mirror for %s at %s: %s",
+                repo_name, mirror_path, result.stderr.strip(),
+            )
+            return
+        logger.info("Created bare mirror at %s", mirror_path)
+    else:
+        logger.debug("Mirror already exists at %s", mirror_path)
+
+    # Register mm-mirror remote if not present
+    check = subprocess.run(
+        ["git", "remote", "get-url", MIRROR_REMOTE],
+        cwd=repo_root, capture_output=True, text=True, env=env,
+    )
+    if check.returncode != 0:
+        # Remote not registered — add it
+        add = subprocess.run(
+            ["git", "remote", "add", MIRROR_REMOTE, str(mirror_path)],
+            cwd=repo_root, capture_output=True, text=True, env=env,
+        )
+        if add.returncode != 0:
+            logger.error(
+                "Failed to add %s remote for %s: %s",
+                MIRROR_REMOTE, repo_name, add.stderr.strip(),
+            )
+            return
+        logger.info("Added %s remote pointing to %s", MIRROR_REMOTE, mirror_path)
+    else:
+        existing_url = check.stdout.strip()
+        if existing_url != str(mirror_path):
+            logger.warning(
+                "%s remote for %s points to %s, expected %s. "
+                "Not updating — manual intervention may be needed.",
+                MIRROR_REMOTE, repo_name, existing_url, mirror_path,
+            )
+        else:
+            logger.debug(
+                "%s remote already configured for %s", MIRROR_REMOTE, repo_name
+            )
+
+
+def _git_env_for_init() -> dict:
+    """
+    Build git environment for init-time operations.
+    Mirrors _git_env() from git_tools but without the import dependency.
+    """
+    import os
+    from pathlib import Path
+
+    env = os.environ.copy()
+    from matrixmouse import config as config_module
+    cfg = getattr(config_module, "_loaded_config", None)
+    if cfg:
+        secrets_dir = Path("/etc/matrixmouse/secrets")
+        key_path = secrets_dir / cfg.gh_ssh_key_file
+        if key_path.exists():
+            env["GIT_SSH_COMMAND"] = (
+                f"ssh -i {key_path} "
+                f"-o IdentitiesOnly=yes "
+                f"-o StrictHostKeyChecking=accept-new"
+            )
+        env["GIT_AUTHOR_NAME"]    = cfg.agent_git_name
+        env["GIT_AUTHOR_EMAIL"]   = cfg.agent_git_email
+        env["GIT_COMMITTER_NAME"] = cfg.agent_git_name
+        env["GIT_COMMITTER_EMAIL"] = cfg.agent_git_email
+    return env
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -266,6 +367,7 @@ def setup_repo(
     _ensure_docs_structure(paths, config)
 
     _verify_git(repo_root)
+    _ensure_mirror(repo_root, workspace_root, repo_name)
 
     return paths
 

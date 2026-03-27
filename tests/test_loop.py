@@ -572,7 +572,7 @@ class TestTurnLimit:
         response = make_batch_response(content="thinking")
         with patch("matrixmouse.loop.ollama.chat", return_value=response):
             result = loop.run()
-        assert result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED
+        assert result.exit_reason == LoopExitReason.DECISION
         assert result.turns_taken == 2
 
     def test_falls_back_to_config_when_task_limit_is_zero(self):
@@ -583,7 +583,7 @@ class TestTurnLimit:
         response = make_batch_response(content="thinking")
         with patch("matrixmouse.loop.ollama.chat", return_value=response):
             result = loop.run()
-        assert result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED
+        assert result.exit_reason == LoopExitReason.DECISION
         assert result.turns_taken == 2
 
     def test_turn_limit_reached_exit_reason(self):
@@ -591,7 +591,7 @@ class TestTurnLimit:
         response = make_batch_response(content="thinking")
         with patch("matrixmouse.loop.ollama.chat", return_value=response):
             result = loop.run()
-        assert result.exit_reason == LoopExitReason.TURN_LIMIT_REACHED
+        assert result.exit_reason == LoopExitReason.DECISION
 
     def test_turn_limit_result_contains_messages(self):
         loop = make_loop_with_limit(task_turn_limit=1)

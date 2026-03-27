@@ -89,7 +89,7 @@ class TestCoderAllowedTools:
             assert tool in CoderAgent().allowed_tools
 
     def test_has_git_tools(self):
-        for tool in ("get_git_diff", "get_git_log", "commit_progress"):
+        for tool in ("get_git_diff", "get_git_log", "git_commit"):
             assert tool in CoderAgent().allowed_tools
 
     def test_has_test_tools(self):

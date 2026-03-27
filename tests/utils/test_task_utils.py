@@ -17,7 +17,7 @@ Coverage:
 """
 
 import pytest
-from matrixmouse.utils.task_utils import detect_cycles
+from matrixmouse.utils.task_utils import detect_cycles, validate_branch_slug
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +249,98 @@ class TestDetectCycles:
         # C is isolated — adding C as blocker of A is genuinely safe
         # even with the corrupt A<->B cycle present
         assert detect_cycles("C", "A", get_blocked_by) is False
+
+
+class TestValidateBranchSlug:
+    def test_valid_simple_slug(self):
+        assert validate_branch_slug("refactor-foobar", "mm") == \
+               "mm/refactor-foobar"
+
+    def test_valid_slug_with_path(self):
+        assert validate_branch_slug("refactor/foobar", "mm") == \
+               "mm/refactor/foobar"
+
+    def test_valid_slug_with_deep_path(self):
+        assert validate_branch_slug("feature/auth/add-oauth", "mm") == \
+               "mm/feature/auth/add-oauth"
+
+    def test_valid_single_word(self):
+        assert validate_branch_slug("fix", "mm") == "mm/fix"
+
+    def test_valid_numbers_in_slug(self):
+        assert validate_branch_slug("fix-issue-42", "mm") == \
+               "mm/fix-issue-42"
+
+    def test_valid_custom_prefix(self):
+        assert validate_branch_slug("refactor/foo", "bot") == \
+               "bot/refactor/foo"
+
+    def test_rejects_empty_slug(self):
+        with pytest.raises(ValueError, match="empty"):
+            validate_branch_slug("", "mm")
+
+    def test_rejects_slug_too_long(self):
+        long_slug = "a" * 51
+        with pytest.raises(ValueError, match="50"):
+            validate_branch_slug(long_slug, "mm")
+
+    def test_slug_at_max_length_accepted(self):
+        slug = "a" * 50
+        assert validate_branch_slug(slug, "mm") == f"mm/{slug}"
+
+    def test_rejects_uppercase(self):
+        with pytest.raises(ValueError, match="invalid characters"):
+            validate_branch_slug("Refactor-Foobar", "mm")
+
+    def test_rejects_spaces(self):
+        with pytest.raises(ValueError, match="invalid characters"):
+            validate_branch_slug("refactor foobar", "mm")
+
+    def test_rejects_special_chars(self):
+        with pytest.raises(ValueError, match="invalid characters"):
+            validate_branch_slug("refactor@foobar", "mm")
+
+    def test_rejects_leading_slash(self):
+        with pytest.raises(ValueError, match="slash"):
+            validate_branch_slug("/refactor/foobar", "mm")
+
+    def test_rejects_trailing_slash(self):
+        with pytest.raises(ValueError, match="slash"):
+            validate_branch_slug("refactor/foobar/", "mm")
+
+    def test_rejects_leading_hyphen(self):
+        with pytest.raises(ValueError, match="hyphen"):
+            validate_branch_slug("-refactor-foobar", "mm")
+
+    def test_rejects_trailing_hyphen(self):
+        with pytest.raises(ValueError, match="hyphen"):
+            validate_branch_slug("refactor-foobar-", "mm")
+
+    def test_rejects_consecutive_slashes(self):
+        with pytest.raises(ValueError, match="consecutive slashes"):
+            validate_branch_slug("refactor//foobar", "mm")
+
+    def test_rejects_consecutive_hyphens(self):
+        with pytest.raises(ValueError, match="consecutive hyphens"):
+            validate_branch_slug("refactor--foobar", "mm")
+
+    def test_rejects_segment_starting_with_hyphen(self):
+        with pytest.raises(ValueError, match="hyphen"):
+            validate_branch_slug("refactor/-foobar", "mm")
+
+    def test_rejects_segment_ending_with_hyphen(self):
+        with pytest.raises(ValueError, match="hyphen"):
+            validate_branch_slug("refactor/foobar-", "mm")
+
+    def test_full_branch_name_not_subject_to_length_limit(self):
+        # The 50-char limit applies to the slug only, not the full branch name
+        # including prefix. A 50-char slug with a 2-char prefix gives 53 chars.
+        slug = "a" * 50
+        full = validate_branch_slug(slug, "mm")
+        assert len(full) == 53  # "mm/" + 50 chars
+
+    def test_single_char_segment_valid(self):
+        assert validate_branch_slug("a/b/c", "mm") == "mm/a/b/c"
+
+    def test_digits_only_segment_valid(self):
+        assert validate_branch_slug("fix/42", "mm") == "mm/fix/42"

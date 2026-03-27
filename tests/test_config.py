@@ -10,7 +10,7 @@ and ensures defaults match documented behaviour.
 New keys are added here whenever a config field is introduced.
 """
 
-from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, load_config
 from pathlib import Path
 
 
@@ -121,6 +121,51 @@ class TestPriorityConfig:
         cfg = make_config()
         _ = cfg.priority_urgency_weight
 
+# ---------------------------------------------------------------------------
+# Branch Management
+# ---------------------------------------------------------------------------
+
+class TestBranchManagement:
+    def test_agent_branch_prefix_default(self):
+        assert make_config().agent_branch_prefix == "mm"
+
+    def test_protected_branches_default(self):
+        config = make_config()
+        assert "main" in config.protected_branches
+        assert "master" in config.protected_branches
+
+    def test_merge_conflict_max_turns_default(self):
+        assert make_config().merge_conflict_max_turns == 5
+
+    def test_merge_resolution_model_default_empty(self):
+        assert make_config().merge_resolution_model == ""
+
+    def test_push_wip_to_remote_default_false(self):
+        assert make_config().push_wip_to_remote is False
+
+    def test_branch_protection_cache_ttl_default(self):
+        assert make_config().branch_protection_cache_ttl_minutes == 60
+
+    def test_pr_poll_interval_default(self):
+        assert make_config().pr_poll_interval_minutes == 10
+
+    def test_manager_planning_max_turns_default(self):
+        assert make_config().manager_planning_max_turns == 10
+
+    def test_agent_branch_prefix_configurable(self, tmp_path):
+        config_file = tmp_path / ".matrixmouse" / "config.toml"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text('agent_branch_prefix = "bot"\n')
+        config = load_config(repo_root=None, workspace_root=tmp_path)
+        assert config.agent_branch_prefix == "bot"
+
+    def test_protected_branches_configurable(self, tmp_path):
+        config_file = tmp_path / ".matrixmouse" / "config.toml"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text('protected_branches = ["main", "production"]\n')
+        config = load_config(repo_root=None, workspace_root=tmp_path)
+        assert "production" in config.protected_branches
+        assert config.protected_branches == ["main", "production"]
 
 # ---------------------------------------------------------------------------
 # MatrixMousePaths

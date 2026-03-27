@@ -212,11 +212,6 @@ class TurnLimitResponseRequest(BaseModel):
     note: str = ""       # required for respec, optional for extend/cancel
     extend_by: int = 0   # only used when action="extend", 0 means use config default
 
-class DecompositionConfirmRequest(BaseModel):
-    confirmation_id: str
-    confirmed: bool
-    reason: str = ""     # required when confirmed=False
-
 class WorkspaceInterjectionRequest(BaseModel):
     message: str
 
@@ -232,7 +227,13 @@ class TaskAnswerRequest(BaseModel):
 class CriticReviewResponseRequest(BaseModel):
     action: str          # "approve_task" | "extend_critic" | "block_task"
     feedback: str = ""   # optional feedback appended to reviewed task context
-
+ 
+class DecisionRequest(BaseModel):
+    decision_type: str   # maps to the emitted event name, e.g. "pr_approval_required"
+    choice: str          # one of the offered choice values, e.g. "approve"
+    note: str = ""       # optional free-form human text
+    metadata: dict = {}  # decision-type-specific structured data
+ 
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -581,61 +582,60 @@ async def interject(body: InterjectionRequest):
     logger.info("Interjection received via API (%s): %s", scope, msg[:80])
     return {"ok": True}
 
-
-@app.post("/tasks/{task_id}/turn-limit-response")
-async def turn_limit_response(task_id: str, body: TurnLimitResponseRequest):
+ 
+async def _handle_turn_limit_response(
+    task_id: str,
+    action: str,
+    note: str = "",
+    extend_by: int = 0,
+) -> dict:
     """
-    Respond to a turn limit notification for a blocked task.
-
-    Called by the UI confirmation modal when a task reaches its turn limit.
+    Handle a turn limit decision for a blocked task.
+ 
     Actions:
         extend  — grant additional turns. extend_by defaults to agent_max_turns.
         respec  — append the note as a user message and reset the turn count.
-                  The note field is required for respec.
+                  note is required for respec.
         cancel  — mark the task CANCELLED.
-
-    The task must be in BLOCKED_BY_HUMAN status with a turn-limit reason.
     """
     from matrixmouse.task import TaskStatus
-
+ 
     queue = _require_queue()
     task = queue.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
-
+ 
     if task.status != TaskStatus.BLOCKED_BY_HUMAN:
         raise HTTPException(
             status_code=400,
             detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN "
                    f"(current status: {task.status.value})."
         )
-
-    action = body.action.lower()
-
+ 
+    action = action.lower()
+ 
     if action == "extend":
         default_turns = _config.agent_max_turns if _config else 50
-        extension = body.extend_by if body.extend_by > 0 else default_turns
+        extension = extend_by if extend_by > 0 else default_turns
         task.turn_limit = task.turn_limit + extension
         task.status = TaskStatus.READY
-        if body.note:
+        if note:
             task.context_messages.append({
                 "role": "user",
-                "content": f"[Operator note on turn limit extension]: {body.note}",
+                "content": f"[Operator note on turn limit extension]: {note}",
             })
         queue.update(task)
         notify_task_available()
-        logger.info(
-            "Turn limit extended by %d for task [%s].", extension, task_id
-        )
+        logger.info("Turn limit extended by %d for task [%s].", extension, task_id)
         return {
             "ok": True,
             "action": "extend",
             "new_turn_limit": task.turn_limit,
             "task_id": task_id,
         }
-
+ 
     elif action == "respec":
-        if not body.note.strip():
+        if not note.strip():
             raise HTTPException(
                 status_code=400,
                 detail="note is required for respec action."
@@ -644,107 +644,31 @@ async def turn_limit_response(task_id: str, body: TurnLimitResponseRequest):
             "role": "user",
             "content": (
                 f"[Operator respec — please re-read and adjust your approach]:\n"
-                f"{body.note.strip()}"
+                f"{note.strip()}"
             ),
         })
-        # Reset turn count by clearing turn_limit — orchestrator will use
-        # config default again. Persisted turns_taken is in LoopResult only,
-        # not on the task, so returning to READY is sufficient.
         task.turn_limit = 0
         task.status = TaskStatus.READY
         queue.update(task)
         notify_task_available()
         logger.info("Task [%s] respec'd and returned to READY.", task_id)
-        return {
-            "ok": True,
-            "action": "respec",
-            "task_id": task_id,
-        }
-
+        return {"ok": True, "action": "respec", "task_id": task_id}
+ 
     elif action == "cancel":
         task.status = TaskStatus.CANCELLED
         task.completed_at = datetime.now(timezone.utc).isoformat()
-        if body.note:
-            task.notes = (task.notes + f"\n[Cancelled]: {body.note}").strip()
+        if note:
+            task.notes = (task.notes + f"\n[Cancelled]: {note}").strip()
         queue.update(task)
         logger.info("Task [%s] cancelled via turn-limit response.", task_id)
-        return {
-            "ok": True,
-            "action": "cancel",
-            "task_id": task_id,
-        }
-
+        return {"ok": True, "action": "cancel", "task_id": task_id}
+ 
     else:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid action '{action}'. Valid: extend, respec, cancel."
         )
-
-
-@app.post("/tasks/{task_id}/decomposition-confirm")
-async def decomposition_confirm(task_id: str, body: DecompositionConfirmRequest):
-    """
-    Respond to a decomposition depth limit confirmation request.
-
-    Called by the UI confirmation modal when the Manager tries to split
-    a task that has reached decomposition_depth_limit.
-
-    If confirmed=True, grants one additional depth confirmation on the
-    task's branch (decomposition_confirmed_depth += 1) and injects an
-    approval message into the Manager's context so it can proceed.
-
-    If confirmed=False, injects a denial message so the Manager knows
-    not to split further on this branch.
-
-    The confirmation_id must match the one emitted in the
-    decomposition_confirmation_required event.
-    """
-    queue = _require_queue()
-    task = queue.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
-
-    if body.confirmed:
-        task.decomposition_confirmed_depth += 1
-        queue.update(task)
-
-        # Find the active Manager task and inject the confirmation
-        _inject_decomposition_response(
-            queue=queue,
-            confirmation_id=body.confirmation_id,
-            approved=True,
-            reason=body.reason,
-        )
-        logger.info(
-            "Decomposition confirmed for task [%s] "
-            "(confirmed_depth now %d).",
-            task_id, task.decomposition_confirmed_depth,
-        )
-        return {
-            "ok": True,
-            "confirmed": True,
-            "decomposition_confirmed_depth": task.decomposition_confirmed_depth,
-        }
-    else:
-        if not body.reason.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="reason is required when confirmed=False."
-            )
-        _inject_decomposition_response(
-            queue=queue,
-            confirmation_id=body.confirmation_id,
-            approved=False,
-            reason=body.reason,
-        )
-        logger.info(
-            "Decomposition denied for task [%s]. Reason: %s",
-            task_id, body.reason,
-        )
-        return {
-            "ok": True,
-            "confirmed": False,
-        }
+ 
 
 # ---------------------------------------------------------------------------
 # Interjection routing
@@ -943,38 +867,506 @@ async def answer_task(task_id: str, body: TaskAnswerRequest):
         "unblocked": was_blocked,
     }
 
-
-@app.post("/tasks/{task_id}/critic-review-response")
-async def critic_review_response(task_id: str, body: CriticReviewResponseRequest):
+ 
+@app.post("/tasks/{task_id}/decision")
+async def task_decision(task_id: str, body: DecisionRequest):
     """
-    Respond to a Critic turn-limit escalation.
+    Submit a human decision in response to a structured choice event.
+ 
+    This is the unified endpoint for all multi-choice decision events
+    emitted by the orchestrator.  The frontend or CLI submits the human's
+    choice here; the handler dispatches on decision_type.
+ 
+    decision_type maps 1:1 to the event name emitted by the orchestrator.
+    choice must be one of the values from the choices list in the emitted event.
+    note is optional free-form text shown to the agent or logged.
+ 
+    Supported decision_types:
+ 
+        pr_approval_required
+            choices: approve | reject
+            approve — push branch to origin and open a PR
+            reject  — keep task BLOCKED_BY_HUMAN, no PR created
+ 
+        pr_rejection
+            choices: rework | manual
+            rework  — unblock task; agent reworks with PR feedback in context
+            manual  — keep task BLOCKED_BY_HUMAN for manual resolution
+ 
+        critic_turn_limit_reached
+            choices: approve_task | extend_critic | block_task
+            (delegates to _handle_critic_review_response)
+ 
+        turn_limit_reached
+            choices: extend | respec | cancel
+            (delegates to _handle_turn_limit_response)
+ 
+        merge_conflict_resolution_turn_limit_reached
+            choices: extend | abort
+            extend — give Merge Agent more turns
+            abort  — cancel the merge, task stays complete on its own branch
+ 
+        planning_turn_limit_reached
+            choices: extend | commit | cancel
+            extend — give Manager more planning turns
+            commit — accept partial plan as-is
+            cancel — cancel the Manager planning task
+    """
+    from matrixmouse.task import TaskStatus, PRState
+ 
+    queue = _require_queue()
+    task = queue.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+ 
+    dt = body.decision_type
+    choice = body.choice.lower()
+    note = body.note.strip()
+ 
+    # ------------------------------------------------------------------
+    # PR approval
+    # ------------------------------------------------------------------
+    if dt == "pr_approval_required":
+        if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN.",
+            )
+ 
+        if choice == "approve":
+            # Determine parent branch and repo root from task metadata
+            if not task.repo:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Task '{task_id}' has no repo configured.",
+                )
+            if not task.branch:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Task '{task_id}' has no branch assigned.",
+                )
+ 
+            # Look up the parent branch — same logic as orchestrator
+            parent_branch: str | None = None
+            if task.parent_task_id:
+                parent_task = queue.get(task.parent_task_id)
+                if parent_task and parent_task.branch:
+                    parent_branch = parent_task.branch
+            if not parent_branch and _config:
+                parent_branch = _config.default_merge_target or None
+            if not parent_branch:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot determine PR base branch — no parent task branch "
+                           "and default_merge_target is not configured.",
+                )
+ 
+            repo_root = (
+                _workspace_root / task.repo[0] if _workspace_root else None
+            )
+            if repo_root is None or not repo_root.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repo root for '{task.repo[0]}' not found.",
+                )
+ 
+            # Delegate push + PR creation to orchestrator helper via import
+            # The orchestrator is not directly accessible here, so we call
+            # the git and provider logic directly.
+            from matrixmouse.tools.git_tools import push_to_remote
+            from matrixmouse.git.git_remote_provider import GitRemoteError
+ 
+            # Resolve provider
+            provider = None
+            owner_repo = ""
+            if _ws_state_repo:
+                try:
+                    metadata = _ws_state_repo.get_repo_metadata(task.repo[0])
+                    if metadata and metadata.get("provider") == "github":
+                        import os
+                        from matrixmouse.git.github_provider import GitHubProvider
+                        token = os.environ.get("GITHUB_TOKEN", "")
+                        if token:
+                            provider = GitHubProvider(token=token)
+                            owner_repo = _parse_owner_repo_api(
+                                metadata.get("remote_url", "")
+                            )
+                except Exception as e:
+                    logger.warning("Failed to resolve provider for PR: %s", e)
+ 
+            if not provider or not owner_repo:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No git provider configured for this repo. "
+                           "Set provider and remote_url in repo_metadata.",
+                )
+ 
+            # Push branch to origin
+            ok, err = push_to_remote(task.branch, "origin", repo_root)
+            if not ok:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"git push failed: {err}",
+                )
+ 
+            # Create PR
+            try:
+                pr_url = provider.create_pull_request(
+                    repo=owner_repo,
+                    head=task.branch,
+                    base=parent_branch,
+                    title=task.title,
+                    body=task.description[:2000] if task.description else "",
+                )
+            except GitRemoteError as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"PR creation failed: {e}",
+                )
+ 
+            # Store PR state
+            from datetime import datetime, timedelta, timezone
+            next_poll = (
+                datetime.now(timezone.utc)
+                + timedelta(
+                    minutes=_config.pr_poll_interval_minutes if _config else 10
+                )
+            ).isoformat()
+ 
+            task.pr_url = pr_url
+            task.pr_state = PRState.OPEN
+            task.pr_poll_next_at = next_poll
+            if note:
+                task.context_messages.append({
+                    "role": "user",
+                    "content": f"[Operator note on PR submission]: {note}",
+                })
+            queue.update(task)
+            # Task stays BLOCKED_BY_HUMAN — the poll loop unblocks it on merge
+ 
+            logger.info("PR created for task [%s] via decision endpoint: %s", task_id, pr_url)
+            return {
+                "ok": True,
+                "action": "approve",
+                "pr_url": pr_url,
+                "task_id": task_id,
+            }
+ 
+        elif choice == "reject":
+            # Keep blocked, optionally append note
+            if note:
+                task.context_messages.append({
+                    "role": "user",
+                    "content": f"[Operator note — PR rejected manually]: {note}",
+                })
+                queue.update(task)
+            logger.info(
+                "PR approval rejected by operator for task [%s].", task_id
+            )
+            return {
+                "ok": True,
+                "action": "reject",
+                "task_id": task_id,
+            }
+ 
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid choice '{choice}' for pr_approval_required. "
+                       f"Valid: approve, reject.",
+            )
+ 
+    # ------------------------------------------------------------------
+    # PR rejection (rework or manual)
+    # ------------------------------------------------------------------
+    elif dt == "pr_rejection":
+        if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN.",
+            )
+ 
+        if choice == "rework":
+            if note:
+                task.context_messages.append({
+                    "role": "user",
+                    "content": f"[Operator note on rework]: {note}",
+                })
+            # Clear PR fields so a new PR can be created after rework
+            task.pr_state = PRState.NONE
+            task.pr_url = ""
+            task.pr_poll_next_at = ""
+            task.status = TaskStatus.READY
+            queue.update(task)
+            notify_task_available()
+            logger.info("Task [%s] unblocked for PR rework.", task_id)
+            return {
+                "ok": True,
+                "action": "rework",
+                "task_id": task_id,
+            }
+ 
+        elif choice == "manual":
+            if note:
+                task.notes = (task.notes + f"\n[Manual resolution note]: {note}").strip()
+                queue.update(task)
+            logger.info(
+                "Task [%s] kept blocked for manual PR resolution.", task_id
+            )
+            return {
+                "ok": True,
+                "action": "manual",
+                "task_id": task_id,
+            }
+ 
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid choice '{choice}' for pr_rejection. "
+                       f"Valid: rework, manual.",
+            )
+ 
+    # ------------------------------------------------------------------
+    # Critic turn limit — delegate to existing helper
+    # ------------------------------------------------------------------
+    elif dt == "critic_turn_limit_reached":
+        return await _handle_critic_review_response(task_id, choice, note)
+ 
+    # ------------------------------------------------------------------
+    # Generic turn limit
+    # ------------------------------------------------------------------
+    elif dt == "turn_limit_reached":
+        extend_by = int(body.metadata.get("extend_by", 0))
+        return await _handle_turn_limit_response(task_id, choice, note, extend_by)
+ 
+    # ------------------------------------------------------------------
+    # Merge conflict turn limit
+    # ------------------------------------------------------------------
+    elif dt == "merge_conflict_resolution_turn_limit_reached":
+        if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN.",
+            )
+ 
+        if choice == "extend":
+            default_turns = _config.merge_conflict_max_turns if _config else 5
+            task.turn_limit = task.turn_limit + default_turns
+            task.status = TaskStatus.READY
+            if note:
+                task.context_messages.append({
+                    "role": "user",
+                    "content": f"[Operator note on merge extension]: {note}",
+                })
+            queue.update(task)
+            notify_task_available()
+            return {
+                "ok": True,
+                "action": "extend",
+                "new_turn_limit": task.turn_limit,
+                "task_id": task_id,
+            }
+ 
+        elif choice == "abort":
+            if note:
+                task.notes = (task.notes + f"\n[Merge aborted]: {note}").strip()
+            queue.mark_cancelled(task_id)
+            logger.info("Merge task [%s] aborted by operator.", task_id)
+            return {"ok": True, "action": "abort", "task_id": task_id}
+ 
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid choice '{choice}' for merge_conflict_resolution_turn_limit_reached. "
+                       f"Valid: extend, abort.",
+            )
+ 
+    # ------------------------------------------------------------------
+    # Planning turn limit
+    # ------------------------------------------------------------------
+    elif dt == "planning_turn_limit_reached":
+        if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN.",
+            )
+ 
+        if choice == "extend":
+            default_turns = _config.manager_planning_max_turns if _config else 10
+            task.turn_limit = task.turn_limit + default_turns
+            task.status = TaskStatus.READY
+            if note:
+                task.context_messages.append({
+                    "role": "user",
+                    "content": f"[Operator note on planning extension]: {note}",
+                })
+            queue.update(task)
+            notify_task_available()
+            return {
+                "ok": True,
+                "action": "extend",
+                "new_turn_limit": task.turn_limit,
+                "task_id": task_id,
+            }
+ 
+        elif choice == "commit":
+            # Commit partial plan as-is and mark task complete
+            if _ws_state_repo:
+                try:
+                    _ws_state_repo.clear_session_context(task_id)
+                except Exception:
+                    pass
+            queue.mark_complete(task_id)
+            notify_task_available()
+            logger.info("Planning task [%s] committed as-is by operator.", task_id)
+            return {"ok": True, "action": "commit", "task_id": task_id}
+ 
+        elif choice == "cancel":
+            if note:
+                task.notes = (task.notes + f"\n[Planning cancelled]: {note}").strip()
+                queue.update(task)
+            queue.mark_cancelled(task_id)
+            logger.info("Planning task [%s] cancelled by operator.", task_id)
+            return {"ok": True, "action": "cancel", "task_id": task_id}
+ 
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid choice '{choice}' for planning_turn_limit_reached. "
+                       f"Valid: extend, commit, cancel.",
+            )
+        
+    # ------------------------------------------------------------------
+    # Decomposition confirmation
+    # ------------------------------------------------------------------
+    elif dt == "decomposition_confirmation_required":
+        if task.status != TaskStatus.BLOCKED_BY_HUMAN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task '{task_id}' is not BLOCKED_BY_HUMAN.",
+            )
 
-    Called by the UI confirmation modal when a Critic task hits
-    critic_max_turns without reaching a decision.
+        if choice == "allow":
+            # Increment confirmed depth so the replayed split_task call
+            # passes the depth check on resume.
+            task.decomposition_confirmed_depth += 1
+            if note:
+                task.context_messages.append({
+                    "role": "user",
+                    "content": f"[Operator note on decomposition approval]: {note}",
+                })
+            # Return to READY — pending_tool_calls replay handles the rest.
+            task.status = TaskStatus.READY
+            queue.update(task)
+            notify_task_available()
+            logger.info(
+                "Decomposition approved for task [%s] "
+                "(confirmed_depth now %d).",
+                task_id, task.decomposition_confirmed_depth,
+            )
+            return {
+                "ok": True,
+                "action": "allow",
+                "decomposition_confirmed_depth": task.decomposition_confirmed_depth,
+                "task_id": task_id,
+            }
 
+        elif choice == "deny":
+            if not note:
+                raise HTTPException(
+                    status_code=400,
+                    detail="note is required when denying decomposition — "
+                           "provide a reason for the Manager.",
+                )
+            # Clear pending_tool_calls so the split_task replay doesn't run.
+            # Inject a denial message so the agent knows to work within
+            # the current depth.
+            task.pending_tool_calls = []
+            task.context_messages.append({
+                "role": "user",
+                "content": (
+                    "[Decomposition denied by operator]\n"
+                    "You may not decompose this task further. "
+                    "Complete the work within the current task depth, "
+                    "adjusting scope or descriptions as needed."
+                    + (f"\nOperator note: {note}" if note else "")
+                ),
+            })
+            task.status = TaskStatus.READY
+            queue.update(task)
+            notify_task_available()
+            logger.info(
+                "Decomposition denied for task [%s].", task_id
+            )
+            return {
+                "ok": True,
+                "action": "deny",
+                "task_id": task_id,
+            }
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid choice '{choice}' for "
+                       f"decomposition_confirmation_required. Valid: allow, deny.",
+            )
+        
+    # ------------------------------------------------------------------
+    # Unknown decision type
+    # ------------------------------------------------------------------
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown decision_type '{dt}'.",
+        )
+ 
+ 
+def _parse_owner_repo_api(remote_url: str) -> str:
+    """
+    Extract owner/repo from a remote URL.  Mirrors the orchestrator helper
+    but lives in api.py to avoid a circular import.
+ 
+    Args:
+        remote_url: git remote URL string.
+ 
+    Returns:
+        "owner/repo" string, or "" if unparseable.
+    """
+    if not remote_url:
+        return ""
+    url = remote_url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    if "@" in url and ":" in url:
+        return url.split(":", 1)[-1]
+    parts = url.split("/")
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return ""
+
+ 
+async def _handle_critic_review_response(
+    task_id: str,
+    action: str,
+    feedback: str = "",
+) -> dict:
+    """
+    Handle a Critic turn-limit decision.
+ 
     task_id is the Critic task ID (not the reviewed task).
-
+ 
     Actions:
-        approve_task   — Mark the reviewed task COMPLETE directly, bypassing
-                         further Critic review. The Critic task is cancelled.
-                         Optional feedback is appended to the reviewed task.
+        approve_task   — Mark the reviewed task COMPLETE directly.
         extend_critic  — Give the Critic another critic_max_turns turns.
-                         The Critic task returns to READY. Optional feedback
-                         is appended to the Critic task's context.
-        block_task     — Cancel the Critic task and move the reviewed task
-                         to BLOCKED_BY_HUMAN for manual resolution. Optional
-                         feedback is appended to the reviewed task's notes.
-
-    The Critic task must be in BLOCKED_BY_HUMAN status.
+        block_task     — Cancel the Critic and move reviewed task to BLOCKED_BY_HUMAN.
     """
     from matrixmouse.task import TaskStatus
-    from datetime import datetime, timezone
-
+ 
     queue = _require_queue()
     critic_task = queue.get(task_id)
     if critic_task is None:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
-
+ 
     if critic_task.status != TaskStatus.BLOCKED_BY_HUMAN:
         raise HTTPException(
             status_code=400,
@@ -983,53 +1375,44 @@ async def critic_review_response(task_id: str, body: CriticReviewResponseRequest
                 f"(current status: {critic_task.status.value})."
             )
         )
-
+ 
     if not critic_task.reviews_task_id:
         raise HTTPException(
             status_code=400,
             detail=f"Task '{task_id}' has no reviews_task_id — not a Critic task."
         )
-
+ 
     reviewed_task = queue.get(critic_task.reviews_task_id)
     if reviewed_task is None:
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"Reviewed task '{critic_task.reviews_task_id}' not found."
-            )
+            detail=f"Reviewed task '{critic_task.reviews_task_id}' not found."
         )
-
-    action = body.action.lower()
-    feedback = body.feedback.strip()
-
+ 
+    action = action.lower()
+    feedback = feedback.strip()
+ 
     if action == "approve_task":
-        # Append feedback to reviewed task if provided
         if feedback:
             reviewed_task.context_messages.append({
                 "role": "user",
-                "content": (
-                    f"[Human operator approval note]: {feedback}"
-                ),
+                "content": f"[Human operator approval note]: {feedback}",
             })
-
-        # Remove Critic task from reviewed task's blocked_by
         queue.remove_dependency(task_id, reviewed_task.id)
         queue.mark_complete(reviewed_task.id)
         queue.mark_cancelled(task_id)
-
         notify_task_available()
         logger.info(
             "Critic [%s] — operator approved reviewed task [%s] directly.",
             task_id, reviewed_task.id,
         )
         return {
-            "ok":     True,
+            "ok": True,
             "action": "approve_task",
             "reviewed_task_id": reviewed_task.id,
         }
-
+ 
     elif action == "extend_critic":
-        # Reset the Critic's turn limit and return to READY
         critic_task.turn_limit = (
             critic_task.turn_limit
             + (_config.critic_max_turns if _config else 5)
@@ -1038,9 +1421,7 @@ async def critic_review_response(task_id: str, body: CriticReviewResponseRequest
         if feedback:
             critic_task.context_messages.append({
                 "role": "user",
-                "content": (
-                    f"[Human operator note on Critic review extension]: {feedback}"
-                ),
+                "content": f"[Human operator note on Critic review extension]: {feedback}",
             })
         queue.update(critic_task)
         notify_task_available()
@@ -1049,17 +1430,15 @@ async def critic_review_response(task_id: str, body: CriticReviewResponseRequest
             task_id, critic_task.turn_limit,
         )
         return {
-            "ok":            True,
-            "action":        "extend_critic",
+            "ok": True,
+            "action": "extend_critic",
             "new_turn_limit": critic_task.turn_limit,
         }
-
+ 
     elif action == "block_task":
         queue.mark_cancelled(task_id)
         queue.remove_dependency(task_id, reviewed_task.id)
-
         if feedback:
-            # Re-fetch after remove_dependency in case status changed
             refreshed = queue.get(reviewed_task.id)
             if refreshed is None:
                 raise HTTPException(
@@ -1070,28 +1449,24 @@ async def critic_review_response(task_id: str, body: CriticReviewResponseRequest
                 refreshed.notes + f"\n[Critic review blocked]: {feedback}"
             ).strip()
             queue.update(refreshed)
-
         queue.mark_blocked_by_human(reviewed_task.id)
-
         logger.info(
             "Critic [%s] — operator blocked reviewed task [%s] for manual review.",
             task_id, reviewed_task.id,
         )
         return {
-            "ok":               True,
-            "action":           "block_task",
+            "ok": True,
+            "action": "block_task",
             "reviewed_task_id": reviewed_task.id,
         }
-
+ 
     else:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Invalid action '{action}'. "
-                f"Valid: approve_task, extend_critic, block_task."
-            )
+            detail=f"Invalid action '{action}'. Valid: approve_task, extend_critic, block_task."
         )
-
+ 
+ 
 @app.post("/stop")
 async def soft_stop():
     """

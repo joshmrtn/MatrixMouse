@@ -47,17 +47,30 @@ from matrixmouse.repository.sqlite_workspace_state_repository import (
 from matrixmouse.repository.workspace_state_repository import (
     WorkspaceStateRepository,
 )
+# Remove the local class definition entirely, replace with:
+from matrixmouse.repository.memory_workspace_state_repository import (
+    InMemoryWorkspaceStateRepository,
+)
 
 
-@pytest.fixture
-def ws_repo(tmp_path) -> WorkspaceStateRepository:
+@pytest.fixture(params=["sqlite", "memory"])
+def ws_repo(request, tmp_path):
+    if request.param == "sqlite":
+        db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
+        db_path.parent.mkdir(parents=True)
+        return SQLiteWorkspaceStateRepository(db_path)
+    else:
+        return InMemoryWorkspaceStateRepository()
+
+@pytest.fixture(params=["sqlite"])
+def ws_repo_with_tasks(request, tmp_path):
+    """
+    Workspace state repo alongside a task repo sharing the same DB.
+    SQLite-only — the shared database is required for cross-repo FK constraints
+    and stale lock detection that checks task status via JOIN.
+    """
     db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
-    return SQLiteWorkspaceStateRepository(db_path)
-
-@pytest.fixture
-def ws_repo_with_tasks(tmp_path):
-    """Workspace state repo alongside a task repo sharing the same DB."""
-    db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
+    db_path.parent.mkdir(parents=True)
     task_repo = SQLiteTaskRepository(db_path)
     ws_repo = SQLiteWorkspaceStateRepository(db_path)
     return ws_repo, task_repo
@@ -212,3 +225,238 @@ class TestStaleClarificationRegistry:
         ws_repo.clear_stale_clarification_task("b1")
         assert ws_repo.get_stale_clarification_task("b1") is None
         assert ws_repo.get_stale_clarification_task("b2") == "m2"
+
+
+# ---------------------------------------------------------------------------
+# Session contexts
+# ---------------------------------------------------------------------------
+
+class TestSessionContexts:
+    def test_get_returns_none_when_absent(self, ws_repo):
+        assert ws_repo.get_session_context("nonexistent") is None
+
+    def test_set_and_get_roundtrip(self, ws_repo):
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode
+        )
+        ctx = SessionContext(
+            mode=SessionMode.BRANCH_SETUP,
+            allowed_tools={"get_task_info", "set_branch"},
+            system_prompt_addendum="You must name the branch first.",
+            turn_limit_override=5,
+        )
+        ws_repo.set_session_context("task123", ctx)
+        retrieved = ws_repo.get_session_context("task123")
+        assert retrieved is not None
+        assert retrieved.mode == SessionMode.BRANCH_SETUP
+        assert retrieved.allowed_tools == {"get_task_info", "set_branch"}
+        assert retrieved.system_prompt_addendum == "You must name the branch first."
+        assert retrieved.turn_limit_override == 5
+
+    def test_set_overwrites_existing(self, ws_repo):
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode
+        )
+        ctx1 = SessionContext(mode=SessionMode.BRANCH_SETUP, allowed_tools={"a"})
+        ctx2 = SessionContext(mode=SessionMode.PLANNING, allowed_tools={"b"})
+        ws_repo.set_session_context("task123", ctx1)
+        ws_repo.set_session_context("task123", ctx2)
+        retrieved = ws_repo.get_session_context("task123")
+        assert retrieved is not None
+        assert retrieved.mode == SessionMode.PLANNING
+
+    def test_clear_removes_context(self, ws_repo):
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode
+        )
+        ctx = SessionContext(mode=SessionMode.PLANNING, allowed_tools=set())
+        ws_repo.set_session_context("task123", ctx)
+        ws_repo.clear_session_context("task123")
+        assert ws_repo.get_session_context("task123") is None
+
+    def test_clear_noop_when_absent(self, ws_repo):
+        ws_repo.clear_session_context("nonexistent")  # should not raise
+
+    def test_get_active_returns_all(self, ws_repo):
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode
+        )
+        ctx1 = SessionContext(mode=SessionMode.BRANCH_SETUP, allowed_tools=set())
+        ctx2 = SessionContext(mode=SessionMode.PLANNING, allowed_tools=set())
+        ws_repo.set_session_context("t1", ctx1)
+        ws_repo.set_session_context("t2", ctx2)
+        active = dict(ws_repo.get_active_session_contexts())
+        assert "t1" in active
+        assert "t2" in active
+
+    def test_all_session_modes_roundtrip(self, ws_repo):
+        from matrixmouse.repository.workspace_state_repository import (
+            SessionContext, SessionMode
+        )
+        for mode in SessionMode:
+            ctx = SessionContext(mode=mode, allowed_tools=set())
+            ws_repo.set_session_context(f"task_{mode.value}", ctx)
+            retrieved = ws_repo.get_session_context(f"task_{mode.value}")
+            assert retrieved is not None
+            assert retrieved.mode == mode
+
+
+# ---------------------------------------------------------------------------
+# Merge locks
+# ---------------------------------------------------------------------------
+
+class TestMergeLocks:
+    def test_acquire_succeeds_when_unlocked(self, ws_repo):
+        assert ws_repo.acquire_merge_lock("mm/refactor/foo", "task1") is True
+
+    def test_acquire_fails_when_locked_by_active_task(self, tmp_path):
+        from matrixmouse.repository.sqlite_task_repository import SQLiteTaskRepository
+        from matrixmouse.repository.sqlite_workspace_state_repository import (
+            SQLiteWorkspaceStateRepository,
+        )
+        db_path = tmp_path / ".matrixmouse" / "matrixmouse.db"
+        task_repo = SQLiteTaskRepository(db_path)
+        ws = SQLiteWorkspaceStateRepository(db_path)
+
+        from matrixmouse.task import Task, AgentRole
+        t = Task(
+            title="t", description="d",
+            role=AgentRole.MANAGER,
+            repo=["r"]
+        )
+        task_repo.add(t)
+        task_repo.mark_running(t.id)
+
+        assert ws.acquire_merge_lock("mm/refactor/foo", t.id) is True
+        assert ws.acquire_merge_lock("mm/refactor/foo", "other_task") is False
+
+    def test_release_frees_lock(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/refactor/foo", "task1")
+        ws_repo.release_merge_lock("mm/refactor/foo", "task1")
+        assert ws_repo.acquire_merge_lock("mm/refactor/foo", "task2") is True
+
+    def test_release_noop_when_not_holder(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/refactor/foo", "task1")
+        ws_repo.release_merge_lock("mm/refactor/foo", "task2")  # wrong holder
+        assert ws_repo.get_merge_lock_holder("mm/refactor/foo") == "task1"
+
+    def test_get_lock_holder_returns_none_when_unlocked(self, ws_repo):
+        assert ws_repo.get_merge_lock_holder("mm/refactor/foo") is None
+
+    def test_get_lock_holder_returns_task_id(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/refactor/foo", "task1")
+        assert ws_repo.get_merge_lock_holder("mm/refactor/foo") == "task1"
+
+    def test_different_branches_independent(self, ws_repo):
+        assert ws_repo.acquire_merge_lock("mm/feature/a", "task1") is True
+        assert ws_repo.acquire_merge_lock("mm/feature/b", "task2") is True
+        assert ws_repo.get_merge_lock_holder("mm/feature/a") == "task1"
+        assert ws_repo.get_merge_lock_holder("mm/feature/b") == "task2"
+
+
+# ---------------------------------------------------------------------------
+# Repo metadata and branch protection cache
+# ---------------------------------------------------------------------------
+
+class TestRepoMetadata:
+    def test_get_returns_none_when_absent(self, ws_repo):
+        assert ws_repo.get_repo_metadata("nonexistent") is None
+
+    def test_set_and_get_roundtrip(self, ws_repo):
+        ws_repo.set_repo_metadata("my-repo", "github",
+                                   "https://github.com/user/my-repo")
+        meta = ws_repo.get_repo_metadata("my-repo")
+        assert meta is not None
+        assert meta["provider"] == "github"
+        assert meta["remote_url"] == "https://github.com/user/my-repo"
+
+    def test_set_overwrites_provider(self, ws_repo):
+        ws_repo.set_repo_metadata("my-repo", "github", "https://github.com/a/b")
+        ws_repo.set_repo_metadata("my-repo", "gitlab", "https://gitlab.com/a/b")
+        meta = ws_repo.get_repo_metadata("my-repo")
+        assert meta is not None
+        assert meta["provider"] == "gitlab"
+
+    def test_set_does_not_clear_cache(self, ws_repo):
+        ws_repo.set_repo_metadata("my-repo", "github", "https://github.com/a/b")
+        ws_repo.set_protected_branches_cached("my-repo", ["main", "master"])
+        ws_repo.set_repo_metadata("my-repo", "github", "https://github.com/a/b")
+        cached = ws_repo.get_protected_branches_cached("my-repo")
+        assert cached is not None
+        assert "main" in cached[0]
+
+    def test_get_protected_branches_returns_none_when_absent(self, ws_repo):
+        assert ws_repo.get_protected_branches_cached("nonexistent") is None
+
+    def test_get_protected_branches_returns_none_when_no_cache(self, ws_repo):
+        ws_repo.set_repo_metadata("my-repo", "github", "https://github.com/a/b")
+        assert ws_repo.get_protected_branches_cached("my-repo") is None
+
+    def test_set_protected_branches_stores_and_timestamps(self, ws_repo):
+        ws_repo.set_protected_branches_cached("my-repo", ["main", "develop"])
+        result = ws_repo.get_protected_branches_cached("my-repo")
+        assert result is not None
+        branches, timestamp = result
+        assert "main" in branches
+        assert "develop" in branches
+        assert timestamp != ""
+
+    def test_set_protected_branches_overwrites_existing(self, ws_repo):
+        ws_repo.set_protected_branches_cached("my-repo", ["main"])
+        ws_repo.set_protected_branches_cached("my-repo", ["main", "release"])
+        result = ws_repo.get_protected_branches_cached("my-repo")
+        assert result is not None
+        assert "release" in result[0]
+
+    def test_multiple_repos_independent(self, ws_repo):
+        ws_repo.set_repo_metadata("repo-a", "github", "https://github.com/a")
+        ws_repo.set_repo_metadata("repo-b", "gitlab", "https://gitlab.com/b")
+        assert ws_repo.get_repo_metadata("repo-a")["provider"] == "github"
+        assert ws_repo.get_repo_metadata("repo-b")["provider"] == "gitlab"
+
+class TestMergeLockQueue:
+    def test_enqueue_adds_waiter(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        next_id = ws_repo.dequeue_next_merge_waiter("mm/feature/foo")
+        assert next_id == "task2"
+
+    def test_fifo_ordering_preserved(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task3")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task4")
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task2"
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task3"
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task4"
+
+    def test_dequeue_returns_none_on_empty(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") is None
+
+    def test_release_grants_lock_to_next_waiter(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.release_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.get_merge_lock_holder("mm/feature/foo") == "task2"
+
+    def test_release_with_no_waiters_frees_lock(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.release_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.get_merge_lock_holder("mm/feature/foo") is None
+
+    def test_release_grants_first_waiter_only(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task3")
+        ws_repo.release_merge_lock("mm/feature/foo", "task1")
+        assert ws_repo.get_merge_lock_holder("mm/feature/foo") == "task2"
+        # task3 still waiting
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task3"
+
+    def test_duplicate_not_enqueued(self, ws_repo):
+        ws_repo.acquire_merge_lock("mm/feature/foo", "task1")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        ws_repo.enqueue_merge_waiter("mm/feature/foo", "task2")
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") == "task2"
+        assert ws_repo.dequeue_next_merge_waiter("mm/feature/foo") is None

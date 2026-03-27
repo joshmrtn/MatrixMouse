@@ -4,6 +4,7 @@ tests/test_api.py
 Tests for matrixmouse.api — control endpoints added in refactor/web-server.
 """
 
+from datetime import datetime, timezone
 import os
 import signal
 from pathlib import Path
@@ -19,7 +20,9 @@ from matrixmouse.api import (
 from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
-
+from matrixmouse.repository.memory_workspace_state_repository import (
+    InMemoryWorkspaceStateRepository,
+)
 
 @pytest.fixture(autouse=True)
 def reset_flags():
@@ -41,33 +44,6 @@ def workspace(tmp_path):
 @pytest.fixture
 def client(workspace):
     return TestClient(app, raise_server_exceptions=False)
-
-
-class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
-    def __init__(self):
-        self._store: dict = {}
-        self._stale: dict = {}
-
-    def get(self, key):
-        return self._store.get(key)
-
-    def set(self, key, value):
-        self._store[key] = value
-
-    def delete(self, key):
-        self._store.pop(key, None)
-
-    def get_stale_clarification_task(self, blocked_task_id):
-        return self._stale.get(blocked_task_id)
-
-    def register_stale_clarification_task(self, blocked_task_id, manager_task_id):
-        self._stale[blocked_task_id] = manager_task_id
-
-    def clear_stale_clarification_task(self, blocked_task_id):
-        self._stale.pop(blocked_task_id, None)
-
-    def all_stale_clarification_tasks(self):
-        return dict(self._stale)
 
 # ---------------------------------------------------------------------------
 # Fixtures for task-related tests
@@ -395,30 +371,34 @@ class TestTurnLimitResponse:
     def test_extend_returns_task_to_ready(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "extend"})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "extend"})
         assert r.status_code == 200
         assert q.get(task.id).status == TaskStatus.READY
 
     def test_extend_increases_turn_limit(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "extend", "extend_by": 25})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={
+                            "decision_type": "turn_limit_reached",
+                            "choice": "extend",
+                            "metadata": {"extend_by": 25},
+                        })
         assert r.json()["new_turn_limit"] == 25
 
     def test_extend_uses_config_default_when_extend_by_zero(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "extend", "extend_by": 0})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "extend", "extend_by": 0})
         assert r.json()["new_turn_limit"] == 50  # matches cfg.agent_max_turns
 
     def test_extend_appends_note_to_context(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        client.post(f"/tasks/{task.id}/turn-limit-response",
-                    json={"action": "extend", "note": "Try a different approach."})
+        client.post(f"/tasks/{task.id}/decision",
+                    json={"decision_type": "turn_limit_reached", "choice": "extend", "note": "Try a different approach."})
         messages = q.get(task.id).context_messages
         assert any("Try a different approach." in m.get("content", "")
                    for m in messages)
@@ -426,8 +406,8 @@ class TestTurnLimitResponse:
     def test_respec_returns_task_to_ready(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "respec",
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "respec",
                               "note": "Focus only on the parse function."})
         assert r.status_code == 200
         assert q.get(task.id).status == TaskStatus.READY
@@ -435,8 +415,8 @@ class TestTurnLimitResponse:
     def test_respec_appends_note_to_context(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        client.post(f"/tasks/{task.id}/turn-limit-response",
-                    json={"action": "respec",
+        client.post(f"/tasks/{task.id}/decision",
+                    json={"decision_type": "turn_limit_reached", "choice": "respec",
                           "note": "Focus only on the parse function."})
         messages = q.get(task.id).context_messages
         assert any("Focus only on the parse function." in m.get("content", "")
@@ -447,37 +427,37 @@ class TestTurnLimitResponse:
         task = self._blocked_task(q)
         task.turn_limit = 75
         q.update(task)
-        client.post(f"/tasks/{task.id}/turn-limit-response",
-                    json={"action": "respec", "note": "Start fresh."})
+        client.post(f"/tasks/{task.id}/decision",
+                    json={"decision_type": "turn_limit_reached", "choice": "respec", "note": "Start fresh."})
         assert q.get(task.id).turn_limit == 0
 
     def test_respec_requires_note(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "respec", "note": ""})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "respec", "note": ""})
         assert r.status_code == 400
 
     def test_cancel_marks_task_cancelled(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "cancel"})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "cancel"})
         assert r.status_code == 200
         assert q.get(task.id).status == TaskStatus.CANCELLED
 
     def test_cancel_appends_note_when_given(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        client.post(f"/tasks/{task.id}/turn-limit-response",
-                    json={"action": "cancel", "note": "No longer needed."})
+        client.post(f"/tasks/{task.id}/decision",
+                    json={"decision_type": "turn_limit_reached", "choice": "cancel", "note": "No longer needed."})
         assert "No longer needed." in q.get(task.id).notes
 
     def test_invalid_action_returns_400(self, queue_client):
         client, q = queue_client
         task = self._blocked_task(q)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "dance"})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "dance"})
         assert r.status_code == 400
 
     def test_requires_blocked_by_human_status(self, queue_client):
@@ -486,14 +466,14 @@ class TestTurnLimitResponse:
                     role=AgentRole.CODER, repo=["r"],
                     status=TaskStatus.READY)
         q.add(task)
-        r = client.post(f"/tasks/{task.id}/turn-limit-response",
-                        json={"action": "extend"})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "extend"})
         assert r.status_code == 400
 
     def test_404_for_unknown_task(self, queue_client):
         client, q = queue_client
-        r = client.post("/tasks/nonexistent/turn-limit-response",
-                        json={"action": "extend"})
+        r = client.post("/tasks/nonexistent/decision",
+                        json={"decision_type": "turn_limit_reached", "choice": "extend"})
         assert r.status_code == 404
 
 
@@ -516,6 +496,7 @@ class TestDecompositionConfirm:
     def _parent_task(self, q, depth=3) -> Task:
         task = Task(
             title="parent task", description="desc",
+            status=TaskStatus.BLOCKED_BY_HUMAN,
             role=AgentRole.CODER, repo=["r"],
             depth=depth,
         )
@@ -526,12 +507,8 @@ class TestDecompositionConfirm:
         client, q = queue_client
         parent = self._parent_task(q)
         mgr = self._manager_task(q)
-        r = client.post(f"/tasks/{parent.id}/decomposition-confirm",
-                        json={
-                            "confirmation_id": "abc123",
-                            "confirmed": True,
-                            "reason": "",
-                        })
+        r = client.post(f"/tasks/{parent.id}/decision",
+                        json={"decision_type": "decomposition_confirmation_required", "choice": "allow"})
         assert r.status_code == 200
         assert q.get(parent.id).decomposition_confirmed_depth == 1
 
@@ -539,32 +516,32 @@ class TestDecompositionConfirm:
         client, q = queue_client
         parent = self._parent_task(q)
         self._manager_task(q)
-        r = client.post(f"/tasks/{parent.id}/decomposition-confirm",
-                        json={"confirmation_id": "x", "confirmed": True})
+        r = client.post(f"/tasks/{parent.id}/decision",
+                        json={"decision_type": "decomposition_confirmation_required", "choice": "allow"})
+        assert r.status_code == 200
         assert r.json()["decomposition_confirmed_depth"] == 1
 
     def test_deny_requires_reason(self, queue_client):
         client, q = queue_client
         parent = self._parent_task(q)
-        r = client.post(f"/tasks/{parent.id}/decomposition-confirm",
+        r = client.post(f"/tasks/{parent.id}/decision",
                         json={
-                            "confirmation_id": "x",
-                            "confirmed": False,
-                            "reason": "",
+                            "decision_type": "decomposition_confirmation_required", "choice": "deny", "note": "" 
                         })
         assert r.status_code == 400
 
     def test_deny_injects_message_into_manager_context(self, queue_client):
         client, q = queue_client
         parent = self._parent_task(q)
-        mgr = self._manager_task(q)
-        client.post(f"/tasks/{parent.id}/decomposition-confirm",
+        parent.status = TaskStatus.BLOCKED_BY_HUMAN
+        q.update(parent)
+        client.post(f"/tasks/{parent.id}/decision",
                     json={
-                        "confirmation_id": "abc123",
-                        "confirmed": False,
-                        "reason": "Tasks are already small enough.",
+                        "decision_type": "decomposition_confirmation_required",
+                        "choice": "deny",
+                        "note": "Tasks are already small enough.",
                     })
-        messages = q.get(mgr.id).context_messages
+        messages = q.get(parent.id).context_messages  # not mgr.id
         assert any(
             "Tasks are already small enough." in m.get("content", "")
             for m in messages
@@ -573,10 +550,15 @@ class TestDecompositionConfirm:
     def test_confirm_injects_approval_into_manager_context(self, queue_client):
         client, q = queue_client
         parent = self._parent_task(q)
-        mgr = self._manager_task(q)
-        client.post(f"/tasks/{parent.id}/decomposition-confirm",
-                    json={"confirmation_id": "abc123", "confirmed": True})
-        messages = q.get(mgr.id).context_messages
+        parent.status = TaskStatus.BLOCKED_BY_HUMAN
+        q.update(parent)
+        client.post(f"/tasks/{parent.id}/decision",
+                    json={
+                        "decision_type": "decomposition_confirmation_required",
+                        "choice": "allow",
+                        "note": "confirmed",
+                    })
+        messages = q.get(parent.id).context_messages  # not mgr.id
         assert any(
             "confirmed" in m.get("content", "").lower()
             for m in messages
@@ -584,8 +566,8 @@ class TestDecompositionConfirm:
 
     def test_404_for_unknown_task(self, queue_client):
         client, q = queue_client
-        r = client.post("/tasks/nonexistent/decomposition-confirm",
-                        json={"confirmation_id": "x", "confirmed": True})
+        r = client.post("/tasks/nonexistent/decision",
+                        json={"decision_type": "decomposition_confirmation_required", "choice": "approve"})
         assert r.status_code == 404
 
 
@@ -924,8 +906,11 @@ class TestCriticReviewResponse:
     def test_approve_task_marks_reviewed_complete(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        r = client.post(f"/tasks/{critic.id}/critic-review-response",
-                        json={"action": "approve_task"})
+        r = client.post(f"/tasks/{critic.id}/decision",
+                        json={
+                            "decision_type": "critic_turn_limit_reached",
+                            "choice": "approve_task"
+                        })
         assert r.status_code == 200
         updated = q.get(reviewed.id)
         assert updated is not None
@@ -934,8 +919,11 @@ class TestCriticReviewResponse:
     def test_approve_task_cancels_critic(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        client.post(f"/tasks/{critic.id}/critic-review-response",
-                    json={"action": "approve_task"})
+        client.post(f"/tasks/{critic.id}/decision",
+                    json={
+                        "decision_type": "critic_turn_limit_reached",
+                        "choice": "approve_task"
+                    })
         updated_critic = q.get(critic.id)
         assert updated_critic is not None
         assert updated_critic.status == TaskStatus.CANCELLED
@@ -943,9 +931,11 @@ class TestCriticReviewResponse:
     def test_approve_task_appends_feedback_when_provided(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        client.post(f"/tasks/{critic.id}/critic-review-response",
-                    json={"action": "approve_task",
-                          "feedback": "Great work, minor style issues noted."})
+        client.post(f"/tasks/{critic.id}/decision",
+                    json={
+                        "decision_type": "critic_turn_limit_reached",
+                        "choice": "approve_task",
+                        "note": "Great work, minor style issues noted."})
         updated = q.get(reviewed.id)
         assert updated is not None
         assert any("Great work, minor style issues noted." in
@@ -955,8 +945,11 @@ class TestCriticReviewResponse:
     def test_extend_critic_returns_critic_to_ready(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        r = client.post(f"/tasks/{critic.id}/critic-review-response",
-                        json={"action": "extend_critic"})
+        r = client.post(f"/tasks/{critic.id}/decision",
+                        json={
+                            "decision_type": "critic_turn_limit_reached",
+                            "choice": "extend_critic"
+                        })
         assert r.status_code == 200
         updated_critic = q.get(critic.id)
         assert updated_critic is not None
@@ -965,8 +958,10 @@ class TestCriticReviewResponse:
     def test_extend_critic_increases_turn_limit(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        r = client.post(f"/tasks/{critic.id}/critic-review-response",
-                        json={"action": "extend_critic"})
+        r = client.post(f"/tasks/{critic.id}/decision",
+                        json={
+                            "decision_type": "critic_turn_limit_reached",
+                            "choice": "extend_critic"})
         updated_critic = q.get(critic.id)
         assert updated_critic is not None
         assert updated_critic.turn_limit > 0
@@ -974,9 +969,11 @@ class TestCriticReviewResponse:
     def test_extend_critic_appends_feedback_when_provided(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        client.post(f"/tasks/{critic.id}/critic-review-response",
-                    json={"action": "extend_critic",
-                          "feedback": "Focus on error handling."})
+        client.post(f"/tasks/{critic.id}/decision",
+                    json={
+                            "decision_type": "critic_turn_limit_reached",
+                            "choice": "extend_critic",
+                            "note": "Focus on error handling."})
         updated_critic = q.get(critic.id)
         assert updated_critic is not None
         assert any("Focus on error handling." in m.get("content", "")
@@ -985,8 +982,9 @@ class TestCriticReviewResponse:
     def test_block_task_cancels_critic(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        r = client.post(f"/tasks/{critic.id}/critic-review-response",
-                        json={"action": "block_task"})
+        r = client.post(f"/tasks/{critic.id}/decision",
+                        json={"decision_type": "critic_turn_limit_reached",
+                                "choice": "block_task"})
         assert r.status_code == 200
         updated_critic = q.get(critic.id)
         assert updated_critic is not None
@@ -995,8 +993,9 @@ class TestCriticReviewResponse:
     def test_block_task_moves_reviewed_to_blocked_by_human(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        client.post(f"/tasks/{critic.id}/critic-review-response",
-                    json={"action": "block_task"})
+        client.post(f"/tasks/{critic.id}/decision",
+                    json={"decision_type": "critic_turn_limit_reached",
+                            "choice": "block_task"})
         updated = q.get(reviewed.id)
         assert updated is not None
         assert updated.status == TaskStatus.BLOCKED_BY_HUMAN
@@ -1004,9 +1003,11 @@ class TestCriticReviewResponse:
     def test_block_task_appends_feedback_to_notes(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        client.post(f"/tasks/{critic.id}/critic-review-response",
-                    json={"action": "block_task",
-                          "feedback": "Needs complete rewrite."})
+        client.post(f"/tasks/{critic.id}/decision",
+                    json={
+                        "decision_type": "critic_turn_limit_reached",
+                        "choice": "block_task",
+                        "note": "Needs complete rewrite."})
         updated = q.get(reviewed.id)
         assert updated is not None
         assert "Needs complete rewrite." in updated.notes
@@ -1014,8 +1015,9 @@ class TestCriticReviewResponse:
     def test_invalid_action_returns_400(self, state_client):
         client, q, ws, ws_state_repo = state_client
         reviewed, critic = self._setup_critic_review(q)
-        r = client.post(f"/tasks/{critic.id}/critic-review-response",
-                        json={"action": "invalid"})
+        r = client.post(f"/tasks/{critic.id}/decision",
+                        json={"decision_type": "critic_turn_limit_reached",
+                            "choice": "invalid"})
         assert r.status_code == 400
 
     def test_requires_blocked_by_human_status(self, state_client):
@@ -1023,8 +1025,10 @@ class TestCriticReviewResponse:
         reviewed, critic = self._setup_critic_review(q)
         critic.status = TaskStatus.READY
         q.update(critic)
-        r = client.post(f"/tasks/{critic.id}/critic-review-response",
-                        json={"action": "approve_task"})
+        r = client.post(f"/tasks/{critic.id}/decision",
+                        json={
+                            "decision_type": "critic_turn_limit_reached",
+                            "choice": "approve_task"})
         assert r.status_code == 400
 
     def test_requires_reviews_task_id(self, state_client):
@@ -1033,14 +1037,17 @@ class TestCriticReviewResponse:
                     role=AgentRole.CRITIC, repo=["r"],
                     status=TaskStatus.BLOCKED_BY_HUMAN)
         q.add(task)
-        r = client.post(f"/tasks/{task.id}/critic-review-response",
-                        json={"action": "approve_task"})
+        r = client.post(f"/tasks/{task.id}/decision",
+                        json={
+                            "decision_type": "critic_turn_limit_reached",
+                            "choice": "approve_task"})
         assert r.status_code == 400
 
     def test_404_for_unknown_task(self, state_client):
         client, q, ws, ws_state_repo = state_client
-        r = client.post("/tasks/nonexistent/critic-review-response",
-                        json={"action": "approve_task"})
+        r = client.post("/tasks/nonexistent/decision",
+                        json={"decision_type": "critic_turn_limit_reached",
+                            "choice": "approve_task"})
         assert r.status_code == 404
 
     def test_404_when_reviewed_task_missing(self, state_client):
@@ -1050,8 +1057,9 @@ class TestCriticReviewResponse:
                       status=TaskStatus.BLOCKED_BY_HUMAN)
         critic.reviews_task_id = "nonexistent-reviewed-task"
         q.add(critic)
-        r = client.post(f"/tasks/{critic.id}/critic-review-response",
-                        json={"action": "approve_task"})
+        r = client.post(f"/tasks/{critic.id}/decision",
+                        json={"decision_type": "critic_turn_limit_reached",
+                            "choice": "approve_task"})
         assert r.status_code == 404
 
 

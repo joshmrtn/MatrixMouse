@@ -306,10 +306,74 @@ class MatrixMouseConfig(BaseSettings):
         description="Maximum turns the Critic agent takes before escalating to human review.",
     )
 
-    # --- Merge conflicts ---
+    # --- Branch management ---
+    agent_branch_prefix: str = Field(
+        default="mm",
+        description=(
+            "Prefix for all MatrixMouse-owned git branches. "
+            "All agent-created branches will be named <prefix>/<slug>. "
+            "Change this if 'mm/' conflicts with your existing branch conventions. "
+            "Common alternatives: 'bot', 'agent', 'matrixmouse'."
+        ),
+    )
+    default_merge_target: str = Field(
+        default="",
+        description=(
+            "Default branch to merge completed top-level tasks into when "
+            "they have no parent task. Empty string means no automatic merge — "
+            "the operator is prompted via modal to specify a target or create a PR."
+        ),
+    )
+    protected_branches: list[str] = Field(
+        default=["main", "master", "develop", "release"],
+        description=(
+            "Branch names that MatrixMouse will never merge into directly. "
+            "When a task's parent branch matches one of these, a PR is created "
+            "instead of a direct merge, and human approval is required. "
+            "Add any branches you want to protect (e.g. 'staging', 'production')."
+        ),
+    )
     merge_conflict_max_turns: int = Field(
         default=5,
-        description="Maximum turns an agent attempts autonomous merge conflict resolution before escalating to BLOCKED_BY_HUMAN.",
+        description=(
+            "Maximum turns an agent may take to resolve a merge conflict "
+            "before the task is escalated to BLOCKED_BY_HUMAN."
+        ),
+    )
+    merge_resolution_model: str = Field(
+        default="",
+        description=(
+            "Model to use for merge conflict resolution. "
+            "Empty string means use the last (largest) model in coder_cascade. "
+            "Override to pin a specific model: e.g. 'qwen2.5-coder:32b'."
+        ),
+    )
+    push_wip_to_remote: bool = Field(
+        default=False,
+        description=(
+            "Push WIP commits to the configured remote origin after every "
+            "inference call. Disabled by default to avoid noise on remote. "
+            "Local mirror push always happens regardless of this setting."
+        ),
+    )
+    branch_protection_cache_ttl_minutes: int = Field(
+        default=60,
+        description="Minutes to cache branch protection results from the remote API.",
+    )
+    pr_poll_interval_minutes: int = Field(
+        default=10,
+        description=(
+            "How often to poll the remote provider for PR state changes "
+            "(merged, closed, etc.)."
+        ),
+    )
+    manager_planning_max_turns: int = Field(
+        default=10,
+        description=(
+            "Maximum turns a Manager may spend in PLANNING session mode "
+            "(decomposing tasks and wiring dependencies) before the planned "
+            "graph is committed as-is and the Manager is blocked for human review."
+        ),
     )
 
     # --- Start Paused (e.g., after an E-STOP) --- 
@@ -519,6 +583,22 @@ class MatrixMousePaths:
         For repo-scoped notes, use repo_paths(repo_name).agent_notes.
         """
         return self.mm_dir / "AGENT_NOTES.md"
+    
+    @property
+    def mirrors_dir(self) -> Path:
+        """
+        /var/lib/matrixmouse-mirrors/
+        Base directory for all local repo mirrors.
+        Created by install.sh and owned by the matrixmouse user.
+        """
+        return Path("/var/lib/matrixmouse-mirrors")
+
+    def mirror_path(self, repo_name: str) -> Path:
+        """
+        /var/lib/matrixmouse-mirrors/<repo_name>.git
+        Bare git mirror for the named repo.
+        """
+        return self.mirrors_dir / f"{repo_name}.git"
 
     def repo_paths(self, repo_name: str) -> "RepoPaths":
         """

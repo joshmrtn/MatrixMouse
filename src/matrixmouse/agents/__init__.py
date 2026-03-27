@@ -13,8 +13,10 @@ Adding a new agent:
     2. Import it here and add it to _AGENT_REGISTRY.
 """
 
+from matrixmouse.agents.base import BaseAgent
 from matrixmouse.agents.manager import ManagerAgent
 from matrixmouse.agents.coder import CoderAgent
+from matrixmouse.agents.merge import MergeAgent
 from matrixmouse.agents.writer import WriterAgent
 from matrixmouse.agents.critic import CriticAgent
 from matrixmouse.task import AgentRole
@@ -24,10 +26,11 @@ _AGENT_REGISTRY: dict[AgentRole, type] = {
     AgentRole.CODER:   CoderAgent,
     AgentRole.WRITER:  WriterAgent,
     AgentRole.CRITIC:  CriticAgent,
+    AgentRole.MERGE:   MergeAgent,
 }
 
 
-def agent_for_role(role: AgentRole) -> "BaseAgent":
+def agent_for_role(role: AgentRole) -> BaseAgent:
     """
     Return a concrete agent instance for the given role.
 

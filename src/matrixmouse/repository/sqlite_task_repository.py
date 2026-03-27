@@ -15,19 +15,20 @@ from __future__ import annotations
 import json
 import logging
 import time
+from typing import Callable
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from matrixmouse.repository.sqlite_db import get_connection, init_db
 from matrixmouse.repository.task_repository import TaskRepository
-from matrixmouse.task import AgentRole, Task, TaskStatus
+from matrixmouse.task import AgentRole, Task, TaskStatus, PRState
 from matrixmouse.utils.task_utils import detect_cycles
 
 logger = logging.getLogger(__name__)
 
 _TERMINAL = (TaskStatus.COMPLETE.value, TaskStatus.CANCELLED.value)
-
+_PENDING = (TaskStatus.PENDING.value,)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,12 +55,18 @@ def _row_to_task(row) -> Task:
         notes=row["notes"],
         pending_question=row["pending_question"],
         last_review_summary=row["last_review_summary"],
+        pr_url=row["pr_url"],
+        pr_state=PRState(row["pr_state"]),
+        pr_poll_next_at=row["pr_poll_next_at"],
         context_messages=json.loads(row["context_messages"]),
         wip_commit_hash=row["wip_commit_hash"],
+        merge_resolution_decisions=json.loads(row["merge_resolution_decisions"] or "[]"),
+        pending_tool_calls=json.loads(row["pending_tool_calls"] or "[]"),
         branch=row["branch"],
         decomposition_confirmed_depth=row["decomposition_confirmed_depth"],
         turn_limit=row["turn_limit"],
         preempt=bool(row["preempt"]),
+        preemptable=bool(row["preemptable"]),
         time_slice_started=row["time_slice_started"],
         started_at=row["started_at"],
         completed_at=row["completed_at"],
@@ -85,12 +92,18 @@ def _task_to_params(task: Task) -> dict:
         "notes":                         task.notes or "",
         "pending_question":              task.pending_question or "",
         "last_review_summary":           task.last_review_summary or "",
+        "pr_url":                        task.pr_url or "",
+        "pr_state":                      task.pr_state.value,
+        "pr_poll_next_at":               task.pr_poll_next_at or "",
         "context_messages":              json.dumps(task.context_messages or []),
         "wip_commit_hash":               task.wip_commit_hash,
+        "merge_resolution_decisions":    json.dumps(task.merge_resolution_decisions),
+        "pending_tool_calls":            json.dumps(task.pending_tool_calls),
         "branch":                        task.branch,
         "decomposition_confirmed_depth": task.decomposition_confirmed_depth or 0,
         "turn_limit":                    task.turn_limit or 0,
         "preempt":                       int(task.preempt or False),
+        "preemptable":                   1 if task.preemptable else 0,
         "time_slice_started":            task.time_slice_started,
         "started_at":                    task.started_at or None,
         "completed_at":                  task.completed_at or None,
@@ -105,19 +118,23 @@ _INSERT_SQL = """
         repo, target_files, importance, urgency,
         depth, parent_task_id, reviews_task_id,
         notes, pending_question, last_review_summary,
-        context_messages, wip_commit_hash, branch,
-        decomposition_confirmed_depth, turn_limit,
-        preempt, time_slice_started,
-        started_at, completed_at, created_at, last_modified
+        context_messages, wip_commit_hash, merge_resolution_decisions,
+        pending_tool_calls,  
+        branch, decomposition_confirmed_depth, turn_limit,
+        preempt, preemptable, time_slice_started,
+        started_at, completed_at, created_at, last_modified,
+        pr_url, pr_state, pr_poll_next_at
     ) VALUES (
         :id, :title, :description, :status, :role,
         :repo, :target_files, :importance, :urgency,
         :depth, :parent_task_id, :reviews_task_id,
         :notes, :pending_question, :last_review_summary,
-        :context_messages, :wip_commit_hash, :branch,
-        :decomposition_confirmed_depth, :turn_limit,
-        :preempt, :time_slice_started,
-        :started_at, :completed_at, :created_at, :last_modified
+        :context_messages, :wip_commit_hash, :merge_resolution_decisions, 
+        :pending_tool_calls, 
+        :branch, :decomposition_confirmed_depth, :turn_limit,
+        :preempt, :preemptable, :time_slice_started,
+        :started_at, :completed_at, :created_at, :last_modified,
+        :pr_url, :pr_state, :pr_poll_next_at
     )
 """
 
@@ -136,13 +153,19 @@ _UPDATE_SQL = """
         reviews_task_id               = :reviews_task_id,
         notes                         = :notes,
         pending_question              = :pending_question,
+        pr_url                        = :pr_url,
+        pr_state                      = :pr_state,
+        pr_poll_next_at               = :pr_poll_next_at,
         last_review_summary           = :last_review_summary,
         context_messages              = :context_messages,
         wip_commit_hash               = :wip_commit_hash,
+        merge_resolution_decisions    = :merge_resolution_decisions,
+        pending_tool_calls            = :pending_tool_calls,
         branch                        = :branch,
         decomposition_confirmed_depth = :decomposition_confirmed_depth,
         turn_limit                    = :turn_limit,
         preempt                       = :preempt,
+        preemptable                   = :preemptable,
         time_slice_started            = :time_slice_started,
         started_at                    = :started_at,
         completed_at                  = :completed_at,
@@ -208,6 +231,15 @@ class SQLiteTaskRepository(TaskRepository):
         return None
 
     def update(self, task: Task) -> None:
+        # Branch immutability — once set, task.branch cannot be changed
+        existing = self.get(task.id)
+        if existing is None:
+            raise KeyError(f"Task '{task.id}' not found.")
+        if existing.branch and task.branch != existing.branch:
+            raise ValueError(
+                f"Task '{task.id}' branch is immutable once set. "
+                f"Cannot change '{existing.branch}' to '{task.branch}'."
+            )
         task.last_modified = _now_iso()
         params = _task_to_params(task)
         conn = self._conn()
@@ -235,7 +267,8 @@ class SQLiteTaskRepository(TaskRepository):
 
     def active_tasks(self) -> list[Task]:
         rows = self._conn().execute(
-            "SELECT * FROM tasks WHERE status NOT IN (?, ?)", _TERMINAL
+            "SELECT * FROM tasks WHERE status NOT IN (?, ?, ?)",
+            (*_TERMINAL, TaskStatus.PENDING.value),
         ).fetchall()
         return [_row_to_task(r) for r in rows]
 
@@ -247,11 +280,12 @@ class SQLiteTaskRepository(TaskRepository):
 
     def is_ready(self, task_id: str) -> bool:
         conn = self._conn()
-        # First check the task exists
         exists = conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not exists:
+            return False
+        if exists["status"] == TaskStatus.PENDING.value:
             return False
         row = conn.execute(
             """
@@ -268,14 +302,22 @@ class SQLiteTaskRepository(TaskRepository):
         return bool(row["ready"]) if row else False
 
     def has_blockers(self, task_id: str) -> bool:
-        row = self._conn().execute(
+        conn = self._conn()
+        exists = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not exists:
+            return False
+        if exists["status"] == TaskStatus.PENDING.value:
+            return False
+        row = conn.execute(
             """
             SELECT EXISTS (
                 SELECT 1
                 FROM task_dependencies td
                 JOIN tasks t ON t.id = td.blocking_task_id
                 WHERE td.blocked_task_id = ?
-                  AND t.status NOT IN (?, ?)
+                AND t.status NOT IN (?, ?)
             ) AS blocked
             """,
             (task_id, *_TERMINAL),
@@ -443,6 +485,23 @@ class SQLiteTaskRepository(TaskRepository):
         now_mono = time.monotonic()
         conn = self._conn()
         with conn:
+            # Branch guard — non-Manager tasks must have a branch before running
+            row = conn.execute(
+                "SELECT branch, role, status FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Task '{task_id}' not found.")
+            if not row["branch"] and row["role"] != AgentRole.MANAGER.value:
+                raise ValueError(
+                    f"Task '{task_id}' (role={row['role']}) cannot start: "
+                    f"no branch assigned. Set a branch before running."
+                )
+            if row["status"] != TaskStatus.READY.value:
+                raise ValueError(
+                    f"Task '{task_id}' cannot transition to RUNNING from "
+                    f"{row['status']}. Only READY tasks can become RUNNING."
+                )
             cursor = conn.execute(
                 """
                 UPDATE tasks SET
@@ -466,12 +525,9 @@ class SQLiteTaskRepository(TaskRepository):
                 ),
             )
             if cursor.rowcount == 0:
-                task = self.get(task_id)
-                if task is None:
-                    raise KeyError(f"Task '{task_id}' not found.")
                 raise ValueError(
                     f"Task '{task_id}' cannot transition to RUNNING from "
-                    f"{task.status.value}. Only READY tasks can become RUNNING."
+                    f"{row['status']}. Only READY tasks can become RUNNING."
                 )
 
     def mark_ready(self, task_id: str) -> None:
@@ -642,11 +698,73 @@ class SQLiteTaskRepository(TaskRepository):
     # Subtask creation
     # ------------------------------------------------------------------
 
+    def set_task_branch(
+        self,
+        task_id: str,
+        full_branch_name: str,
+        base_branch: str,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
+    ) -> str:
+        task = self.get(task_id)
+        if task is None:
+            raise KeyError(f"Task '{task_id}' not found.")
+        if task.branch:
+            raise ValueError(
+                f"Task '{task_id}' already has branch '{task.branch}'. "
+                f"Branch names are permanent."
+            )
+
+        # Create git branch first — outside the DB transaction
+        # so we can roll back cleanly if it fails
+        git_ok, git_err, head_hash = create_git_branch(
+            full_branch_name, base_branch
+        )
+        if not git_ok:
+            raise ValueError(
+                f"Failed to create git branch '{full_branch_name}': {git_err}"
+            )
+
+        # Persist to DB
+        now = _now_iso()
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE tasks SET
+                        branch           = ?,
+                        wip_commit_hash  = ?,
+                        last_modified    = ?
+                    WHERE id = ?
+                      AND branch = ''
+                    """,
+                    (full_branch_name, head_hash, now, task_id),
+                )
+        except Exception as e:
+            # DB write failed — roll back the git branch
+            del_ok, del_err = delete_git_branch(full_branch_name)
+            if not del_ok:
+                logger.error(
+                    "DB write failed AND git branch deletion failed for '%s': "
+                    "DB error: %s | Git error: %s. "
+                    "Manual cleanup of orphaned branch may be required.",
+                    full_branch_name, e, del_err,
+                )
+            raise ValueError(
+                f"Failed to persist branch assignment: {e}. "
+                f"Git branch rolled back."
+            ) from e
+
+        return full_branch_name
+
     def add_subtask(
         self,
         parent_id: str,
         title: str,
         description: str,
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
         role: AgentRole | None = None,
         repo: list[str] | None = None,
         importance: float | None = None,
@@ -656,6 +774,11 @@ class SQLiteTaskRepository(TaskRepository):
         parent = self.get(parent_id)
         if parent is None:
             raise KeyError(f"Parent task '{parent_id}' not found.")
+        if not parent.branch:
+            raise ValueError(
+                f"Parent task '{parent_id}' has no branch. "
+                f"Set a branch before creating subtasks."
+            )
 
         now = _now_iso()
         subtask = Task(
@@ -663,8 +786,7 @@ class SQLiteTaskRepository(TaskRepository):
             description=description,
             role=role if role is not None else parent.role,
             repo=repo if repo is not None else list(parent.repo),
-            importance=importance if importance is not None
-                       else parent.importance,
+            importance=importance if importance is not None else parent.importance,
             urgency=urgency if urgency is not None else parent.urgency,
             depth=parent.depth + 1,
             parent_task_id=parent_id,
@@ -674,95 +796,196 @@ class SQLiteTaskRepository(TaskRepository):
         )
         self._ensure_unique_id(subtask)
 
+        branch_name = f"{parent.branch}/{subtask.id}"
+        git_ok, git_err, head_hash = create_git_branch(branch_name, parent.branch)
+        if not git_ok:
+            raise ValueError(
+                f"Failed to create git branch '{branch_name}': {git_err}"
+            )
+
+        subtask.branch = branch_name
+        subtask.wip_commit_hash = head_hash
+
         conn = self._conn()
-        with conn:
-            conn.execute(_INSERT_SQL, _task_to_params(subtask))
-
-            conn.execute(
-                """
-                INSERT INTO task_dependencies
-                    (blocking_task_id, blocked_task_id)
-                VALUES (?, ?)
-                """,
-                (subtask.id, parent_id),
-            )
-
-            conn.execute(
-                """
-                UPDATE tasks SET
-                    status        = ?,
-                    last_modified = ?
-                WHERE id = ?
-                """,
-                (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
-            )
+        try:
+            with conn:
+                conn.execute(_INSERT_SQL, _task_to_params(subtask))
+                conn.execute(
+                    "INSERT INTO task_dependencies "
+                    "(blocking_task_id, blocked_task_id) VALUES (?, ?)",
+                    (subtask.id, parent_id),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status = ?, last_modified = ? "
+                    "WHERE id = ?",
+                    (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
+                )
+        except Exception as e:
+            del_ok, del_err = delete_git_branch(branch_name)
+            if not del_ok:
+                logger.error(
+                    "DB write failed AND git branch deletion failed for '%s': "
+                    "DB: %s | Git: %s. Orphaned branch requires manual cleanup.",
+                    branch_name, e, del_err,
+                )
+            raise ValueError(
+                f"Failed to create subtask: {e}. Git branch rolled back."
+            ) from e
 
         return subtask
-    
+
     def add_subtasks(
         self,
         parent_id: str,
         subtasks: list[Task],
+        create_git_branch: Callable[[str, str], tuple[bool, str, str]],
+        delete_git_branch: Callable[[str], tuple[bool, str]],
     ) -> list[Task]:
         parent = self.get(parent_id)
         if parent is None:
             raise KeyError(f"Parent task '{parent_id}' not found.")
-
+        if not parent.branch:
+            raise ValueError(
+                f"Parent task '{parent_id}' has no branch. "
+                f"Set a branch before creating subtasks."
+            )
         if not subtasks:
             return []
 
         now = _now_iso()
         conn = self._conn()
 
-        with conn:
-            # Assign unique IDs and timestamps inside the transaction
-            # so collisions are resolved against the locked state.
+        # Assign unique IDs and branch names, create git branches
+        # outside the DB transaction so we can track which branches
+        # to roll back on failure.
+        created_branches: list[str] = []
+
+        try:
             for subtask in subtasks:
                 self._ensure_unique_id(subtask)
                 subtask.created_at = now
                 subtask.last_modified = now
+                branch_name = f"{parent.branch}/{subtask.id}"
 
-            def _get_blocked_by_ids(tid: str) -> list[str]:
-                rows = conn.execute(
-                    """
-                    SELECT blocking_task_id FROM task_dependencies
-                    WHERE blocked_task_id = ?
-                    """,
-                    (tid,),
-                ).fetchall()
-                return [r[0] for r in rows]
-
-            # Cycle check for each subtask before any writes.
-            # New subtasks have no existing edges so cycles cannot form,
-            # but we check defensively against ID collision edge cases.
-            for subtask in subtasks:
-                if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
-                    raise ValueError(
-                        f"Adding subtask '{subtask.id}' under '{parent_id}' "
-                        f"would create a cycle. No subtasks were created."
-                    )
-
-            # Insert all subtasks and their dependency edges
-            for subtask in subtasks:
-                conn.execute(_INSERT_SQL, _task_to_params(subtask))
-                conn.execute(
-                    """
-                    INSERT INTO task_dependencies
-                        (blocking_task_id, blocked_task_id)
-                    VALUES (?, ?)
-                    """,
-                    (subtask.id, parent_id),
+                git_ok, git_err, head_hash = create_git_branch(
+                    branch_name, parent.branch
                 )
+                if not git_ok:
+                    raise ValueError(
+                        f"Failed to create git branch '{branch_name}': {git_err}"
+                    )
+                subtask.branch = branch_name
+                subtask.wip_commit_hash = head_hash
+                created_branches.append(branch_name)
 
-            # Update parent status once, atomically
-            conn.execute(
-                """
-                UPDATE tasks SET
-                    status        = ?,
-                    last_modified = ?
-                WHERE id = ?
-                """,
-                (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
-            )
+        except Exception:
+            # Roll back all git branches created so far
+            for branch_name in created_branches:
+                del_ok, del_err = delete_git_branch(branch_name)
+                if not del_ok:
+                    logger.error(
+                        "Git rollback failed for '%s': %s. "
+                        "Orphaned branch requires manual cleanup.",
+                        branch_name, del_err,
+                    )
+            raise
+
+        # All git branches created — now write to DB atomically
+        def _get_blocked_by_ids(tid: str) -> list[str]:
+            rows = conn.execute(
+                "SELECT blocking_task_id FROM task_dependencies "
+                "WHERE blocked_task_id = ?",
+                (tid,),
+            ).fetchall()
+            return [r[0] for r in rows]
+
+        try:
+            with conn:
+                for subtask in subtasks:
+                    if detect_cycles(subtask.id, parent_id, _get_blocked_by_ids):
+                        raise ValueError(
+                            f"Adding subtask '{subtask.id}' would create a cycle."
+                        )
+                    conn.execute(_INSERT_SQL, _task_to_params(subtask))
+                    conn.execute(
+                        "INSERT INTO task_dependencies "
+                        "(blocking_task_id, blocked_task_id) VALUES (?, ?)",
+                        (subtask.id, parent_id),
+                    )
+                conn.execute(
+                    "UPDATE tasks SET status = ?, last_modified = ? WHERE id = ?",
+                    (TaskStatus.BLOCKED_BY_TASK.value, now, parent_id),
+                )
+        except Exception as e:
+            # DB transaction rolled back automatically — roll back git branches
+            for branch_name in created_branches:
+                del_ok, del_err = delete_git_branch(branch_name)
+                if not del_ok:
+                    logger.error(
+                        "DB write failed AND git rollback failed for '%s': "
+                        "DB: %s | Git: %s. Orphaned branch requires manual cleanup.",
+                        branch_name, e, del_err,
+                    )
+            raise ValueError(
+                f"Failed to create subtasks: {e}. "
+                f"All git branches rolled back."
+            ) from e
 
         return subtasks
+    
+    
+    def commit_pending_subtree(self, root_task_id: str) -> list[str]:
+        if not self.get(root_task_id):
+            raise KeyError(f"Task '{root_task_id}' not found.")
+
+        now = _now_iso()
+        conn = self._conn()
+        transitioned = []
+
+        with conn:
+            # Find all PENDING descendants via recursive CTE
+            rows = conn.execute(
+                """
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM tasks WHERE parent_task_id = ?
+                    UNION ALL
+                    SELECT t.id FROM tasks t
+                    JOIN descendants d ON t.parent_task_id = d.id
+                )
+                SELECT id FROM descendants
+                JOIN tasks USING (id)
+                WHERE status = ?
+                """,
+                (root_task_id, TaskStatus.PENDING.value),
+            ).fetchall()
+
+            for row in rows:
+                task_id = row["id"]
+                # Check if task has any non-terminal blockers
+                has_blockers = conn.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM task_dependencies td
+                        JOIN tasks t ON t.id = td.blocking_task_id
+                        WHERE td.blocked_task_id = ?
+                        AND t.status NOT IN (?, ?)
+                    )
+                    """,
+                    (task_id, *_TERMINAL),
+                ).fetchone()[0]
+
+                new_status = (
+                    TaskStatus.BLOCKED_BY_TASK.value
+                    if has_blockers
+                    else TaskStatus.READY.value
+                )
+                conn.execute(
+                    """
+                    UPDATE tasks SET status = ?, last_modified = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (new_status, now, task_id, TaskStatus.PENDING.value),
+                )
+                transitioned.append(task_id)
+
+        return transitioned

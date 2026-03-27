@@ -34,6 +34,7 @@ Coverage:
         - Critic task moved to BLOCKED_BY_HUMAN on turn limit
 """
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 
@@ -41,6 +42,9 @@ from matrixmouse.agents.critic import CriticAgent
 from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
+from matrixmouse.repository.memory_workspace_state_repository import (
+    InMemoryWorkspaceStateRepository,
+)
 from matrixmouse.tools import task_tools
 from matrixmouse.loop import LoopExitReason, LoopResult
 
@@ -89,32 +93,6 @@ def setup_critic_review():
     q.add_dependency(critic.id, reviewed.id)
     task_tools.configure(queue=q, active_task_id=critic.id, config=MagicMock())
     return q, reviewed, critic
-
-class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
-    def __init__(self):
-        self._store: dict = {}
-        self._stale: dict = {}
-
-    def get(self, key):
-        return self._store.get(key)
-
-    def set(self, key, value):
-        self._store[key] = value
-
-    def delete(self, key):
-        self._store.pop(key, None)
-
-    def get_stale_clarification_task(self, blocked_task_id):
-        return self._stale.get(blocked_task_id)
-
-    def register_stale_clarification_task(self, blocked_task_id, manager_task_id):
-        self._stale[blocked_task_id] = manager_task_id
-
-    def clear_stale_clarification_task(self, blocked_task_id):
-        self._stale.pop(blocked_task_id, None)
-
-    def all_stale_clarification_tasks(self):
-        return dict(self._stale)
 
 # ---------------------------------------------------------------------------
 # build_system_prompt
@@ -273,12 +251,13 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         with patch("matrixmouse.comms.get_manager", return_value=None):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         crit_result = orch.queue.get(critic.id)
         assert crit_result is not None
@@ -292,17 +271,17 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         emitted_types = [c.args[0] for c in mock_comms.emit.call_args_list]
         assert "critic_turn_limit_reached" in emitted_types
-        assert "turn_limit_reached" not in emitted_types
 
     def test_critic_turn_limit_event_has_three_choices(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
@@ -312,13 +291,14 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         event_data = next(
             c.args[1] for c in mock_comms.emit.call_args_list
@@ -337,13 +317,14 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(critic)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=5,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(critic, result)
+            orch._handle_decision(critic, result)
 
         event_data = next(
             c.args[1] for c in mock_comms.emit.call_args_list
@@ -357,13 +338,14 @@ class TestCriticTurnLimitEscalation:
         orch.queue.add(task)
 
         result = LoopResult(
-            exit_reason=LoopExitReason.TURN_LIMIT_REACHED,
+            exit_reason=LoopExitReason.DECISION,
+            decision_type="turn_limit_reached",
             messages=[],
             turns_taken=50,
         )
         mock_comms = MagicMock()
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
-            orch._handle_turn_limit(task, result)
+            orch._handle_decision(task, result)
 
         emitted_types = [c.args[0] for c in mock_comms.emit.call_args_list]
         assert "turn_limit_reached" in emitted_types
