@@ -35,6 +35,7 @@ from pathlib import Path
 
 from matrixmouse.repository.sqlite_task_repository import SQLiteTaskRepository
 from matrixmouse.repository.sqlite_workspace_state_repository import SQLiteWorkspaceStateRepository
+from matrixmouse.router import Router
 from matrixmouse.utils.logging_utils import setup_logging
 
 # ---------------------------------------------------------------------------
@@ -47,7 +48,6 @@ logger = logging.getLogger(__name__)
 # Remaining imports
 # ---------------------------------------------------------------------------
 from matrixmouse.config import load_config
-from matrixmouse.init import validate_models
 from matrixmouse.graph import analyze_project
 from matrixmouse import memory, comms
 from matrixmouse.orchestrator import Orchestrator
@@ -343,7 +343,8 @@ def main() -> None:
             )
 
         # --- Model validation ---
-        validate_models(_config)
+        router = Router(_config)        # parse + local_only check
+        router.ensure_all_models()     # pull/verify each model
 
         # --- AST graphs for all registered repos ---
         repo_paths = _load_registered_repos(workspace_root)

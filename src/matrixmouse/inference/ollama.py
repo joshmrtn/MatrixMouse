@@ -205,6 +205,50 @@ class OllamaBackend(LLMBackend):
                 f"Ollama /api/tags returned {e.response.status_code}"
             ) from e
 
+    def get_context_length(self, model: str) -> int:
+        """Query Ollama for the context window length of a model.
+
+        Falls back to 32768 if the value cannot be determined rather than
+        raising — a wrong limit is recoverable, a crash at startup is not.
+
+        Args:
+            model: Ollama model identifier.
+
+        Returns:
+            Context length in tokens.
+        """
+        fallback = 32768
+        try:
+            import requests as _req
+            resp = _req.post(
+                f"{self._host}/api/show",
+                json={"name": model},
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+            model_info = resp.json().get("modelinfo", {}) or {}
+
+            for key in ("general.context_length", "context_length"):
+                if key in model_info:
+                    return int(model_info[key])
+
+            for key, value in model_info.items():
+                if "context_length" in key:
+                    return int(value)
+
+            logger.warning(
+                "Could not find context_length for '%s'. Using fallback: %d",
+                model, fallback,
+            )
+            return fallback
+
+        except Exception as e:
+            logger.warning(
+                "Failed to query context length for '%s': %s. Using fallback: %d",
+                model, e, fallback,
+            )
+            return fallback
+
     def ensure_model(self, model: str) -> None:
         """Attempt to pull a model if it is not already available.
 

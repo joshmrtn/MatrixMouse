@@ -4,9 +4,8 @@ matrixmouse/loop.py
 The inner loop that drives a single agent role for a single task.
 
 Responsibilities:
-    - Calling the active model via Ollama
-    - Catching malformed tool call parsing errors at the chat_completion
-      level and feeding them back as error messages
+    - Calling the active model via the injected LLMBackend
+    - Catching inference errors and feeding them back as user messages
     - Executing tool calls and appending results to message history
     - Calling stuck.py after each turn to check for escalation signals
     - Calling context.py before each inference to ensure the context window
@@ -23,12 +22,11 @@ Those responsibilities belong to orchestrator.py and router.py respectively.
 import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any
-
-import ollama
+from typing import Any, Callable
 
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
-from matrixmouse.tools import TOOLS, TOOL_REGISTRY
+from matrixmouse.inference.base import LLMBackend, LLMResponse, ToolUseBlock, Tool
+from matrixmouse.tools import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +36,14 @@ class LoopExitReason(Enum):
     Describes why the agent loop terminated.
     Returned to the orchestrator so it can decide what to do next.
     """
-    COMPLETE  = auto() # agent called declare_complete
-    ESCALATE  = auto() # stuck detector triggered escalation
-    DECISION  = auto() # a tool or turn limit requires a human decision before
-                       # the task can continue — orchestrator blocks the task
-                       # and emits a decision event; on resume the loop replays
-                       # any pending tool calls from the interrupted turn
-    ERROR     = auto() # unrecoverable error
-    YIELD     = auto() # yield control back to orchestrator
+    COMPLETE  = auto()  # agent called declare_complete
+    ESCALATE  = auto()  # stuck detector triggered escalation
+    DECISION  = auto()  # a tool or turn limit requires a human decision before
+                        # the task can continue — orchestrator blocks the task
+                        # and emits a decision event; on resume the loop replays
+                        # any pending tool calls from the interrupted turn
+    ERROR     = auto()  # unrecoverable error
+    YIELD     = auto()  # yield control back to orchestrator
 
 
 @dataclass
@@ -54,48 +52,72 @@ class LoopResult:
     The outcome of a single agent loop run.
     Returned to the orchestrator after the loop exits.
     """
-    exit_reason:      LoopExitReason
-    messages:         list   # full message history at time of exit
-    turns_taken:      int
-    completion_summary: str  = ""   # populated when exit_reason is COMPLETE
-    decision_type:    str    = ""   # populated when exit_reason is DECISION
-    decision_payload: dict   = field(default_factory=dict)
+    exit_reason:        LoopExitReason
+    messages:           list    # full message history at time of exit
+    turns_taken:        int
+    completion_summary: str  = ""               # populated when exit_reason is COMPLETE
+    decision_type:      str  = ""               # populated when exit_reason is DECISION
+    decision_payload:   dict = field(default_factory=dict)
+
 
 class AgentLoop:
-    """
-    Drives a single agent role for a single task.
+    """Drives a single agent role for a single task.
 
-    Instantiated by the orchestrator with a model, a starting message
-    history, and references to the subsystems it needs. Call run() to
-    start the loop. The loop runs until the agent declares completion,
-    the stuck detector signals escalation, or the turn limit is reached.
+    Instantiated by the orchestrator with a resolved backend, model
+    identifier, a starting message history, and references to the
+    subsystems it needs. Call run() to start the loop.
+
+    The loop runs until the agent declares completion, the stuck detector
+    signals escalation, a human decision is required, the turn limit is
+    reached, or a yield signal is received.
+
+    Args:
+        backend: Resolved ``LLMBackend`` instance from the router.
+        model: Backend-local model identifier to pass to ``backend.chat()``.
+        messages: Starting conversation history.
+        config: MatrixMouseConfig instance.
+        paths: MatrixMousePaths or RepoPaths for this workspace.
+        context_manager: Callable ``(messages, config) -> messages``.
+        stuck_detector: Callable ``(tool_name, arguments, had_error) -> bool``.
+        comms: Callable ``() -> str | None`` — returns pending interjection.
+        emit: Callable ``(event_type, data) -> None`` — forwards events to UI.
+        persist: Callable ``(messages) -> None`` — persists message history.
+        persist_pending: Callable ``(calls) -> None`` — persists pending tool calls.
+        wip_commit: Callable ``() -> None`` — WIP commit after each dispatch.
+        should_yield: Callable ``() -> bool`` — preemption signal.
+        stream: If True, text tokens are forwarded to emit as they arrive.
+        think: If True, enable extended thinking on the backend.
+        current_repo: Repository name for context, if applicable.
+        task_turn_limit: Override for agent_max_turns (0 = use config).
+        tools: Role-filtered list of ``Tool`` descriptors passed to the backend.
+        allowed_tools: Role-filtered frozenset of tool names for dispatch enforcement.
     """
 
     def __init__(
         self,
+        backend: LLMBackend,
         model: str,
         messages: list,
         config: MatrixMouseConfig,
         paths: MatrixMousePaths | RepoPaths,
-        # These are passed as callables so the loop stays decoupled from
-        # the concrete implementations. Stubs can be injected for testing.
-        context_manager=None,   # callable: (messages, config) -> messages
-        stuck_detector=None,    # callable: (tool_name, arguments, had_error) -> bool
-        comms=None,             # callable: () -> str | None
+        context_manager=None,
+        stuck_detector=None,
+        comms=None,
         emit=None,
-        persist=None,           # callable: (messages: list) -> None
-        persist_pending=None,   # callable (calls: list[dict]) -> None
-        wip_commit=None,        # callable: () -> None - WIP commit after dispatch
-        should_yield=None,      # callable: () -> bool
-        stream: bool = True,    # stream tokens to web UI
-        think: bool = False,    # enable extended thinking
+        persist=None,
+        persist_pending=None,
+        wip_commit=None,
+        should_yield=None,
+        stream: bool = True,
+        think: bool = False,
         current_repo: str | None = None,
-        task_turn_limit: int = 0, # use config.agent_max_turns
-        tools: list | None = None,              # role-filtered tool list for models to call
-        allowed_tools: frozenset | None = None, # role-filtered tool names for dispatch
+        task_turn_limit: int = 0,
+        tools: list[Tool] | None = None,
+        allowed_tools: frozenset | None = None,
     ):
+        self.backend = backend
         self.model = model
-        self.messages = list(messages)  # defensive copy — don't mutate caller's list
+        self.messages = list(messages)
         self.config = config
         self.paths = paths
         self._emit = emit or _noop_emit
@@ -107,10 +129,9 @@ class AgentLoop:
         self.think = think
         self.current_repo = current_repo
         self._task_turn_limit = task_turn_limit
-        self._tools = tools
+        self._tools = tools or []
         self._allowed_tools = allowed_tools
 
-        # Subsystem callables — fall back to no-ops until implemented
         self._check_context = context_manager or _noop_context_manager
         self._check_stuck = stuck_detector or _noop_stuck_detector
         self._check_interjection = comms or _noop_comms
@@ -122,8 +143,9 @@ class AgentLoop:
         """
         Run the agent loop until a terminal condition is reached.
 
-        Returns a LoopResult describing why the loop exited and the
-        full message history at the time of exit.
+        Returns:
+            LoopResult describing why the loop exited and the full message
+            history at the time of exit.
         """
         logger.info("AgentLoop starting. Model: %s", self.model)
 
@@ -149,14 +171,15 @@ class AgentLoop:
                 )
 
             # --- Human interjection check ---
-            # Checked at the top of every iteration so the agent picks up
-            # messages at the next clean loop boundary, never mid-inference.
             interjection = self._check_interjection()
             if interjection:
                 logger.info("Human interjection received.")
                 self.messages.append({
                     "role": "user",
-                    "content": f"[Human operator note — please incorporate before continuing]: {interjection}",
+                    "content": (
+                        f"[Human operator note — please incorporate before "
+                        f"continuing]: {interjection}"
+                    ),
                 })
 
             # --- Context window check ---
@@ -166,8 +189,6 @@ class AgentLoop:
             try:
                 response = self._chat_completion()
             except Exception as e:
-                # Ollama failed to parse the model's output (e.g. malformed
-                # tool call XML). Feed the error back so the model can retry.
                 logger.warning("chat_completion failed: %s", e)
                 self.messages.append({
                     "role": "user",
@@ -183,38 +204,35 @@ class AgentLoop:
             self._turns += 1
 
             # --- Log model output ---
-            if response.message.thinking:
-                logger.debug("Thinking: %s", response.message.thinking)
-            if response.message.content:
-                # In streaming mode content was already emitted token by token.
-                # Log at debug level only to avoid duplication.
-                if self.stream:
-                    logger.debug("Content (streamed): %s", response.message.content[:120])
-                else:
-                    logger.info("Content: %s", response.message.content)
+            for block in response.content:
+                from matrixmouse.inference.base import ThinkingBlock, TextBlock
+                if isinstance(block, ThinkingBlock):
+                    logger.debug("Thinking: %s", block.text[:120])
+                elif isinstance(block, TextBlock):
+                    if self.stream:
+                        logger.debug("Content (streamed): %s", block.text[:120])
+                    else:
+                        logger.info("Content: %s", block.text[:120])
 
-            # --- Append response to history ---
-            self.messages.append(response.message)
+            # --- Append assistant response to history ---
+            # Normalise to the standard messages format that all backends
+            # accept as conversation history.
+            self.messages.append(_response_to_message(response))
             self._persist(self.messages)
 
-
-
             # --- Tool dispatch ---
-            if response.message.tool_calls:
-                exit_result = self._dispatch_tools(response.message.tool_calls)
+            tool_blocks = [b for b in response.content if isinstance(b, ToolUseBlock)]
+            if tool_blocks:
+                exit_result = self._dispatch_tools(tool_blocks)
                 if exit_result is not None:
                     return exit_result
             else:
                 logger.debug("No tool calls in turn %d.", self._turns)
 
             # --- WIP commit ---
-            # If there were tool calls, each successful dispatch already
-            # committed inside _dispatch_tools. This call handles the
-            # no-tool-calls case (pure text turns) and is a safe no-op
-            # if nothing has changed in the working tree.
             self._wip_commit()
 
-            # --- Yield check (time slice / preemption) ---
+            # --- Yield check ---
             if self._should_yield():
                 logger.info(
                     "Yield signal received after turn %d. "
@@ -227,152 +245,92 @@ class AgentLoop:
                     turns_taken=self._turns,
                 )
 
-        # Should not be reachable — loop exits via return inside the while.
-        # Included as a safety net.
         return LoopResult(
             exit_reason=LoopExitReason.ERROR,
             messages=self.messages,
             turns_taken=self._turns,
         )
 
-    def _persist_pending_calls(self, calls: list[dict]) -> None:
-        """Delegate to the injected persist_pending callable."""
-        self._persist_pending(calls)
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
 
-    def _chat_completion(self):
+    def _chat_completion(self) -> LLMResponse:
         """
-        Dispatch to streaming or batch inference based on self.stream.
-        Always returns an object with .message.content, .message.thinking,
-        and .message.tool_calls so the caller is unchanged either way.
+        Dispatch to the backend, wiring chunk_callback when streaming.
+
+        Returns:
+            Fully assembled ``LLMResponse``.
         """
+        chunk_callback: Callable[[str], None] | None # type: ignore[assignment]
         if self.stream:
-            return self._chat_completion_stream()
-        return self._chat_completion_batch()
+            def chunk_callback(text: str) -> None:
+                self._emit("token", {"text": text})
+        else:
+            chunk_callback = None # type: ignore[assignment]
 
-    def _chat_completion_batch(self):
-        """
-        Non-streaming inference. Returns the ollama response object directly.
-        Used when config disables streaming for this role.
-        """
-        return ollama.chat(
+        return self.backend.chat(
             model=self.model,
             messages=self.messages,
-            stream=False,
-            tools=self._tools if self._tools is not None else TOOLS,
+            tools=self._tools,
+            stream=self.stream,
             think=self.think,
-            keep_alive="2h",
+            chunk_callback=chunk_callback,
         )
 
-    def _chat_completion_stream(self):
-        """
-        Streaming inference. Accumulates chunks into a synthetic response
-        matching the shape expected by the rest of the loop.
-
-        Content tokens are emitted as 'token' events so the web UI can
-        display output in real time. Thinking tokens are accumulated but
-        not emitted — they are too verbose for the chat view.
-
-        Tool calls may appear in any chunk and are accumulated via extend.
-        Tool dispatch is deferred until the full stream is consumed — never
-        dispatch mid-stream.
-
-        Returns a SimpleNamespace with .message matching the ollama Message
-        shape: .content, .thinking, .tool_calls.
-        """
-        from types import SimpleNamespace
-
-        accumulated_content = ""
-        accumulated_thinking = ""
-        accumulated_tool_calls = []
-
-        stream = ollama.chat(
-            model=self.model,
-            messages=self.messages,
-            stream=True,
-            tools=self._tools if self._tools is not None else TOOLS,
-            think=self.think,
-            keep_alive="2h",
-        )
-
-        for chunk in stream:
-            msg = chunk.message
-
-            if msg.thinking:
-                accumulated_thinking += msg.thinking
-                self._emit("thinking", {"text": msg.thinking})
-
-            if msg.content:
-                accumulated_content += msg.content
-                self._emit("token", {"text": msg.content})
-
-            if msg.tool_calls:
-                accumulated_tool_calls.extend(msg.tool_calls)
-
-        # Assemble a synthetic response in the shape the loop expects
-        message = SimpleNamespace(
-            content=accumulated_content,
-            thinking=accumulated_thinking,
-            tool_calls=accumulated_tool_calls if accumulated_tool_calls else None,
-        )
-        return SimpleNamespace(message=message)
-
-
+    # ------------------------------------------------------------------
+    # Tool dispatch
+    # ------------------------------------------------------------------
 
     def _dispatch_tools(
         self,
-        tool_calls,
+        tool_blocks: list[ToolUseBlock],
         pending_tool_calls: list[dict] | None = None,
     ) -> LoopResult | None:
         """
-        Execute each tool call in the response and append results to history.
+        Execute each tool call and append results to message history.
 
         Handles three exit conditions:
-            - declare_complete  → COMPLETE
-            - DecisionRequiredException → DECISION (human approval required)
-            - stuck detector    → ESCALATE
+            - ``declare_complete``          → COMPLETE
+            - ``DecisionRequiredException`` → DECISION
+            - stuck detector triggered      → ESCALATE
 
-        When a DecisionRequiredException is raised, all tool calls that have
-        not yet been dispatched (including the blocking one) are stored in
-        pending_tool_calls via self._persist_pending so the orchestrator can
-        replay them after the human decision is resolved.
-
-        A WIP commit is made after each successful tool dispatch so the
-        workspace is always consistent when a task is blocked or switched.
+        A WIP commit is made after each successful dispatch so the workspace
+        is always consistent when a task is blocked or context-switched.
 
         Args:
-            tool_calls: Tool call objects from the model response.
-            pending_tool_calls: Remaining calls to dispatch, used when
-                resuming after a DECISION. None on a fresh turn.
+            tool_blocks: ``ToolUseBlock`` entries from the model response.
+                Ignored when ``pending_tool_calls`` is provided.
+            pending_tool_calls: Remaining serialised calls to replay, used
+                when resuming after a DECISION. ``None`` on a fresh turn.
 
         Returns:
-            LoopResult if the loop should exit, None to continue.
+            ``LoopResult`` if the loop should exit, ``None`` to continue.
         """
         from matrixmouse.tools.task_tools import DecisionRequiredException
 
-        # On a fresh turn, store the full list before dispatching any.
-        # On resume (pending_tool_calls provided), we're replaying — list
-        # is already persisted on the task, caller passes remaining calls.
-        calls_to_dispatch = list(pending_tool_calls or [
-            {"name": c.function.name, "arguments": c.function.arguments}
-            for c in tool_calls
+        # Build the dispatch queue. On a fresh turn, serialise from blocks.
+        # On resume, the caller passes remaining calls directly.
+        calls_to_dispatch: list[dict] = list(pending_tool_calls or [
+            {"id": b.id, "name": b.name, "arguments": b.input}
+            for b in tool_blocks
         ])
 
         if pending_tool_calls is None and calls_to_dispatch:
-            # Persist the full pending list before any dispatch so a crash
-            # mid-turn never loses the call sequence.
             self._persist_pending(calls_to_dispatch)
 
         while calls_to_dispatch:
             call_dict = calls_to_dispatch[0]
+            call_id   = call_dict.get("id", "")
             name      = call_dict["name"]
             arguments = call_dict["arguments"]
 
-            # --- declare_complete is a special exit signal, not a real tool ---
+            # --- declare_complete is a special exit signal ---
             if name == "declare_complete":
                 summary = arguments.get("summary", "")
                 logger.info("Agent declared task complete. Summary: %s", summary)
                 self._is_done = True
-                self._persist_pending([])  # clear pending queue
+                self._persist_pending([])
                 return LoopResult(
                     exit_reason=LoopExitReason.COMPLETE,
                     messages=self.messages,
@@ -386,13 +344,12 @@ class AgentLoop:
                     f"ERROR: Tool '{name}' is not permitted for this agent role. "
                     f"Allowed tools: {sorted(self._allowed_tools)}."
                 )
-                had_error = True
                 logger.warning("Tool '%s' blocked by allowed_tools enforcement.", name)
-                self.messages.append({"role": "tool", "name": name, "content": result})
+                self.messages.append(_tool_result_message(call_id, name, result))
                 self._persist(self.messages)
                 calls_to_dispatch.pop(0)
                 self._persist_pending(calls_to_dispatch)
-                if self._check_stuck(name, arguments, had_error):
+                if self._check_stuck(name, arguments, had_error=True):
                     return LoopResult(
                         exit_reason=LoopExitReason.ESCALATE,
                         messages=self.messages,
@@ -402,36 +359,33 @@ class AgentLoop:
 
             # --- Normal tool dispatch ---
             had_error = False
-            func = TOOL_REGISTRY.get(name)
+            tool = TOOL_REGISTRY.get(name)
 
-            if func is None:
-                result = f"ERROR: Unknown tool '{name}'. Available tools: {list(TOOL_REGISTRY.keys())}"
+            if tool is None:
+                result = (
+                    f"ERROR: Unknown tool '{name}'. "
+                    f"Available tools: {list(TOOL_REGISTRY.keys())}"
+                )
                 had_error = True
                 logger.warning("Unknown tool called: %s", name)
             else:
                 try:
-                    result = func(**arguments)
-                    logger.info("Tool: %s(%s) → %s", name, arguments, str(result)[:120])
+                    result = tool.fn(**arguments)
+                    logger.info(
+                        "Tool: %s(%s) → %s",
+                        name, arguments, str(result)[:120],
+                    )
                 except DecisionRequiredException as exc:
-                    # Tool requires human approval before proceeding.
-                    # The tool call has NOT been executed — it stays at the
-                    # front of pending_tool_calls for replay after approval.
                     logger.info(
                         "Tool '%s' raised DecisionRequiredException: %s",
                         name, exc.decision_type,
                     )
-                    # Append a placeholder tool result so message history
-                    # is coherent (the model sees its call was received).
-                    self.messages.append({
-                        "role":    "tool",
-                        "name":    name,
-                        "content": (
-                            f"[Awaiting human approval — decision_type="
-                            f"{exc.decision_type}]"
-                        ),
-                    })
+                    self.messages.append(_tool_result_message(
+                        call_id, name,
+                        f"[Awaiting human approval — decision_type={exc.decision_type}]",
+                    ))
                     self._persist(self.messages)
-                    # pending queue already has this call at front — leave it.
+                    # Blocking call stays at front of queue for replay.
                     return LoopResult(
                         exit_reason=LoopExitReason.DECISION,
                         messages=self.messages,
@@ -444,15 +398,13 @@ class AgentLoop:
                     had_error = True
                     logger.warning("Tool %s raised: %s", name, e)
 
-            self.messages.append({"role": "tool", "name": name, "content": str(result)})
+            self.messages.append(_tool_result_message(call_id, name, str(result)))
             self._persist(self.messages)
 
-            # Successful dispatch — pop from pending, WIP commit, continue.
             calls_to_dispatch.pop(0)
             self._persist_pending(calls_to_dispatch)
             self._wip_commit()
 
-            # --- Stuck check after each tool call ---
             if self._check_stuck(name, arguments, had_error):
                 logger.warning("Stuck detector triggered on tool: %s", name)
                 return LoopResult(
@@ -461,27 +413,80 @@ class AgentLoop:
                     turns_taken=self._turns,
                 )
 
-        self._persist_pending([])  # turn complete — clear pending queue
-        return None  # continue the loop
-    
+        self._persist_pending([])
+        return None
 
-# TODO: replace noop stubs when subsystems are ready.
 
 # ---------------------------------------------------------------------------
-# No-op stubs for subsystems not yet implemented.
-# These allow the loop to run end-to-end before every dependency exists.
-# Replace by passing real callables when the subsystems are ready.
+# Message format helpers
+# ---------------------------------------------------------------------------
+
+def _response_to_message(response: LLMResponse) -> dict:
+    """
+    Normalise an ``LLMResponse`` into a standard assistant message dict.
+
+    Produces a format that all backends accept as conversation history:
+    the ``content`` field is a list of typed block dicts matching the
+    Anthropic convention, which adapters translate as needed.
+
+    Args:
+        response: Assembled ``LLMResponse`` from ``LLMBackend.chat()``.
+
+    Returns:
+        Dict with ``role: "assistant"`` and a ``content`` list.
+    """
+    from matrixmouse.inference.base import TextBlock, ThinkingBlock, ToolUseBlock
+
+    content = []
+    for block in response.content:
+        if isinstance(block, ThinkingBlock):
+            content.append({"type": "thinking", "thinking": block.text})
+        elif isinstance(block, TextBlock):
+            content.append({"type": "text", "text": block.text})
+        elif isinstance(block, ToolUseBlock):
+            content.append({
+                "type":  "tool_use",
+                "id":    block.id,
+                "name":  block.name,
+                "input": block.input,
+            })
+    return {"role": "assistant", "content": content}
+
+
+def _tool_result_message(tool_use_id: str, name: str, result: str) -> dict:
+    """
+    Build a tool result message to append to conversation history.
+
+    Includes ``tool_use_id`` so backends that require call-result
+    correlation (Anthropic, OpenAI) can match the result to its call.
+
+    Args:
+        tool_use_id: The ``id`` from the corresponding ``ToolUseBlock``.
+        name: Tool name, for logging and Ollama-compat backends.
+        result: String result returned by the tool function.
+
+    Returns:
+        Dict with ``role: "tool"`` and result payload.
+    """
+    return {
+        "role":        "tool",
+        "tool_use_id": tool_use_id,
+        "name":        name,
+        "content":     result,
+    }
+
+
+# ---------------------------------------------------------------------------
+# No-op stubs — replace by injecting real callables from the orchestrator.
 # ---------------------------------------------------------------------------
 
 def _noop_context_manager(messages: list, config: Any) -> list:
     """Passthrough until context.py is implemented."""
     return messages
 
-
 def _noop_stuck_detector(tool_name: str, arguments: dict, had_error: bool) -> bool:
     """Never escalates until stuck.py is implemented."""
     return False
-
 
 def _noop_comms() -> None:
     """No interjections until comms.py is implemented."""

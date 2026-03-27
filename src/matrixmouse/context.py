@@ -17,18 +17,21 @@ Responsibilities:
     - Writing any key discoveries to AGENT_NOTES.md before they are
       compressed away
 
-Context limits are set per model at startup via ollama.show(), not hardcoded.
+Context limits are queried from the backend via LLMBackend.get_context_length(),
+not hardcoded. Backends that cannot introspect model metadata return a
+conservative fallback.
 
 Do not add inference logic or tool dispatch here.
 """
 
 import logging
-from pathlib import Path
-from typing import Any
-
-import ollama
+from typing import TYPE_CHECKING
 
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
+from matrixmouse.inference.base import LLMBackend, TextBlock
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +41,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def estimate_tokens(messages: list) -> int:
-    """
-    Estimate the total token count of a message history.
+    """Estimate the total token count of a message history.
 
     Uses a character-based heuristic (~4 chars per token) which is
     intentionally conservative — it's better to compress slightly early
@@ -47,64 +49,22 @@ def estimate_tokens(messages: list) -> int:
     compression; not suitable for billing or precise model limits.
 
     Args:
-        messages: List of message dicts or ollama message objects.
+        messages: List of message dicts.
 
     Returns:
         Estimated token count as an integer.
     """
     total_chars = 0
     for message in messages:
-        # Handle both dict messages and ollama Message objects
-        if isinstance(message, dict):
-            content = message.get("content") or ""
+        content = message.get("content") or "" if isinstance(message, dict) else ""
+        if isinstance(content, list):
+            # Structured content blocks — extract text from each
+            for block in content:
+                if isinstance(block, dict):
+                    total_chars += len(block.get("text", "") or block.get("thinking", ""))
         else:
-            content = getattr(message, "content", "") or ""
-        total_chars += len(content)
+            total_chars += len(content)
     return total_chars // 4
-
-
-def get_model_context_length(model_name: str) -> int:
-    """
-    Query Ollama for the context length of a given model.
-
-    Falls back to a conservative default if the value cannot be
-    determined, rather than raising — a wrong limit is recoverable,
-    a crash at startup is not.
-
-    Args:
-        model_name: The Ollama model identifier.
-
-    Returns:
-        Context length in tokens.
-    """
-    fallback = 8192
-    try:
-        info = ollama.show(model_name)
-        model_info = getattr(info, "modelinfo", {}) or {}
-
-        # Key name varies by model family — try common variants
-        for key in ("general.context_length", "context_length"):
-            if key in model_info:
-                return int(model_info[key])
-
-        # Some models expose it under a family-prefixed key
-        # e.g. "llama.context_length", "qwen2.context_length"
-        for key, value in model_info.items():
-            if "context_length" in key:
-                return int(value)
-
-        logger.warning(
-            "Could not find context_length for %s. Using fallback: %d",
-            model_name, fallback
-        )
-        return fallback
-
-    except Exception as e:
-        logger.warning(
-            "Failed to query context length for %s: %s. Using fallback: %d",
-            model_name, e, fallback
-        )
-        return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -112,15 +72,31 @@ def get_model_context_length(model_name: str) -> int:
 # ---------------------------------------------------------------------------
 
 class ContextManager:
-    """
-    Monitors message history size and compresses when approaching the limit.
+    """Monitors message history size and compresses when approaching the limit.
 
-    Designed to be passed into AgentLoop as the context_manager callable:
+    Designed to be passed into AgentLoop as the context_manager callable::
 
-        context_manager = ContextManager(config, paths, model="qwen2.5-coder:7b")
+        context_manager = ContextManager(
+            config=config,
+            paths=paths,
+            coder_model="qwen3:4b",
+            coder_backend=router.backend_for_role(AgentRole.CODER),
+            summarizer_backend=router.get_backend(config.summarizer_model),
+            summarizer_model=router.local_model_for_role(config.summarizer_model),
+        )
         loop = AgentLoop(..., context_manager=context_manager)
 
-    The loop calls context_manager(messages, config) before each inference.
+    The loop calls ``context_manager(messages, config)`` before each inference.
+
+    Args:
+        config: MatrixMouseConfig instance.
+        paths: Resolved paths for this workspace.
+        coder_model: Backend-local model identifier for the working agent.
+            Used only to query the context length via coder_backend.
+        coder_backend: LLMBackend for the working agent — provides
+            get_context_length().
+        summarizer_backend: LLMBackend for the summarizer model.
+        summarizer_model: Backend-local model identifier for the summarizer.
     """
 
     def __init__(
@@ -128,30 +104,33 @@ class ContextManager:
         config: MatrixMouseConfig,
         paths: MatrixMousePaths | RepoPaths,
         coder_model: str,
-    ):
+        coder_backend: LLMBackend,
+        summarizer_backend: LLMBackend,
+        summarizer_model: str,
+    ) -> None:
         self.config = config
         self.paths = paths
-        self.coder_model = coder_model
+        self._summarizer_backend = summarizer_backend
+        self._summarizer_model = summarizer_model
 
-        # Determine the effective token limit for this model
-        raw_limit = get_model_context_length(coder_model)
+        raw_limit = coder_backend.get_context_length(coder_model)
         self.token_limit = min(raw_limit, config.context_soft_limit)
         self.compress_at = int(self.token_limit * config.compress_threshold)
 
         logger.info(
             "ContextManager ready. Model limit: %d, soft limit: %d, "
             "compress threshold: %d tokens.",
-            raw_limit, self.token_limit, self.compress_at
+            raw_limit, self.token_limit, self.compress_at,
         )
 
     def __call__(self, messages: list, config: MatrixMouseConfig) -> list:
-        """
-        Check token usage and compress history if needed.
+        """Check token usage and compress history if needed.
+
         This is the interface AgentLoop expects.
 
         Args:
             messages: Current message history.
-            config:   Active config (passed by the loop, may differ from init).
+            config: Active config (passed by the loop, may differ from init).
 
         Returns:
             The message list, compressed if necessary.
@@ -160,23 +139,22 @@ class ContextManager:
 
         if estimated < self.compress_at:
             logger.debug(
-                "Context OK: ~%d tokens (limit %d).", estimated, self.compress_at
+                "Context OK: ~%d tokens (limit %d).", estimated, self.compress_at,
             )
             return messages
 
         logger.info(
             "Context near limit (~%d tokens, threshold %d). Compressing...",
-            estimated, self.compress_at
+            estimated, self.compress_at,
         )
         return self._compress(messages)
 
     def _compress(self, messages: list) -> list:
-        """
-        Summarise the middle of the message history, preserving the
-        system prompt, original user instruction, and last N turns.
+        """Summarise the middle of the message history.
 
-        Writes a brief record of discoveries to AGENT_NOTES.md before
-        compressing so nothing important is silently discarded.
+        Preserves the system prompt, original user instruction, and the
+        last N turns. Writes a brief record of discoveries to AGENT_NOTES.md
+        before compressing so nothing important is silently discarded.
 
         Args:
             messages: Full message history to compress.
@@ -186,23 +164,19 @@ class ContextManager:
         """
         keep = self.config.keep_last_n_turns
 
-        # Need at least system + instruction + something to compress + recent
         if len(messages) <= keep + 2:
             logger.debug("History too short to compress (%d messages).", len(messages))
             return messages
 
-        system_msg = messages[0]
+        system_msg      = messages[0]
         instruction_msg = messages[1]
-        middle = messages[2 : len(messages) - keep]
-        recent = messages[len(messages) - keep :]
+        middle          = messages[2 : len(messages) - keep]
+        recent          = messages[len(messages) - keep :]
 
         if not middle:
             return messages
 
-        # Write discoveries to notes before compressing
         self._save_discoveries_to_notes(middle)
-
-        # Summarise the middle
         summary_text = self._summarise(middle)
 
         summary_msg = {
@@ -215,21 +189,17 @@ class ContextManager:
         }
 
         compressed = [system_msg, instruction_msg, summary_msg] + recent
-        original_tokens = estimate_tokens(messages)
-        compressed_tokens = estimate_tokens(compressed)
 
         logger.info(
             "Compression complete. %d messages → %d messages. "
             "~%d tokens → ~%d tokens.",
             len(messages), len(compressed),
-            original_tokens, compressed_tokens
+            estimate_tokens(messages), estimate_tokens(compressed),
         )
         return compressed
 
     def _summarise(self, messages: list) -> str:
-        """
-        Use the summarizer model to produce a concise summary of a
-        slice of message history.
+        """Use the summarizer backend to produce a concise summary.
 
         Args:
             messages: The middle slice to summarise.
@@ -237,21 +207,23 @@ class ContextManager:
         Returns:
             Summary text as a string.
         """
-        # Build a plain transcript from the messages to summarise
         transcript_parts = []
         for m in messages:
-            if isinstance(m, dict):
-                role = m.get("role", "unknown")
-                content = m.get("content") or ""
+            role = m.get("role", "unknown") if isinstance(m, dict) else "unknown"
+            content = m.get("content", "") if isinstance(m, dict) else ""
+            if isinstance(content, list):
+                # Flatten structured content blocks to plain text
+                text = " ".join(
+                    b.get("text", "") or b.get("thinking", "")
+                    for b in content
+                    if isinstance(b, dict)
+                )
             else:
-                role = getattr(m, "role", "unknown")
-                content = getattr(m, "content", "") or ""
-
-            if content.strip():
-                transcript_parts.append(f"{role.upper()}: {content.strip()}")
+                text = content or ""
+            if text.strip():
+                transcript_parts.append(f"{role.upper()}: {text.strip()}")
 
         transcript = "\n\n".join(transcript_parts)
-
         if not transcript:
             return "(No content to summarise.)"
 
@@ -265,13 +237,18 @@ class ContextManager:
         )
 
         try:
-            response = ollama.chat(
-                model=self.config.summarizer_model,
+            response = self._summarizer_backend.chat(
+                model=self._summarizer_model,
                 messages=[{"role": "user", "content": prompt}],
+                tools=[],
                 stream=False,
-                keep_alive="30m",
             )
-            return response.message.content or "(Empty summary returned.)"
+            # Extract text from the response content blocks
+            text_parts = [
+                b.text for b in response.content
+                if isinstance(b, TextBlock) and b.text
+            ]
+            return "\n".join(text_parts) or "(Empty summary returned.)"
 
         except Exception as e:
             logger.warning("Summarisation failed: %s. Using fallback summary.", e)
@@ -280,35 +257,35 @@ class ContextManager:
                 f"{len(messages)} messages were compressed without summary.)"
             )
 
-
     def _save_discoveries_to_notes(self, messages: list) -> None:
-        """
-        Extract and append any notable discoveries from the messages
-        being compressed to AGENT_NOTES.md, so they survive compression.
-    
-        This is a best-effort operation — failures are logged but do not
-        block compression.
+        """Extract and append notable discoveries to AGENT_NOTES.md.
+
+        Best-effort — failures are logged but do not block compression.
+
+        Args:
+            messages: The middle slice about to be compressed.
         """
         try:
             from matrixmouse import memory
             from datetime import datetime
-    
+
             if not memory.is_configured():
                 logger.debug("Memory not configured — skipping discovery save.")
                 return
-    
+
             summary = self._summarise(messages)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
             entry = f"### {timestamp}\n{summary}"
-    
+
             memory._manager.append_to_section("context_compression_log", entry)
             logger.debug("Discoveries written to context_compression_log before compression.")
 
         except Exception as e:
             logger.warning("Failed to write discoveries to notes: %s", e)
 
+
 # ---------------------------------------------------------------------------
-# Convenience function for use before ContextManager is wired into the loop
+# Convenience function
 # ---------------------------------------------------------------------------
 
 def check_and_compress(
@@ -316,23 +293,34 @@ def check_and_compress(
     config: MatrixMouseConfig,
     paths: MatrixMousePaths | RepoPaths,
     coder_model: str,
+    coder_backend: LLMBackend,
+    summarizer_backend: LLMBackend,
+    summarizer_model: str,
 ) -> list:
-    """
-    Functional interface for context checking — creates a ContextManager
+    """Functional interface for context checking — creates a ContextManager
     and calls it in one step.
 
-    Useful for one-off checks or before the full ContextManager is wired
-    into AgentLoop. For repeated use, instantiate ContextManager directly
-    so the token limit is only queried from Ollama once.
+    Useful for one-off checks. For repeated use, instantiate ContextManager
+    directly so the context length is only queried once.
 
     Args:
-        messages:    Current message history.
-        config:      Active MatrixMouseConfig.
-        paths:       Resolved MatrixMousePaths.
-        coder_model: The model whose context limit to respect.
+        messages: Current message history.
+        config: Active MatrixMouseConfig.
+        paths: Resolved MatrixMousePaths.
+        coder_model: Backend-local model identifier for the working agent.
+        coder_backend: LLMBackend for the working agent.
+        summarizer_backend: LLMBackend for the summarizer model.
+        summarizer_model: Backend-local model identifier for the summarizer.
 
     Returns:
         The message list, compressed if necessary.
     """
-    manager = ContextManager(config=config, paths=paths, coder_model=coder_model)
+    manager = ContextManager(
+        config=config,
+        paths=paths,
+        coder_model=coder_model,
+        coder_backend=coder_backend,
+        summarizer_backend=summarizer_backend,
+        summarizer_model=summarizer_model,
+    )
     return manager(messages, config)

@@ -266,6 +266,26 @@ class LLMBackend(ABC):
         ...
 
     @abstractmethod
+    def get_context_length(self, model: str) -> int:
+        """Return the context window length in tokens for the given model.
+
+        Implementations should query the backend where possible. Where the
+        context length cannot be determined programmatically (e.g. remote
+        APIs), return the known limit for the model from a lookup table,
+        or a well-reasoned conservative floor for unrecognised models.
+
+        The floor should be large enough for meaningful agentic work —
+        32,768 tokens is a reasonable minimum for any modern model.
+
+        Args:
+            model: Backend-local model identifier.
+
+        Returns:
+            Context length in tokens.
+        """
+        ...
+
+    @abstractmethod
     def ensure_model(self, model: str) -> None:
         """Best-effort: make the model available if it is not already.
 
