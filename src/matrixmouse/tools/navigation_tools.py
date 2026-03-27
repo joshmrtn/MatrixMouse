@@ -267,3 +267,94 @@ def project_find(name_pattern: str) -> str:
         return f"No files matching '{name_pattern}' found in project."
 
     return "\n".join(sorted(matches)) + f"\n\n({len(matches)} files found)"
+
+
+GET_PROJECT_DIRECTORY_STRUCTURE_SCHEMA = {
+    "name": "get_project_directory_structure",
+    "description": (
+        "Return a tree-style listing of the project directory structure. "
+        "Use this first to orient yourself in an unfamiliar project before "
+        "deciding which files to read. Skips noise directories (.git, __pycache__, etc)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "max_depth": {
+                "type": "integer",
+                "description": (
+                    "Directory levels to show. Defaults to 3. "
+                    "Use a lower value for large projects to reduce output."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
+GET_FILE_SUMMARY_SCHEMA = {
+    "name": "get_file_summary",
+    "description": (
+        "Return a high-level summary of a Python file: module docstring, "
+        "class names, and function signatures — no implementation bodies. "
+        "Cheaper than read_file for orientation. Use this to understand what "
+        "a file contains before deciding whether to read it in full."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Path to the Python file to summarise.",
+            },
+        },
+        "required": ["filename"],
+    },
+}
+
+PROJECT_GREP_SCHEMA = {
+    "name": "project_grep",
+    "description": (
+        "Search all project files for lines matching a regular expression. "
+        "Use this to locate where a symbol, string, or pattern is defined or "
+        "used across the project. Faster than reading files one by one. "
+        "Output is capped at 100 matches — refine the pattern if results overflow."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Regular expression to search for.",
+            },
+            "file_pattern": {
+                "type": "string",
+                "description": (
+                    "Glob pattern to filter which files are searched. "
+                    "Defaults to '*.py'. Use '*' to search all files."
+                ),
+            },
+        },
+        "required": ["pattern"],
+    },
+}
+
+PROJECT_FIND_SCHEMA = {
+    "name": "project_find",
+    "description": (
+        "Find files in the project matching a name pattern. "
+        "Use this when you know a filename or part of it but not its full path."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name_pattern": {
+                "type": "string",
+                "description": (
+                    "Glob pattern matched against file names, "
+                    "e.g. 'config.py', '*.toml', 'test_*.py'."
+                ),
+            },
+        },
+        "required": ["name_pattern"],
+    },
+}

@@ -139,3 +139,77 @@ def append_to_file(filename: str, content: str) -> str:
 
     logger.info("append_to_file: %s", filename)
     return f"OK: Content appended to {filename} successfully."
+
+
+READ_FILE_SCHEMA = {
+    "name": "read_file",
+    "description": (
+        "Read and return the entire contents of a file. "
+        "Use this to inspect a file before editing it."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Path to the file to read. Must be within the project root.",
+            },
+        },
+        "required": ["filename"],
+    },
+}
+
+STR_REPLACE_SCHEMA = {
+    "name": "str_replace",
+    "description": (
+        "Replace a unique string in a file with new content. "
+        "old_str must appear exactly once — if it appears zero or more than once, "
+        "no changes are made. Use read_file first to confirm the exact string, "
+        "including whitespace and indentation."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Path to the file to edit. Must be within the project root.",
+            },
+            "old_str": {
+                "type": "string",
+                "description": (
+                    "The exact string to find and replace. "
+                    "Must appear exactly once in the file. "
+                    "Include enough surrounding context to make it unambiguous."
+                ),
+            },
+            "new_str": {
+                "type": "string",
+                "description": "The string to replace old_str with.",
+            },
+        },
+        "required": ["filename", "old_str", "new_str"],
+    },
+}
+
+APPEND_TO_FILE_SCHEMA = {
+    "name": "append_to_file",
+    "description": (
+        "Append content to the end of a file. Creates the file if it does not exist. "
+        "Use this for adding new functions, classes, or sections. "
+        "For modifying existing content, use str_replace instead."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Path to the file to append to. Must be within the project root.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The content to append.",
+            },
+        },
+        "required": ["filename", "content"],
+    },
+}

@@ -652,8 +652,7 @@ def clone_repo(remote_url: str, directory: Optional[str] = None) -> str:
     """
     Clone a remote repository into the MatrixMouse workspace.
 
-    The repo is cloned into <workspace_root>/<directory>. After cloning,
-    run `matrixmouse init --repo <directory>` to register it.
+    The repo is cloned into <workspace_root>/<directory>.
 
     Args:
         remote_url: The remote URL to clone.
@@ -702,3 +701,116 @@ def clone_repo(remote_url: str, directory: Optional[str] = None) -> str:
             f"Next: run 'matrixmouse init --repo {directory}' to register it."
         )
     return _fmt(success, output, "clone_repo")
+
+
+GIT_COMMIT_SCHEMA = {
+    "name": "git_commit",
+    "description": (
+        "Stage all current changes and create a commit. "
+        "Only commit when the current state represents a logical unit of completed work — "
+        "ideally after tests pass."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": (
+                    "Commit message describing what was done. "
+                    "Do not include an [agent] prefix — it is added automatically."
+                ),
+            },
+        },
+        "required": ["message"],
+    },
+}
+
+GET_GIT_DIFF_SCHEMA = {
+    "name": "get_git_diff",
+    "description": (
+        "Show changes made during this task against the task baseline. "
+        "By default diffs against the parent branch HEAD at the time this branch was created, "
+        "so you see everything done on this task and nothing else. "
+        "Use 'HEAD' as base to see only uncommitted changes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "base": {
+                "type": "string",
+                "description": (
+                    "Override the diff baseline. Omit to use the task baseline. "
+                    "Use 'HEAD' to see only uncommitted changes."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
+GET_GIT_LOG_SCHEMA = {
+    "name": "get_git_log",
+    "description": (
+        "Show recent commit history for the current branch. "
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "n": {
+                "type": "integer",
+                "description": "Number of commits to show. Defaults to 10. Max 50.",
+            },
+        },
+        "required": [],
+    },
+}
+
+GET_GIT_STATUS_SCHEMA = {
+    "name": "get_git_status",
+    "description": (
+        "Show the working tree status — modified, staged, untracked, and conflicted files. "
+        "Use this before committing to verify your changes are what you expect."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+PUSH_BRANCH_SCHEMA = {
+    "name": "push_branch",
+    "description": (
+        "Push the current branch to origin. "
+        "Call this after committing completed work, before declaring the task complete."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+CLONE_REPO_SCHEMA = {
+    "name": "clone_repo",
+    "description": (
+        "Clone a remote repository into the MatrixMouse workspace. "
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "remote_url": {
+                "type": "string",
+                "description": "The remote URL to clone.",
+            },
+            "directory": {
+                "type": "string",
+                "description": (
+                    "Subdirectory name within the workspace. "
+                    "Defaults to the repo name inferred from the URL."
+                ),
+            },
+        },
+        "required": ["remote_url"],
+    },
+}

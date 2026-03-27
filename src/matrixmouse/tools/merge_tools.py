@@ -141,6 +141,26 @@ def show_conflict(file: str) -> str:
     return "\n".join(lines)
 
 
+SHOW_CONFLICT_SCHEMA = {
+    "name": "show_conflict",
+    "description": (
+        "Inspect the conflict markers in a file. Shows ours (current branch), "
+        "theirs (merging branch), and base (common ancestor) for each hunk. "
+        "Call this before resolve_conflict to understand what each side changed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file": {
+                "type": "string",
+                "description": "Path to the conflicted file, relative to the repo root.",
+            },
+        },
+        "required": ["file"],
+    },
+}
+
+
 def resolve_conflict(
     file: str,
     resolution: str,
@@ -238,6 +258,41 @@ def resolve_conflict(
         f"OK: '{file}' resolved using '{resolution}'. "
         f"{len(remaining)} conflict(s) remaining: {', '.join(remaining)}"
     )
+
+
+RESOLVE_CONFLICT_SCHEMA = {
+    "name": "resolve_conflict",
+    "description": (
+        "Apply a resolution to a conflicted file and stage it. "
+        "When the last conflict is resolved the merge is finalised automatically."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "file": {
+                "type": "string",
+                "description": "Path to the conflicted file, relative to the repo root.",
+            },
+            "resolution": {
+                "type": "string",
+                "enum": ["ours", "theirs", "manual"],
+                "description": (
+                    "'ours' — keep the current branch (HEAD) version entirely. "
+                    "'theirs' — keep the merging branch version entirely. "
+                    "'manual' — provide a fully merged file via the content parameter."
+                ),
+            },
+            "content": {
+                "type": "string",
+                "description": (
+                    "Complete merged file content with all conflict markers removed. "
+                    "Required when resolution is 'manual', ignored otherwise."
+                ),
+            },
+        },
+        "required": ["file", "resolution"],
+    },
+}
 
 
 # ---------------------------------------------------------------------------

@@ -243,3 +243,48 @@ def run_single_test(test_id: str) -> str:
     logger.info("Using FIFO test runner.")
     return _run_via_fifo(test_id)
 
+RUN_TESTS_SCHEMA = {
+    "name": "run_tests",
+    "description": (
+        "Run the test suite and return the full output with pass/fail summary. "
+        "Run this after making changes to verify nothing is broken. "
+        "Defaults to the full suite; pass a specific file or directory to narrow scope."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Path to a test file or directory. Defaults to 'tests/' for the full suite. "
+                    "Must be under the tests/ directory."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
+RUN_SINGLE_TEST_SCHEMA = {
+    "name": "run_single_test",
+    "description": (
+        "Run a single test by its pytest node ID. "
+        "Use this to re-run a specific failing test or verify a fix "
+        "without waiting for the full suite."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "test_id": {
+                "type": "string",
+                "description": (
+                    "Full pytest node ID, e.g. "
+                    "'tests/test_config.py::test_load_defaults' or "
+                    "'tests/test_config.py::TestClass::test_method'. "
+                    "Must start with 'tests/'."
+                ),
+            },
+        },
+        "required": ["test_id"],
+    },
+}
