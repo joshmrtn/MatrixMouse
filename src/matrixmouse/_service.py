@@ -325,6 +325,10 @@ def main() -> None:
         _load_env_file("/etc/matrixmouse/secrets/github_token")
         _load_env_file("/etc/matrixmouse/secrets/ntfy")
 
+        # --- Git tools check
+        from matrixmouse.tools.git_tools import _require_ssh_key
+        _require_ssh_key()
+
         # --- Safety module (workspace-wide baseline) ---
         registered = _load_registered_repos(workspace_root)
         if registered:

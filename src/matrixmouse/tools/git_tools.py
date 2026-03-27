@@ -40,6 +40,7 @@ from typing import Optional
 
 from matrixmouse.task import Task
 from matrixmouse.tools._safety import project_root
+from matrixmouse import config as config_module
 
 logger = logging.getLogger(__name__)
 
@@ -85,32 +86,43 @@ def configure(task: Task, cwd: Path) -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _require_ssh_key() -> Path:
+    """
+    Return the absolute path to the MatrixMouse SSH private key.
+    Raises FileNotFoundError if the key file is missing. 
+    """
+    cfg = getattr(config_module, "_loaded_config", None)
+    if not cfg:
+        raise AttributeError("Configuration not found")
+    secrets_dir = Path("/etc/matrixmouse/secrets")
+    key_path = secrets_dir / cfg.gh_ssh_key_file
+
+    if not key_path.is_file():
+        raise FileNotFoundError(
+            f"SSH key not found at {key_path}. "
+            "Create it or fix gh_ssh_key_file in your config."
+        )
+    return key_path
+
+
 def _git_env() -> dict:
     """
     Build the environment for git subprocess calls.
     Injects SSH key and agent git identity from config.
     """
+    key_path = _require_ssh_key()
     env = os.environ.copy()
-    from matrixmouse import config as config_module
     cfg = getattr(config_module, "_loaded_config", None)
-    if cfg:
-        secrets_dir = Path("/etc/matrixmouse/secrets")
-        key_path = secrets_dir / cfg.gh_ssh_key_file
-        if key_path.exists():
-            env["GIT_SSH_COMMAND"] = (
-                f"ssh -i {key_path} "
-                f"-o IdentitiesOnly=yes "
-                f"-o StrictHostKeyChecking=accept-new"
-            )
-        else:
-            logger.warning(
-                "SSH key not found at %s. Using host default SSH config.",
-                key_path,
-            )
-        env["GIT_AUTHOR_NAME"]     = cfg.agent_git_name
-        env["GIT_AUTHOR_EMAIL"]    = cfg.agent_git_email
-        env["GIT_COMMITTER_NAME"]  = cfg.agent_git_name
-        env["GIT_COMMITTER_EMAIL"] = cfg.agent_git_email
+
+    env["GIT_SSH_COMMAND"] = (
+        f"ssh -i {key_path} "
+        f"-o IdentitiesOnly=yes "
+        f"-o StrictHostKeyChecking=accept-new"
+    )
+    env["GIT_AUTHOR_NAME"]     = cfg.agent_git_name
+    env["GIT_AUTHOR_EMAIL"]    = cfg.agent_git_email
+    env["GIT_COMMITTER_NAME"]  = cfg.agent_git_name
+    env["GIT_COMMITTER_EMAIL"] = cfg.agent_git_email
     return env
 
 

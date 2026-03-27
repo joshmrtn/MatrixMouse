@@ -65,6 +65,7 @@ import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import importlib
 
 import pytest
 
@@ -72,6 +73,7 @@ from matrixmouse.tools import git_tools
 from matrixmouse.tools.git_tools import (
     WIP_PREFIX,
     MIRROR_REMOTE,
+    _require_ssh_key,
     branch_exists,
     create_branch,
     get_head_hash,
@@ -84,6 +86,41 @@ from matrixmouse.task import AgentRole, Task, TaskStatus
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def mock_ssh_key_check(tmp_path):
+    """
+    Automatically mocks _require_ssh_key for all tests. 
+    Returns a Path object to a fake key that actually exists.
+    """
+    fake_key = tmp_path / "fake_id_rsa"
+    fake_key.write_text("fake-ssh-key-content")
+
+    with patch("matrixmouse.tools.git_tools._require_ssh_key", return_value=fake_key) as mocked_func:
+        yield mocked_func
+
+@pytest.fixture(autouse=True)
+def mock_git_config(tmp_path):
+    """
+    Mocks the global config object so git_tools doesn't 
+    crash looking for 'loaded_config'.
+    """
+    # 1. Setup fake filesystem paths
+    fake_key = tmp_path / "fake_id_rsa"
+    fake_key.write_text("fake-ssh-key-content")
+
+    # 2. Create a Mock Config Object
+    mock_cfg = MagicMock()
+    mock_cfg.gh_ssh_key_file = "fake_id_rsa"
+    mock_cfg.agent_git_name = "MatrixMouse"
+    mock_cfg.agent_git_email = "agent@matrixmouse.local"
+
+    # 3. Patch the internal config module reference
+    # We patch the attribute directly so getattr(config_module, "_loaded_config") works
+    with patch("matrixmouse.config._loaded_config", mock_cfg):
+        # 4. ALSO patch the ssh key check to return our specific tmp path
+        with patch("matrixmouse.tools.git_tools._require_ssh_key", return_value=fake_key):
+            yield mock_cfg
 
 @pytest.fixture
 def git_repo(tmp_path):
@@ -141,6 +178,7 @@ def git_repo_with_mirror(git_repo, tmp_path):
 @pytest.fixture
 def configured_task(git_repo):
     """Configure git_tools with a task pointing to git_repo."""
+    print(f"DEBUG: About to configure. Mock active? {git_tools._require_ssh_key}")
     task = Task(
         title="test task",
         description="desc",
@@ -159,6 +197,42 @@ def configured_task(git_repo):
     git_tools._active_branch = None
     git_tools._active_cwd = None
 
+# ---------------------------------------------------------------------------
+# _require_ssh_key and _fmt
+# ---------------------------------------------------------------------------
+
+def test_require_ssh_key_logic(tmp_path):
+    # 1. Force a reload of the module to wipe out any global mocks
+    from matrixmouse.tools import git_tools
+    importlib.reload(git_tools)
+    
+    # 2. Setup our failure conditions
+    mock_cfg = MagicMock()
+    mock_cfg.gh_ssh_key_file = "nonexistent_key"
+    
+    # 3. Use patch.multiple to handle the config and the filesystem check
+    # We patch Path in the context of the git_tools module
+    with patch("matrixmouse.config._loaded_config", mock_cfg):
+        with patch("matrixmouse.tools.git_tools.Path.is_file", return_value=False):
+            with pytest.raises(FileNotFoundError, match="SSH key not found"):
+                # Call the real function from the reloaded module
+                git_tools._require_ssh_key()
+
+    # 4. Success case
+    with patch("matrixmouse.config._loaded_config", mock_cfg):
+        with patch("matrixmouse.tools.git_tools.Path.is_file", return_value=True):
+            path = git_tools._require_ssh_key()
+            assert str(path).endswith("nonexistent_key")
+
+def test_fmt_behavior():
+    from matrixmouse.tools.git_tools import _fmt
+    # Test Success case
+    assert _fmt(True, "all good") == "all good"
+    assert _fmt(True, "") == "OK"
+    
+    # Test Error case
+    assert _fmt(False, "boom", context="git_push") == "ERROR (git_push): boom"
+    assert _fmt(False, "fail") == "ERROR: fail"
 
 # ---------------------------------------------------------------------------
 # branch_exists
@@ -633,6 +707,31 @@ class TestPushToRemote:
         assert not success
         assert msg
 
+    def test_push_branch_success(self, git_repo_with_mirror, configured_task):
+        repo, mirror = git_repo_with_mirror
+        branch_name = "mm/test/branch"
+        
+        # 1. Create and switch to the branch defined in configured_task
+        subprocess.run(["git", "checkout", "-b", branch_name], cwd=repo)
+        
+        # 2. Make a change
+        (repo / "new_feat.txt").write_text("feature")
+        subprocess.run(["git", "add", "."], cwd=repo)
+        subprocess.run(["git", "commit", "-m", "new feature"], cwd=repo)
+        
+        # 3. Add origin remote (pointing to our fake mirror)
+        subprocess.run(["git", "remote", "add", "origin", str(mirror)], cwd=repo)
+        
+        # 4. Run the tool
+        response = git_tools.push_branch(cwd=repo)
+        
+        assert "OK" in response
+        
+        # 5. Verify the branch exists on the remote now
+        result = subprocess.run(["git", "ls-remote", "--heads", str(mirror)], 
+                                capture_output=True, text=True)
+        assert branch_name in result.stdout
+
 
 class TestRequireCwd:
     def test_raises_when_not_configured(self):
@@ -641,3 +740,27 @@ class TestRequireCwd:
         git_tools._active_branch = None
         with pytest.raises(RuntimeError, match="not configured"):
             git_tools.get_git_status()
+
+class TestCloneRepo:
+    def test_clone_repo_success(self, tmp_path, git_repo):
+        # Use our existing git_repo as the 'remote' source to clone from
+        remote_url = str(git_repo)
+        workspace = tmp_path / "mock_workspace"
+        workspace.mkdir()
+        
+        with patch.dict(os.environ, {"WORKSPACE_PATH": str(workspace)}):
+            response = git_tools.clone_repo(remote_url, directory="cloned_project")
+            
+            assert "OK: Cloned" in response
+            assert (workspace / "cloned_project" / "README.md").exists()
+            assert (workspace / "cloned_project" / ".git").is_dir()
+
+    def test_clone_repo_already_exists(self, tmp_path, git_repo):
+        workspace = tmp_path / "mock_workspace"
+        workspace.mkdir()
+        (workspace / "exists").mkdir()
+        
+        with patch.dict(os.environ, {"WORKSPACE_PATH": str(workspace)}):
+            response = git_tools.clone_repo(str(git_repo), directory="exists")
+            assert "ERROR: Directory" in response
+            assert "already exists" in response
