@@ -84,7 +84,7 @@ class MatrixMouseConfig(BaseSettings):
         description="Model for context summarisation. Should be small and fast.",
     )
     agent_max_turns: int = Field(
-        default=5,
+        default=50,
         description=(
             "Maximum turns an agent may take on a single task before the "
             "task is moved to BLOCKED_BY_HUMAN. The operator can extend, "

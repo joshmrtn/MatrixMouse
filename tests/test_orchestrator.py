@@ -71,7 +71,6 @@ from matrixmouse.task import AgentRole, Task, TaskStatus
 from matrixmouse.loop import LoopResult, LoopExitReason
 from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.repository.workspace_state_repository import WorkspaceStateRepository
-# Remove the local class definition entirely, replace with:
 from matrixmouse.repository.memory_workspace_state_repository import (
     InMemoryWorkspaceStateRepository,
 )
@@ -113,22 +112,49 @@ def make_config(**kwargs) -> MagicMock:
     cfg.critic_max_turns              = kwargs.get("critic_max_turns",         5)
     cfg.manager_planning_max_turns    = kwargs.get("planning_max_turns",       10)
     cfg.agent_branch_prefix           = kwargs.get("agent_branch_prefix",      "mm")
+    cfg.merge_conflict_max_turns      = kwargs.get("merge_conflict_max_turns", 5)
+    cfg.default_merge_target          = kwargs.get("default_merge_target",     "")
+    cfg.protected_branches            = kwargs.get("protected_branches",
+                                                   ["main", "master", "develop", "release"])
+    cfg.branch_protection_cache_ttl_minutes = kwargs.get(
+        "branch_protection_cache_ttl_minutes", 60
+    )
+    cfg.pr_poll_interval_minutes      = kwargs.get("pr_poll_interval_minutes", 10)
     return cfg
 
 
 def make_orchestrator(tmp_path: Path, **config_kwargs) -> Orchestrator:
-    config       = make_config(**config_kwargs)
-    paths        = MagicMock()
+    """Construct an Orchestrator with minimal real dependencies.
+
+    The Router is patched out entirely — test_router.py covers routing logic.
+    All other orchestrator logic runs against real in-memory repositories.
+    """
+    config        = make_config(**config_kwargs)
+    paths         = MagicMock()
     paths.workspace_root = tmp_path
     paths.agent_notes    = tmp_path / "AGENT_NOTES.md"
-    queue        = InMemoryTaskRepository()
+    queue         = InMemoryTaskRepository()
     ws_state_repo = InMemoryWorkspaceStateRepository()
-    return Orchestrator(
-        config=config,
-        paths=paths,
-        queue=queue,
-        ws_state_repo=ws_state_repo,
-    )
+
+    mock_router = MagicMock()
+    mock_router.model_for_role.return_value        = "ollama:test-model"
+    mock_router.parsed_model_for_role.return_value = MagicMock(model="test-model")
+    mock_router.backend_for_role.return_value      = MagicMock()
+    mock_router.get_backend.return_value           = MagicMock()
+    mock_router.stream_for_role.return_value       = False
+    mock_router.think_for_role.return_value        = False
+
+    with patch("matrixmouse.orchestrator.Router", return_value=mock_router):
+        orch = Orchestrator(
+            config=config,
+            paths=paths,
+            queue=queue,
+            ws_state_repo=ws_state_repo,
+        )
+    # Replace the router with our mock after construction too, in case
+    # Orchestrator stores it as self._router
+    orch._router = mock_router
+    return orch
 
 
 def make_loop_result(
@@ -291,8 +317,7 @@ class TestHandleComplete:
             orch._handle_complete(task, result)
         updated_task = orch.queue.get(task.id)
         assert updated_task is not None
-        assert updated_task.last_review_summary == \
-               "All tasks look healthy."
+        assert updated_task.last_review_summary == "All tasks look healthy."
 
     def test_critic_task_is_noop(self, tmp_path):
         orch = make_orchestrator(tmp_path)
@@ -411,7 +436,6 @@ class TestCreateCriticReview:
              patch("matrixmouse.comms.get_manager", return_value=None), \
              patch.object(orch.queue, "add", side_effect=Exception("disk full")):
             orch._create_critic_review(task, result)
-        # Should fall back to marking the original task complete
         orig_task = orch.queue.get(task.id)
         assert orig_task is not None
         assert orig_task.status == TaskStatus.COMPLETE
@@ -457,7 +481,6 @@ class TestLoadOrBuildMessages:
         orch.queue.add(task)
         agent = MagicMock()
         result = orch._load_or_build_messages(task, agent)
-        # Mutating result should not affect task.context_messages
         result.append({"role": "assistant", "content": "extra"})
         assert len(task.context_messages) == 1
 
@@ -500,7 +523,6 @@ class TestMaybeInjectManagerReview:
 
     def test_injects_review_task_when_no_prior_review(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
-        # No last_manager_review_at in state → always due
         orch._maybe_inject_manager_review()
         tasks = orch.queue.all_tasks()
         assert len(tasks) == 1
@@ -514,9 +536,7 @@ class TestMaybeInjectManagerReview:
 
     def test_no_duplicate_when_review_already_active(self, tmp_path):
         orch = self._make_orchestrator(tmp_path)
-        # Inject once
         orch._maybe_inject_manager_review()
-        # Inject again — should not create a second review task
         orch._maybe_inject_manager_review()
         review_tasks = [
             t for t in orch.queue.all_tasks()
@@ -698,21 +718,12 @@ class TestOnManagerReviewComplete:
 # ---------------------------------------------------------------------------
 
 class TestSessionModeWiring:
-    """
-    Tests for BRANCH_SETUP and PLANNING session mode wiring in the
-    orchestrator. These test the orchestrator's state management around
-    session contexts — not the full agent loop execution.
-    """
-
     def test_branch_setup_context_set_for_branchless_manager(self, tmp_path):
-        """Manager task with no branch gets BRANCH_SETUP session context."""
         from matrixmouse.repository.workspace_state_repository import SessionMode
         orch = make_orchestrator(tmp_path)
         task = make_task(role=AgentRole.MANAGER, branch="")
         orch.queue.add(task)
 
-        # Simulate the session context check at start of _run_task
-        # by calling the relevant block directly
         from matrixmouse.repository.workspace_state_repository import (
             SessionContext, BRANCH_SETUP_TOOLS
         )
@@ -737,16 +748,12 @@ class TestSessionModeWiring:
         assert "split_task" not in ctx.allowed_tools
 
     def test_branch_setup_context_not_set_for_branched_manager(self, tmp_path):
-        """Manager task with a branch does not get BRANCH_SETUP context."""
-        from matrixmouse.repository.workspace_state_repository import SessionMode
         orch = make_orchestrator(tmp_path)
         task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
         orch.queue.add(task)
-        # No context should be set
         assert orch._ws_state_repo.get_session_context(task.id) is None
 
     def test_planning_context_cleared_on_complete(self, tmp_path):
-        """PLANNING session context is cleared when Manager declares complete."""
         from matrixmouse.repository.workspace_state_repository import (
             SessionContext, SessionMode, PLANNING_TOOLS
         )
@@ -754,7 +761,6 @@ class TestSessionModeWiring:
         task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
         orch.queue.add(task)
 
-        # Set PLANNING context
         orch._ws_state_repo.set_session_context(
             task.id,
             SessionContext(
@@ -770,7 +776,6 @@ class TestSessionModeWiring:
         assert orch._ws_state_repo.get_session_context(task.id) is None
 
     def test_planning_commit_pending_subtree_on_complete(self, tmp_path):
-        """PLANNING completion transitions PENDING subtasks to READY."""
         from matrixmouse.repository.workspace_state_repository import (
             SessionContext, SessionMode, PLANNING_TOOLS
         )
@@ -778,14 +783,12 @@ class TestSessionModeWiring:
         task = make_task(role=AgentRole.MANAGER, branch="mm/feature/foo")
         orch.queue.add(task)
 
-        # Add PENDING subtask
         subtask = make_task(title="pending child",
                             status=TaskStatus.PENDING, branch="")
         subtask.parent_task_id = task.id
         subtask.depth = 1
         orch.queue.add(subtask)
 
-        # Set PLANNING context
         orch._ws_state_repo.set_session_context(
             task.id,
             SessionContext(
@@ -803,7 +806,6 @@ class TestSessionModeWiring:
         assert t.status == TaskStatus.READY
 
     def test_branch_setup_context_cleared_on_complete(self, tmp_path):
-        """BRANCH_SETUP session context is cleared when Manager completes."""
         from matrixmouse.repository.workspace_state_repository import (
             SessionContext, SessionMode, BRANCH_SETUP_TOOLS
         )
@@ -828,7 +830,6 @@ class TestSessionModeWiring:
     def test_planning_turn_limit_commits_pending_and_clears_context(
         self, tmp_path
     ):
-        """On PLANNING turn limit, pending tasks committed and context cleared."""
         from matrixmouse.repository.workspace_state_repository import (
             SessionContext, SessionMode, PLANNING_TOOLS
         )
@@ -860,27 +861,21 @@ class TestSessionModeWiring:
         with patch("matrixmouse.comms.get_manager", return_value=mock_comms):
             orch._handle_decision(task, result)
 
-        # Pending task committed
         t = orch.queue.get(subtask.id)
         assert t is not None
         assert t.status == TaskStatus.READY
-        # Context cleared
         assert orch._ws_state_repo.get_session_context(task.id) is None
-        # Correct event emitted
         emitted = [c.args[0] for c in mock_comms.emit.call_args_list]
         assert "planning_turn_limit_reached" in emitted
         assert "turn_limit_reached" not in emitted
 
     def test_coder_task_not_given_branch_setup_context(self, tmp_path):
-        """Non-Manager tasks never get BRANCH_SETUP context."""
         orch = make_orchestrator(tmp_path)
         task = make_task(role=AgentRole.CODER, branch="")
         orch.queue.add(task)
         assert orch._ws_state_repo.get_session_context(task.id) is None
 
     def test_branch_missing_triggers_human_intervention(self, tmp_path):
-        """If branch cannot be recreated from mirror, task is blocked."""
-        # Create the repo directory so the branch check runs
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
@@ -899,9 +894,7 @@ class TestSessionModeWiring:
         assert updated.status == TaskStatus.BLOCKED_BY_HUMAN
 
     def test_branchless_task_skips_verification(self, tmp_path):
-        """Tasks with no branch set skip the mirror verification entirely."""
         orch = make_orchestrator(tmp_path)
-        # Manager task with no branch — enters BRANCH_SETUP instead
         task = make_task(role=AgentRole.MANAGER, branch="")
         orch.queue.add(task)
 
@@ -917,7 +910,6 @@ class TestSessionModeWiring:
         mock_verify.assert_not_called()
 
     def test_task_with_branch_but_no_repo_skips_verification(self, tmp_path):
-        """Tasks with a branch but empty repo list skip mirror verification."""
         orch = make_orchestrator(tmp_path)
         task = make_task(role=AgentRole.CODER, branch="mm/feature/foo", repo=[])
         orch.queue.add(task)
@@ -934,7 +926,6 @@ class TestSessionModeWiring:
         mock_verify.assert_not_called()
 
     def test_checkout_failure_triggers_human_intervention(self, tmp_path):
-        """If git checkout fails after branch verification, task is blocked."""
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
@@ -953,22 +944,27 @@ class TestSessionModeWiring:
         updated = orch.queue.get(task.id)
         assert updated is not None
         assert updated.status == TaskStatus.BLOCKED_BY_HUMAN
-        
+
+
+# ---------------------------------------------------------------------------
+# WIP commit wiring
+# ---------------------------------------------------------------------------
 
 class TestWipCommitWiring:
     def test_wip_commit_callable_called_after_dispatch(self, tmp_path):
         """wip_commit is called once per turn after tool dispatch."""
         from matrixmouse.loop import AgentLoop, LoopExitReason
-        from types import SimpleNamespace
+        from matrixmouse.inference.base import LLMResponse, TextBlock, ToolUseBlock
 
         wip_calls = []
 
         def fake_wip():
             wip_calls.append(1)
 
-        # Build a loop that runs one turn then declares complete
         messages = [{"role": "system", "content": "prompt"}]
+        backend = MagicMock()
         loop = AgentLoop(
+            backend=backend,
             model="test",
             messages=messages,
             config=make_config(),
@@ -976,26 +972,22 @@ class TestWipCommitWiring:
             wip_commit=fake_wip,
         )
 
-        fake_response = SimpleNamespace(
-            message=SimpleNamespace(
-                content="done",
-                thinking=None,
-                tool_calls=[
-                    SimpleNamespace(
-                        function=SimpleNamespace(
-                            name="declare_complete",
-                            arguments={"summary": "all done"},
-                        )
-                    )
-                ],
-            )
+        declare_block = ToolUseBlock(
+            id="call_dc",
+            name="declare_complete",
+            input={"summary": "all done"},
         )
+        fake_response = LLMResponse(
+            content=[declare_block],
+            input_tokens=10,
+            output_tokens=5,
+            model="test",
+            stop_reason="tool_use",
+        )
+        backend.chat.return_value = fake_response
 
-        with patch.object(loop, "_chat_completion",
-                          return_value=fake_response):
-            result = loop.run()
+        result = loop.run()
 
-        # declare_complete exits before wip_commit fires
         assert result.exit_reason == LoopExitReason.COMPLETE
         # WIP commit should NOT fire on declare_complete exit
         assert len(wip_calls) == 0
@@ -1003,8 +995,9 @@ class TestWipCommitWiring:
     def test_wip_commit_fires_after_normal_tool_call(self, tmp_path):
         """wip_commit fires after a non-exit tool call turn."""
         from matrixmouse.loop import AgentLoop, LoopExitReason
+        from matrixmouse.inference.base import LLMResponse, TextBlock, ToolUseBlock
+        from matrixmouse.inference.base import Tool
         from matrixmouse.tools import TOOL_REGISTRY
-        from types import SimpleNamespace
 
         wip_calls = []
 
@@ -1012,7 +1005,9 @@ class TestWipCommitWiring:
             wip_calls.append(1)
 
         messages = [{"role": "system", "content": "prompt"}]
+        backend = MagicMock()
         loop = AgentLoop(
+            backend=backend,
             model="test",
             messages=messages,
             config=make_config(),
@@ -1020,53 +1015,42 @@ class TestWipCommitWiring:
             wip_commit=fake_wip,
         )
 
-        turn = 0
-        def fake_response():
-            nonlocal turn
-            turn += 1
-            if turn == 1:
-                # First turn: normal tool call
-                return SimpleNamespace(
-                    message=SimpleNamespace(
-                        content="",
-                        thinking=None,
-                        tool_calls=[
-                            SimpleNamespace(
-                                function=SimpleNamespace(
-                                    name="get_git_status",
-                                    arguments={},
-                                )
-                            )
-                        ],
-                    )
-                )
-            else:
-                # Second turn: declare complete
-                return SimpleNamespace(
-                    message=SimpleNamespace(
-                        content="done",
-                        thinking=None,
-                        tool_calls=[
-                            SimpleNamespace(
-                                function=SimpleNamespace(
-                                    name="declare_complete",
-                                    arguments={"summary": "done"},
-                                )
-                            )
-                        ],
-                    )
-                )
+        status_block = ToolUseBlock(
+            id="call_status",
+            name="get_git_status",
+            input={},
+        )
+        declare_block = ToolUseBlock(
+            id="call_dc",
+            name="declare_complete",
+            input={"summary": "done"},
+        )
+        response1 = LLMResponse(
+            content=[status_block],
+            input_tokens=10, output_tokens=5,
+            model="test", stop_reason="tool_use",
+        )
+        response2 = LLMResponse(
+            content=[declare_block],
+            input_tokens=10, output_tokens=5,
+            model="test", stop_reason="tool_use",
+        )
+        backend.chat.side_effect = [response1, response2]
 
-        with patch.object(loop, "_chat_completion",
-                          side_effect=fake_response), \
-             patch.dict(TOOL_REGISTRY,
-                        {"get_git_status": lambda: "clean"}):
+        fake_tool = Tool(
+            fn=lambda: "clean",
+            schema={"name": "get_git_status", "input_schema": {}},
+        )
+        with patch.dict(TOOL_REGISTRY, {"get_git_status": fake_tool}):
             result = loop.run()
 
         assert result.exit_reason == LoopExitReason.COMPLETE
-        # WIP commit fires after turn 1 (normal tool), not after turn 2 (exit)
-        assert len(wip_calls) >= 1 # We now WIP commit after every dispatch & loop
-        
+        assert len(wip_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Merge-up tests
+# ---------------------------------------------------------------------------
 
 class TestMergeUp:
     def test_clean_merge_marks_reviewed_task_complete(self, tmp_path):
@@ -1279,11 +1263,11 @@ class TestMergeUp:
              patch("matrixmouse.comms.get_manager", return_value=None):
             orch._handle_critic_complete(critic, result)
 
-        # Task should not be complete or transitioned to MERGE
         updated = orch.queue.get(reviewed.id)
         assert updated is not None
         assert updated.role == AgentRole.CODER
         assert updated.status != TaskStatus.COMPLETE
+
 
 class TestGetMergeTarget:
     def test_returns_parent_branch_when_parent_has_branch(self, tmp_path):
@@ -1351,7 +1335,6 @@ class TestRunMergeUp:
         task = make_task(role=AgentRole.CODER, branch="mm/feature/foo",
                          repo=["repo"])
         orch.queue.add(task)
-        # Pre-lock the branch
         orch._ws_state_repo.acquire_merge_lock("mm/dev", "other-task")
 
         repo_dir = tmp_path / "repo"
@@ -1360,7 +1343,6 @@ class TestRunMergeUp:
         success, info = orch._run_merge_up(task, "mm/dev", repo_dir)
         assert not success
         assert info == "QUEUED"
-        # Task should be enqueued
         assert orch._ws_state_repo.dequeue_next_merge_waiter("mm/dev") == task.id
 
     def test_returns_conflict_on_merge_conflict(self, tmp_path):
@@ -1370,8 +1352,6 @@ class TestRunMergeUp:
         orch.queue.add(task)
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
-
-        from matrixmouse.tools.git_tools import _git as real_git
 
         def mock_git(args, cwd):
             if args[0] == "checkout":
@@ -1390,7 +1370,6 @@ class TestRunMergeUp:
         assert not success
         assert info.startswith("CONFLICT:")
         assert "foo.py" in info
-        # Lock should still be held
         assert orch._ws_state_repo.get_merge_lock_holder("mm/dev") == task.id
 
     def test_releases_lock_on_clean_merge(self, tmp_path):
@@ -1431,7 +1410,6 @@ class TestRunMergeUp:
 
         assert not success
         assert "CHECKOUT_FAILED" in info
-        # Lock should be released on checkout failure
         assert orch._ws_state_repo.get_merge_lock_holder("mm/dev") is None
 
     def test_handle_no_merge_target_works_without_comms(self, tmp_path):
@@ -1459,7 +1437,6 @@ class TestRunMergeUp:
                 task, "mm/dev", tmp_path / "repo", ["foo.py"]
             )
 
-        # Lock should be released on failure
         assert orch._ws_state_repo.get_merge_lock_holder("mm/dev") is None
         t = orch.queue.get(task.id)
         assert t is not None
@@ -1549,8 +1526,7 @@ class TestMergeTurnLimit:
         task.preemptable = False
         orch.queue.add(task)
 
-        repo_dir = tmp_path / "repo"
-        repo_dir.mkdir()
+        (tmp_path / "repo").mkdir()
 
         result = make_loop_result(
             exit_reason=LoopExitReason.DECISION,
@@ -1580,8 +1556,7 @@ class TestMergeTurnLimit:
         task.preemptable = False
         orch.queue.add(task)
 
-        repo_dir = tmp_path / "repo"
-        repo_dir.mkdir()
+        (tmp_path / "repo").mkdir()
 
         result = make_loop_result(
             exit_reason=LoopExitReason.DECISION,
@@ -1626,3 +1601,4 @@ class TestMergeTurnLimit:
         t = orch.queue.get(task.id)
         assert t is not None
         assert t.status == TaskStatus.BLOCKED_BY_HUMAN
+        

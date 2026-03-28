@@ -149,12 +149,12 @@ def parse_model_string(model_string: str) -> ParsedModel:
             f"Known backends: {sorted(_KNOWN_BACKENDS)}"
         )
 
-    if not model_parts:
+    model_id = ":".join(model_parts)
+
+    if not model_id:
         raise ValueError(
             f"Model string '{model_string}' has no model identifier after backend '{backend}'."
         )
-
-    model_id = ":".join(model_parts)
 
     # Resolve host to the backend's default localhost URL if not specified
     if host is None:
