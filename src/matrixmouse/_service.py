@@ -200,6 +200,70 @@ def _load_env_file(env_file_path: str | None) -> None:
     logger.debug("Loaded %d value(s) from %s", loaded, env_path)
 
 
+def _load_inference_secrets(config) -> None:
+    """Load API key files for any remote inference backends in the config.
+
+    Only loads key files for backends that are actually configured.
+    Raises immediately if a required key file is missing or empty —
+    better to fail loudly at startup than silently at first inference call.
+
+    Args:
+        config: Loaded MatrixMouseConfig.
+
+    Raises:
+        SystemExit: If a required API key file is missing or empty.
+    """
+    from matrixmouse.router import parse_model_string, _REMOTE_BACKENDS
+
+    # Collect every configured model string
+    all_model_strings = [
+        config.manager_model,
+        config.coder_model,
+        config.writer_model,
+        config.critic_model,
+        config.summarizer_model,
+        config.merge_resolution_model,
+    ] + list(config.coder_cascade)
+
+    backends_in_use: set[str] = set()
+    for model_string in all_model_strings:
+        if not model_string:
+            continue
+        try:
+            parsed = parse_model_string(model_string)
+            if parsed.backend in _REMOTE_BACKENDS:
+                backends_in_use.add(parsed.backend)
+        except ValueError:
+            pass  # malformed strings caught later by Router._validate_config()
+
+    # Load and validate key for each remote backend in use
+    _BACKEND_KEY_FILES: dict[str, tuple[str, str]] = {
+        "anthropic": (
+            "/etc/matrixmouse/secrets/anthropic_api_key",
+            "ANTHROPIC_API_KEY",
+        ),
+        "openai": (
+            "/etc/matrixmouse/secrets/openai_api_key",
+            "OPENAI_API_KEY",
+        ),
+    }
+
+    for backend in sorted(backends_in_use):
+        if backend not in _BACKEND_KEY_FILES:
+            continue
+        key_file, env_var = _BACKEND_KEY_FILES[backend]
+        _load_env_file(key_file)
+
+        if not os.environ.get(env_var):
+            logger.error(
+                "Backend '%s' is configured but %s is not set. "
+                "Create %s with the API key and restart.",
+                backend, env_var, key_file,
+            )
+            sys.exit(1)
+
+        logger.info("API key loaded for backend '%s'.", backend)
+
 # ---------------------------------------------------------------------------
 # Workspace and repo resolution
 # ---------------------------------------------------------------------------
@@ -324,6 +388,7 @@ def main() -> None:
         # --- Secrets ---
         _load_env_file("/etc/matrixmouse/secrets/github_token")
         _load_env_file("/etc/matrixmouse/secrets/ntfy")
+        _load_inference_secrets(_config)
 
         # --- Git tools check
         from matrixmouse.tools.git_tools import _require_ssh_key
