@@ -113,8 +113,8 @@ def request_clarification(question: str) -> str:
     if m:
         try:
             m.notify(
-                f"Agent needs clarification on task [{active_task_id}]:\n"
-                f"{question}"
+                title=f"Agent needs clarification on task [{active_task_id}]:\n",
+                message=f"{question}"
             )
             m.emit("clarification_requested", {
                 "task_id":  active_task_id,

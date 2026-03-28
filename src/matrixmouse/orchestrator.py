@@ -36,6 +36,7 @@ from typing import Optional
 from matrixmouse.agents import agent_for_role
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
+from matrixmouse.inference.ollama import OllamaBackend
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.repository.workspace_state_repository import (
@@ -45,7 +46,7 @@ from matrixmouse.repository.workspace_state_repository import (
     BRANCH_SETUP_TOOLS,
     PLANNING_TOOLS,
 )
-from matrixmouse.router import Router
+from matrixmouse.router import Router, parse_model_string
 from matrixmouse.scheduling import Scheduler
 from matrixmouse.stuck import StuckDetector
 from matrixmouse.task import AgentRole, Task, TaskStatus
@@ -334,6 +335,53 @@ def _build_review_task(
     task.preempt = True
     return task
 
+def _build_set_branch_task(
+    task: Task,
+    queue: TaskRepository
+) -> None:
+    """
+    Build a Manager task to set a branch name.
+
+    Blocks the task that is passed in and sets this task as its dependent.
+
+    Args:
+        task: The Task object that the Manager needs to assign a branch to.
+
+    Returns:
+        Task: A READY Manager task with preempt=True.
+    """
+
+    # Build description
+    sections = [
+        "You are deciding what to name a task's git branch.",
+        "Below is the task ID and description:",
+        ""
+    ]
+    sections.append(
+        f"[{task.id}]: {task.title}\n\n"
+        f"Description:\n\n{task.description}"
+    )
+    sections.append("")
+    sections.append(
+        "\nUse set_branch to create a branch name for this task."
+    )
+
+    description = "\n".join(sections)
+
+    mgr_task = Task(
+        title="[Branch Setup] Choose an appropriate branch name",
+        description=description,
+        role=AgentRole.MANAGER,
+        repo=[],
+        importance=0.2,   # low score = high priority (P1)
+        urgency=0.2,
+    )
+    mgr_task.preempt = True
+
+    # Make mgr_task a blocker of task
+    queue.add(mgr_task)
+    queue.add_dependency(mgr_task.id, task.id)
+
 
 # ---------------------------------------------------------------------------
 # Git remote provider helpers
@@ -522,7 +570,17 @@ class Orchestrator:
                 continue
 
             self._update_status(idle=False, task=task.id)
-            self.queue.mark_running(task.id)
+            try:
+                self.queue.mark_running(task.id)
+            except Exception as e:
+                logger.warning(f"Could not mark task as running: [{task.id}]: {task.title} \n\n{e}")
+                # TODO: This should be an error and cause an exception, but I loosened it 
+                # since this was crashing the system before the Manager task to assign a 
+                # branch was being reached. 
+                # Top-level tasks should be able to be started in the BRANCH_SETUP session mode,
+                # and probably also have a PENDING status that is ignored by this check 
+                # but for the immediate term, I created a _build_create_branch_task method that 
+                # builds a Manager task to create a branch name and blocks the top-level task. 
 
             switch_start = time.monotonic()
             try:
@@ -1040,6 +1098,16 @@ class Orchestrator:
 
         agent = agent_for_role(task.role)
 
+        # --- Branch setup for non-manager tasks
+        # If a task is created as a non-manager role and it doesn't have a 
+        # branch, generate a blocking Manager task to remedy this.
+        # TODO: This shouldn't happen once all top-level tasks are created as Manager 
+        # role by default via interjections
+        if (task.role != AgentRole.MANAGER
+            and not task.branch):
+            _build_set_branch_task(task, self.queue)
+            return
+
         # --- Session mode: BRANCH_SETUP ---
         # Manager tasks with no branch assigned enter a restricted session
         # where they can only read task info and call set_branch.
@@ -1283,7 +1351,10 @@ class Orchestrator:
         context_manager = ContextManager(
             config=self.config,
             paths=repo_paths or self.paths,
-            coder_model=self._router.model_for_role(task.role),
+            coder_model=self._router.parsed_model_for_role(task.role).model,
+            coder_backend=self._router.backend_for_role(task.role),
+            summarizer_backend=self._router.backend_for_role(task.role),
+            summarizer_model=parse_model_string(self.config.summarizer_model).model,
         )
         comms_manager = get_manager()
 
@@ -1298,7 +1369,7 @@ class Orchestrator:
                 )
 
         loop = AgentLoop(
-            model=self._router.model_for_role(task.role),
+            model=self._router.parsed_model_for_role(task.role).model,
             messages=messages,
             tools=tools,
             allowed_tools=agent.allowed_tools,
@@ -1316,6 +1387,7 @@ class Orchestrator:
             think=self._router.think_for_role(task.role),
             current_repo=current_repo,
             task_turn_limit=task.turn_limit,
+            backend=OllamaBackend(),         # TODO: Have this injected
         )
 
         # If the task has pending tool calls from an interrupted turn
@@ -1328,7 +1400,7 @@ class Orchestrator:
                 task.id, len(task.pending_tool_calls),
             )
             replay_result = loop._dispatch_tools(
-                tool_calls=[],
+                tool_blocks=[],
                 pending_tool_calls=list(task.pending_tool_calls),
             )
             if replay_result is not None:

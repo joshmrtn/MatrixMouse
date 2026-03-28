@@ -59,28 +59,32 @@ class MatrixMouseConfig(BaseSettings):
     )
 
     # --- Models ---
+    local_only: bool = Field(
+        default=True,
+        description="Prevent non-local LLM inference if True, allows if False."
+    )
     coder_model: str = Field(
-        default="qwen3.5:4b",
+        default="http://localhost:11434:ollama:qwen3.5:2b",
         description="Model for code generation and implementation tasks.",
     )
     writer_model: str = Field(
-        default="qwen3.5:4b",
+        default="http://localhost:11434:ollama:qwen3.5:2b",
         description="Model for prose generation tasks. (Not for source code).",
     )
     manager_model: str = Field(
-        default="qwen3.5:4b",
+        default="http://localhost:11434:ollama:qwen3.5:2b",
         description="Model for planning, design, and architectural decisions.",
     )
     critic_model: str = Field(
-        default="qwen3.5:4b",
+        default="http://localhost:11434:ollama:qwen3.5:2b",
         description="Model for critique, review, and stuck detection.",
     )
     summarizer_model: str = Field(
-        default="qwen3.5:4b",
+        default="http://localhost:11434:ollama:qwen3.5:2b",
         description="Model for context summarisation. Should be small and fast.",
     )
     agent_max_turns: int = Field(
-        default=50,
+        default=5,
         description=(
             "Maximum turns an agent may take on a single task before the "
             "task is moved to BLOCKED_BY_HUMAN. The operator can extend, "
@@ -90,11 +94,11 @@ class MatrixMouseConfig(BaseSettings):
 
     # --- Coder cascade ---
     coder_cascade: list[str] = Field(
-        default=["qwen3.5:4b", "qwen3.5:9b", "qwen3.5:27b"],
+        default=["http://localhost:11434:ollama:qwen3.5:4b", "http://localhost:11434:ollama:qwen3.5:9b", "http://localhost:11434:ollama:qwen3.5:27b"],
         description=(
             "Ordered list of models for the coder cascade, smallest to largest. "
             "If only one entry, no escalation occurs. "
-            "Example: ['qwen2.5-coder:7b', 'qwen2.5-coder:14b', 'qwen2.5-coder:30b']"
+            "Example: ['http://localhost:11434:ollama:qwen2.5-coder:7b', 'http://localhost:11434:ollama:qwen2.5-coder:14b', 'http://localhost:11434:ollama:qwen2.5-coder:30b']"
         ),
     )
 
@@ -120,23 +124,23 @@ class MatrixMouseConfig(BaseSettings):
         description="Enable extended thinking for the summarizer model.",
     )
     coder_stream: bool = Field(
-        default=True,
+        default=False,
         description="Stream coder model output token by token. Disable if the model misbehaves with streaming.",
     )
     writer_stream: bool = Field(
-        default=True,
+        default=False,
         description="Stream writer model output token by token. Disable if the model misbehaves with streaming.",
     )
     manager_stream: bool = Field(
-        default=True,
+        default=False,
         description="Stream manager model output token by token.",
     )
     critic_stream: bool = Field(
-        default=True,
+        default=False,
         description="Stream critic model output token by token.",
     )
     summarizer_stream: bool = Field(
-        default=True,
+        default=False,
         description="Stream summarizer model output token by token. Usually False — summaries don't need live display.",
     )
 

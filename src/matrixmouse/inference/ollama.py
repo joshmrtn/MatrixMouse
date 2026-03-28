@@ -82,7 +82,7 @@ class OllamaBackend(LLMBackend):
     def __init__(
         self,
         host: str = "http://localhost:11434",
-        timeout: int = 120,
+        timeout: int = 3600,
     ) -> None:
         self._host = host.rstrip("/")
         self._timeout = timeout
@@ -125,7 +125,7 @@ class OllamaBackend(LLMBackend):
         """
         payload: dict = {
             "model":    model,
-            "messages": messages,
+            "messages": self._to_ollama_messages(messages),
             "stream":   stream and chunk_callback is not None,
         }
 
@@ -302,6 +302,93 @@ class OllamaBackend(LLMBackend):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _to_ollama_messages(self, messages: list) -> list:
+        """Translate canonical message history to Ollama's OpenAI-compat format.
+
+        The canonical format (produced by ``loop._response_to_message``) uses
+        Anthropic-style structured content blocks for assistant messages::
+
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'thinking': '...'},
+                {'type': 'tool_use', 'id': '...', 'name': '...', 'input': {...}},
+            ]}
+
+        Ollama expects the OpenAI convention instead::
+
+            {'role': 'assistant', 'content': '...', 'tool_calls': [
+                {'id': '...', 'type': 'function',
+                 'function': {'name': '...', 'arguments': {...}}}
+            ]}
+
+        Tool result messages also differ: the canonical format uses
+        ``tool_use_id``; Ollama uses ``tool_call_id``.
+
+        Non-assistant messages with plain string content are passed through
+        unchanged.
+
+        Args:
+            messages: Canonical message history from loop.py.
+
+        Returns:
+            Message list in Ollama's expected format.
+        """
+        translated = []
+        for msg in messages:
+            role = msg.get("role", "")
+
+            if role == "assistant":
+                content = msg.get("content", "")
+                if not isinstance(content, list):
+                    # Plain string — pass through unchanged
+                    translated.append(msg)
+                    continue
+
+                # Structured content blocks — split into text and tool calls
+                text_parts: list[str] = []
+                tool_calls: list[dict] = []
+
+                for block in content:
+                    btype = block.get("type", "")
+                    if btype == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif btype == "thinking":
+                        # Thinking blocks are not forwarded to Ollama —
+                        # they are internal reasoning and not part of the
+                        # conversation history Ollama expects.
+                        pass
+                    elif btype == "tool_use":
+                        tool_calls.append({
+                            "id":   block.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name":      block.get("name", ""),
+                                "arguments": block.get("input", {}),
+                            },
+                        })
+
+                ollama_msg: dict = {
+                    "role":    "assistant",
+                    "content": " ".join(text_parts),
+                }
+                if tool_calls:
+                    ollama_msg["tool_calls"] = tool_calls
+                translated.append(ollama_msg)
+
+            elif role == "tool":
+                # Canonical: tool_use_id. Ollama: tool_call_id.
+                translated.append({
+                    "role":         "tool",
+                    "tool_call_id": msg.get("tool_use_id", msg.get("tool_call_id", "")),
+                    "name":         msg.get("name", ""),
+                    "content":      msg.get("content", ""),
+                })
+
+            else:
+                # system, user — pass through unchanged
+                translated.append(msg)
+
+        return translated
 
     def _chat_blocking(self, url: str, payload: dict) -> LLMResponse:
         """Execute a non-streaming chat request.
@@ -486,4 +573,3 @@ class OllamaBackend(LLMBackend):
             model=model,
             stop_reason=stop_reason,
         )
-    
