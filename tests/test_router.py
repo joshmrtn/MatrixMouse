@@ -294,6 +294,53 @@ class TestParsedModelForRole:
         r = make_router(manager_model="ollama:my-model")
         assert r.local_model_for_role("ollama:my-model") == "my-model"
 
+    def test_parsed_model_for_role_for_merge_role(self):
+        """parsed_model_for_role for MERGE role returns correct model."""
+        r = make_router(merge_resolution_model="ollama:merge-model")
+        p = r.parsed_model_for_role(AgentRole.MERGE)
+        assert isinstance(p, ParsedModel)
+        assert p.backend == "ollama"
+        assert p.model == "merge-model"
+
+    def test_parsed_model_for_role_merge_falls_back_to_cascade_top(self):
+        """MERGE role falls back to top of cascade when merge_resolution_model empty."""
+        r = make_router(
+            merge_resolution_model="",
+            coder_cascade=["ollama:small", "ollama:medium", "ollama:large"],
+        )
+        p = r.parsed_model_for_role(AgentRole.MERGE)
+        assert isinstance(p, ParsedModel)
+        assert p.model == "large"  # Top of cascade
+
+
+# ---------------------------------------------------------------------------
+# _merge_model
+# ---------------------------------------------------------------------------
+
+class TestMergeModel:
+    """Tests for Router._merge_model method."""
+
+    def test_returns_configured_merge_model(self):
+        r = make_router(merge_resolution_model="ollama:merge-model")
+        assert r._merge_model() == "ollama:merge-model"
+
+    def test_falls_back_to_top_of_cascade_when_empty(self):
+        """_merge_model falls back to top of cascade when merge_resolution_model empty."""
+        r = make_router(
+            merge_resolution_model="",
+            coder_cascade=["ollama:small", "ollama:medium", "ollama:large"],
+        )
+        assert r._merge_model() == "ollama:large"
+
+    def test_falls_back_to_coder_model_when_cascade_empty(self):
+        """_merge_model falls back to coder_model when cascade is also empty."""
+        r = make_router(
+            merge_resolution_model="",
+            coder_cascade=[],
+            coder_model="ollama:fallback-model",
+        )
+        assert r._merge_model() == "ollama:fallback-model"
+
 
 # ---------------------------------------------------------------------------
 # stream_for_role

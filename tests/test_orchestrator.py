@@ -59,7 +59,7 @@ Coverage:
         - No task created for unknown blocked task
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1601,4 +1601,225 @@ class TestMergeTurnLimit:
         t = orch.queue.get(task.id)
         assert t is not None
         assert t.status == TaskStatus.BLOCKED_BY_HUMAN
+
+
+# ---------------------------------------------------------------------------
+# _maybe_promote_waiting_tasks
+# ---------------------------------------------------------------------------
+
+class TestMaybePromoteWaitingTasks:
+    """Tests for Orchestrator._maybe_promote_waiting_tasks method."""
+
+    def test_promotes_task_when_wait_until_passed(self, tmp_path):
+        """_maybe_promote_waiting_tasks promotes task when wait_until passed."""
+        orch = make_orchestrator(tmp_path)
+        task = make_task(status=TaskStatus.WAITING)
+        # Set wait_until in the past
+        task.wait_until = (
+            datetime.now(timezone.utc) - timedelta(minutes=5)
+        ).isoformat()
+        task.wait_reason = "budget:anthropic"
+        orch.queue.add(task)
+        
+        promoted = orch._maybe_promote_waiting_tasks()
+        
+        assert promoted == 1
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.READY
+        assert updated.wait_until is None
+        assert updated.wait_reason == ""
+
+    def test_does_not_promote_when_wait_until_in_future(self, tmp_path):
+        """_maybe_promote_waiting_tasks does not promote when wait_until in future."""
+        orch = make_orchestrator(tmp_path)
+        task = make_task(status=TaskStatus.WAITING)
+        # Set wait_until in the future
+        task.wait_until = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        task.wait_reason = "budget:anthropic"
+        orch.queue.add(task)
+        
+        promoted = orch._maybe_promote_waiting_tasks()
+        
+        assert promoted == 0
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.WAITING
+        assert updated.wait_until is not None
+        assert updated.wait_reason == "budget:anthropic"
+
+    def test_clears_wait_until_and_wait_reason_on_promotion(self, tmp_path):
+        """_maybe_promote_waiting_tasks clears wait_until and wait_reason on promotion."""
+        orch = make_orchestrator(tmp_path)
+        task = make_task(status=TaskStatus.WAITING)
+        task.wait_until = (
+            datetime.now(timezone.utc) - timedelta(minutes=5)
+        ).isoformat()
+        task.wait_reason = "budget:anthropic"
+        orch.queue.add(task)
+        
+        orch._maybe_promote_waiting_tasks()
+        
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.wait_until is None
+        assert updated.wait_reason == ""
+
+    def test_promotes_task_with_none_wait_until_immediately(self, tmp_path):
+        """_maybe_promote_waiting_tasks promotes task with None wait_until immediately."""
+        orch = make_orchestrator(tmp_path)
+        task = make_task(status=TaskStatus.WAITING)
+        task.wait_until = None
+        task.wait_reason = "budget:anthropic"
+        orch.queue.add(task)
+        
+        promoted = orch._maybe_promote_waiting_tasks()
+        
+        assert promoted == 1
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.READY
+        assert updated.wait_until is None
+
+    def test_handles_unparseable_wait_until_gracefully(self, tmp_path):
+        """_maybe_promote_waiting_tasks handles unparseable wait_until gracefully."""
+        orch = make_orchestrator(tmp_path)
+        task = make_task(status=TaskStatus.WAITING)
+        task.wait_until = "not-a-valid-iso-date"
+        task.wait_reason = "budget:anthropic"
+        orch.queue.add(task)
+        
+        promoted = orch._maybe_promote_waiting_tasks()
+        
+        assert promoted == 1
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.READY
+        assert updated.wait_until is None
+
+
+# ---------------------------------------------------------------------------
+# _handle_budget_exhausted
+# ---------------------------------------------------------------------------
+
+class TestHandleBudgetExhausted:
+    """Tests for Orchestrator._handle_budget_exhausted method."""
+
+    def test_sets_task_status_to_waiting(self, tmp_path):
+        """_handle_budget_exhausted sets task status to WAITING."""
+        from matrixmouse.inference.base import TokenBudgetExceededError
+        
+        orch = make_orchestrator(tmp_path)
+        task = make_task()
+        orch.queue.add(task)
+        
+        exc = TokenBudgetExceededError(
+            provider="anthropic",
+            period="hour",
+            limit=100000,
+            used=150000,
+            retry_after=datetime.now(timezone.utc) + timedelta(minutes=30),
+        )
+        orch._handle_budget_exhausted(task, exc)
+        
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.WAITING
+
+    def test_sets_wait_reason_to_budget_provider(self, tmp_path):
+        """_handle_budget_exhausted sets wait_reason to "budget:<provider>"."""
+        from matrixmouse.inference.base import TokenBudgetExceededError
+        
+        orch = make_orchestrator(tmp_path)
+        task = make_task()
+        orch.queue.add(task)
+        
+        exc = TokenBudgetExceededError(
+            provider="anthropic",
+            period="hour",
+            limit=100000,
+            used=150000,
+            retry_after=datetime.now(timezone.utc) + timedelta(minutes=30),
+        )
+        orch._handle_budget_exhausted(task, exc)
+        
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.wait_reason == "budget:anthropic"
+
+    def test_sets_wait_until_from_exc_retry_after(self, tmp_path):
+        """_handle_budget_exhausted sets wait_until from exc.retry_after."""
+        from matrixmouse.inference.base import TokenBudgetExceededError
+        
+        orch = make_orchestrator(tmp_path)
+        task = make_task()
+        orch.queue.add(task)
+        
+        retry_dt = datetime.now(timezone.utc) + timedelta(minutes=30)
+        exc = TokenBudgetExceededError(
+            provider="anthropic",
+            period="hour",
+            limit=100000,
+            used=150000,
+            retry_after=retry_dt,
+        )
+        orch._handle_budget_exhausted(task, exc)
+        
+        updated = orch.queue.get(task.id)
+        assert updated is not None
+        assert updated.wait_until is not None
+        # Should be the ISO format of the retry_after datetime
+        assert updated.wait_until == retry_dt.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# _mark_backend_exhausted / _get_and_clear_exhausted_backends
+# ---------------------------------------------------------------------------
+
+class TestBackendExhausted:
+    """Tests for Orchestrator backend exhaustion tracking."""
+
+    def test_mark_backend_exhausted_adds_to_set(self, tmp_path):
+        """_mark_backend_exhausted adds to set."""
+        orch = make_orchestrator(tmp_path)
+        orch._mark_backend_exhausted("anthropic")
+        
+        with orch._exhausted_backends_lock:
+            assert "anthropic" in orch._exhausted_backends
+
+    def test_get_and_clear_exhausted_backends_returns_snapshot(self, tmp_path):
+        """_get_and_clear_exhausted_backends returns snapshot and clears set."""
+        orch = make_orchestrator(tmp_path)
+        orch._mark_backend_exhausted("anthropic")
+        orch._mark_backend_exhausted("openai")
+        
+        result = orch._get_and_clear_exhausted_backends()
+        
+        assert result == {"anthropic", "openai"}
+        with orch._exhausted_backends_lock:
+            assert len(orch._exhausted_backends) == 0
+
+    def test_concurrent_mark_backend_exhausted_calls_are_safe(self, tmp_path):
+        """Concurrent _mark_backend_exhausted calls are safe (no data loss)."""
+        import threading
+        orch = make_orchestrator(tmp_path)
+        
+        def mark_backend(backend: str):
+            orch._mark_backend_exhausted(backend)
+        
+        threads = []
+        backends = ["anthropic", "openai", "google", "azure"]
+        for backend in backends:
+            t = threading.Thread(target=mark_backend, args=(backend,))
+            threads.append(t)
+            t.start()
+        
+        for t in threads:
+            t.join()
+        
+        result = orch._get_and_clear_exhausted_backends()
+        # All backends should be recorded
+        assert result == set(backends)
         
