@@ -22,6 +22,7 @@ forwarded as they arrive. The return value is always a fully assembled
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from typing import Callable
 
@@ -32,12 +33,14 @@ from matrixmouse.inference.base import (
     LLMResponse,
     TextBlock,
     ThinkingBlock,
+    TokenBudgetExceededError,
     ToolUseBlock,
     Tool,
     ModelNotAvailableError,
     BackendConnectionError,
     LLMBackendError,
 )
+from matrixmouse.inference.token_budget import TokenBudgetTracker
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,49 @@ def _translate_schema(tool: Tool) -> dict:
     }
 
 
+def _parse_retry_after(response: requests.Response | None) -> datetime | None:
+    """Extract a retry-after datetime from an HTTP error response.
+ 
+    Checks headers in priority order:
+        1. ``x-ratelimit-reset-tokens`` (OpenAI, ISO timestamp)
+        2. ``x-ratelimit-reset-requests`` (OpenAI, ISO timestamp)
+        3. ``Retry-After`` (standard HTTP, seconds as integer)
+ 
+    Args:
+        response: The HTTP error response, or None.
+ 
+    Returns:
+        UTC-aware datetime of the earliest suggested retry, or None if
+        no parseable retry hint is present.
+    """
+    from datetime import datetime, timezone, timedelta
+    if response is None:
+        return None
+ 
+    # OpenAI-style ISO timestamp headers (most precise)
+    for header in ("x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+        raw = response.headers.get(header)
+        if raw:
+            try:
+                dt = datetime.fromisoformat(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except (ValueError, TypeError):
+                pass
+ 
+    # Standard Retry-After: integer seconds
+    retry_after_raw = response.headers.get("Retry-After")
+    if retry_after_raw:
+        try:
+            seconds = int(retry_after_raw)
+            return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        except (ValueError, TypeError):
+            pass
+ 
+    return None
+
+
 class AnthropicBackend(LLMBackend):
     """LLM backend adapter for the Anthropic Messages API.
 
@@ -108,10 +154,12 @@ class AnthropicBackend(LLMBackend):
         self,
         api_key: str,
         max_tokens: int = 8192,
+        budget_tracker: TokenBudgetTracker | None = None,
     ) -> None:
         self._api_key = api_key
         self._max_tokens = max_tokens
         self._base_url = _API_BASE
+        self._budget_tracker = budget_tracker
         logger.debug("AnthropicBackend initialised.")
 
     def _headers(self) -> dict:
@@ -153,10 +201,15 @@ class AnthropicBackend(LLMBackend):
             Fully assembled ``LLMResponse``.
 
         Raises:
+            TokenBudgetExceededError: If the Anthropic token budget is exhausted.
             ModelNotAvailableError: On 404.
             BackendConnectionError: If the API cannot be reached.
             LLMBackendError: For other API errors.
         """
+        # --- Upfront budget check ---
+        if self._budget_tracker is not None:
+            self._budget_tracker.check_budget(provider="anthropic", model=model)
+
         system, conversation = self._split_system(messages)
 
         payload: dict = {
@@ -184,8 +237,20 @@ class AnthropicBackend(LLMBackend):
 
         try:
             if payload.get("stream"):
-                return self._chat_streaming(url, payload, chunk_callback)  # type: ignore[arg-type]
-            return self._chat_blocking(url, payload)
+                response = self._chat_streaming(url, payload, chunk_callback)  # type: ignore[arg-type]
+            else:
+                response = self._chat_blocking(url, payload)
+
+            # --- Record usage after success ---
+            if self._budget_tracker is not None:
+                self._budget_tracker.record(
+                    provider="anthropic",
+                    model=model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                )
+            return response
+
         except requests.ConnectionError as e:
             raise BackendConnectionError(
                 f"Could not connect to Anthropic API: {e}"
@@ -203,7 +268,24 @@ class AnthropicBackend(LLMBackend):
                 ) from e
             if status == 404:
                 raise ModelNotAvailableError(
-                    f"Anthropic model '{model}' not found (HTTP 404)."
+                    f"Anthropic model \'{model}\' not found (HTTP 404)."
+                ) from e
+            if status in (429, 529):
+                # Extract Retry-After if present; use it as the floor for wait_until
+                retry_after = _parse_retry_after(e.response)
+                if self._budget_tracker is not None:
+                    wait_until = self._budget_tracker.calculate_wait_until_for_provider(
+                        provider="anthropic",
+                        api_retry_after=retry_after,
+                    )
+                else:
+                    wait_until = retry_after
+                raise TokenBudgetExceededError(
+                    provider="anthropic",
+                    period="hour",
+                    limit=0,
+                    used=0,
+                    retry_after=wait_until,
                 ) from e
             raise LLMBackendError(
                 f"Anthropic API error {status}: {e}"

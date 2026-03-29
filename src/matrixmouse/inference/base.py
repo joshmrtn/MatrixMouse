@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable
 
 
@@ -169,14 +170,20 @@ class TokenBudgetExceededError(LLMBackendError):
         period: str,
         limit: int,
         used: int,
+        retry_after: datetime | None = None,
     ) -> None:
         self.provider = provider
         self.period = period
         self.limit = limit
         self.used = used
-        super().__init__(
+        self.retry_after = retry_after
+        
+        message = (
             f"{provider} {period} token budget exhausted: {used}/{limit} tokens used"
         )
+        if retry_after is not None:
+            message += f". Retry after {retry_after.isoformat()}"
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------------

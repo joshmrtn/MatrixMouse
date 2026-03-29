@@ -157,9 +157,12 @@ class Scheduler:
     # Public interface
     # -----------------------------------------------------------------------
 
-    def next(self, queue: TaskRepository) -> SchedulingDecision:
-        """
-        Select the next task to run.
+    def next(
+        self,
+        queue: TaskRepository,
+        exclude: set[str] | None = None,
+    ) -> SchedulingDecision:
+        """Select the next task to run.
 
         Call order:
             1. Stale clarification check — scan BLOCKED_BY_HUMAN tasks.
@@ -170,9 +173,16 @@ class Scheduler:
             4. Walk queue levels from P1 downward, returning the first
                non-empty level that has a ready task.
 
-        Returns SchedulingDecision with task=None if nothing is ready.
-        """
+        Args:
+            queue:   The task repository to query.
+            exclude: Optional set of task IDs to skip this cycle. Used by
+                     the orchestrator to skip tasks whose backend is known-
+                     exhausted for this scheduling cycle (e.g. a task just
+                     promoted from WAITING whose provider is still over budget).
 
+        Returns:
+            SchedulingDecision with task=None if nothing is ready.
+        """
         all_active = queue.active_tasks()
 
         # --- Stale clarification check ---
@@ -183,15 +193,36 @@ class Scheduler:
             if t.status == TaskStatus.READY and queue.is_ready(t.id)
         ]
 
+        # Apply exclude set — skip tasks whose backend is exhausted this cycle
+        if exclude:
+            ready = [t for t in ready if t.id not in exclude]
+
+        waiting_count = sum(
+            1 for t in all_active if t.status == TaskStatus.WAITING
+        )
+
         if not ready:
-            reason = (
-                f"{len(all_active)} active task(s), none ready. "
-                "All are running, blocked, or awaiting human input."
-                if all_active else "Task queue is empty."
-            )
+            parts = []
+            if all_active:
+                parts.append(
+                    f"{len(all_active)} active task(s), none ready. "
+                    "All are running, blocked, or awaiting human input."
+                )
+            else:
+                parts.append("Task queue is empty.")
+            if waiting_count:
+                parts.append(
+                    f"{waiting_count} task(s) are WAITING and will resume "
+                    "automatically when their time condition clears."
+                )
+            if exclude:
+                parts.append(
+                    f"{len(exclude)} task(s) skipped — backend budget exhausted "
+                    "this cycle."
+                )
             return SchedulingDecision(
                 task=None,
-                reason=reason,
+                reason=" ".join(parts),
                 queue_level=None,
                 candidates_considered=0,
                 total_active=len(all_active),
@@ -308,11 +339,10 @@ class Scheduler:
         return elapsed >= limit
 
     def report_blocked(self, queue: TaskRepository) -> str:
-        """
-        Return a human-readable summary of all blocked tasks.
+        """Return a human-readable summary of all blocked and waiting tasks.
+
         Used by GET /status and the web UI.
         """
-
         blocked_by_task = [
             t for t in queue.active_tasks()
             if t.status == TaskStatus.BLOCKED_BY_TASK
@@ -321,11 +351,16 @@ class Scheduler:
             t for t in queue.active_tasks()
             if t.status == TaskStatus.BLOCKED_BY_HUMAN
         ]
+        waiting = [
+            t for t in queue.active_tasks()
+            if t.status == TaskStatus.WAITING
+        ]
 
-        if not blocked_by_task and not blocked_by_human:
+        if not blocked_by_task and not blocked_by_human and not waiting:
             return "No blocked tasks."
 
         lines = []
+
         if blocked_by_human:
             lines.append(f"Blocked by human ({len(blocked_by_human)}):")
             for t in blocked_by_human:
@@ -342,8 +377,17 @@ class Scheduler:
                     f"  [{t.id}] {t.title} — waiting on: {blocker_ids}"
                 )
 
-        return "\n".join(lines)
+        if waiting:
+            lines.append(f"Waiting (resumes automatically) ({len(waiting)}):")
+            for t in waiting:
+                reason = t.wait_reason or "unspecified"
+                until = t.wait_until or "unknown"
+                lines.append(
+                    f"  [{t.id}] {t.title} — reason: {reason}, "
+                    f"retry after: {until}"
+                )
 
+        return "\n".join(lines)
     # -----------------------------------------------------------------------
     # Stale clarification detection
     # -----------------------------------------------------------------------

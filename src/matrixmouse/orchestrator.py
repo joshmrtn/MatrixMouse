@@ -28,6 +28,7 @@ from __future__ import annotations
 import functools
 import logging
 from pathlib import Path
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,7 +37,9 @@ from typing import Optional
 from matrixmouse.agents import agent_for_role
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
+from matrixmouse.inference.base import TokenBudgetExceededError
 from matrixmouse.inference.ollama import OllamaBackend
+from matrixmouse.inference.token_budget import TokenBudgetTracker
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.repository.workspace_state_repository import (
@@ -471,6 +474,7 @@ class Orchestrator:
         queue: TaskRepository,
         ws_state_repo: WorkspaceStateRepository,
         graph=None,
+        budget_tracker: TokenBudgetTracker | None = None,
     ):
         self.config = config
         self.paths = paths
@@ -479,6 +483,10 @@ class Orchestrator:
         self.queue = queue
         self._ws_state_repo = ws_state_repo
         self._router = Router(config)
+        self._budget_tracker = budget_tracker
+
+        self._exhausted_backends: set[str] = set()
+        self._exhausted_backends_lock = threading.Lock()
 
         self._scheduler = Scheduler(
             config,
@@ -544,7 +552,27 @@ class Orchestrator:
             # --- PR polling ---
             self._poll_pr_tasks()
 
-            decision = self._scheduler.next(self.queue)
+            
+            # Promote any WAITING tasks whose time condition has cleared
+            promoted = self._maybe_promote_waiting_tasks()
+            if promoted:
+                logger.info("Promoted %d WAITING task(s) to READY.", promoted)
+
+            # Get backends that hit budget limits last cycle (and clear for next)
+            exhausted_this_cycle = self._get_and_clear_exhausted_backends()
+
+            # Then pass exhausted_this_cycle to the scheduler's next() call so it can
+            # skip tasks on exhausted backends
+            # Where exhausted_task_ids is built from the queue:
+            exhausted_task_ids = {
+                t.id for t in self.queue.all_tasks()
+                if t.status == TaskStatus.READY
+                and t.wait_reason.startswith("budget:")
+                and t.wait_reason.split(":", 1)[1] in exhausted_this_cycle
+            } if exhausted_this_cycle else set()
+
+            decision = self._scheduler.next(self.queue, exclude=exhausted_task_ids)
+
 
             if decision.task is None:
                 logger.debug("Scheduler: no task ready. %s", decision.reason)
@@ -1045,6 +1073,22 @@ class Orchestrator:
         to do next based on task status after return.
         """
 
+        # --- Upfront budget check ---
+        # If the backend for this task is known-exhausted this cycle, move
+        # the task to WAITING immediately without doing any git or agent work.
+        # The backend calculates the precise wait_until from the usage window.
+        if self._budget_tracker is not None:
+            parsed = self._router.parsed_model_for_role(task.role)
+            if parsed.is_remote:
+                try:
+                    self._budget_tracker.check_budget(
+                        provider=parsed.backend,
+                        model=parsed.model,
+                    )
+                except TokenBudgetExceededError as e:
+                    self._handle_budget_exhausted(task, e)
+                    return
+
         if task.branch and task.repo:
             repo_root = self.paths.workspace_root / task.repo[0]
             if repo_root.exists():
@@ -1147,7 +1191,12 @@ class Orchestrator:
 
         reconfigure_for_task(task.repo, self.paths.workspace_root)
 
-        run_result = self._run_agent(task, agent, messages)
+        try:
+            run_result = self._run_agent(task, agent, messages)
+        except TokenBudgetExceededError as e:
+            self._handle_budget_exhausted(task, e)
+            return
+        
         result   = run_result.loop_result
         detector = run_result.detector
 
@@ -2525,6 +2574,148 @@ class Orchestrator:
                 })
         except Exception as e:
             logger.warning("Failed to send completion notification: %s", e)
+
+    
+    
+    def _handle_budget_exhausted(
+        self,
+        task: "Task",
+        exc: "TokenBudgetExceededError",
+    ) -> None:
+        """Move a task to WAITING after a budget exhaustion event.
+ 
+        Calculates wait_until from the exception\'s retry_after field
+        (which already incorporates both our tracker\'s window calculation
+        and any API-supplied Retry-After hint).
+ 
+        Emits a one-time notification so the operator knows a task is
+        waiting on budget, then marks the backend as exhausted for the
+        current scheduling cycle so other tasks on the same backend are
+        not retried needlessly.
+ 
+        Args:
+            task: The task whose inference was blocked by budget exhaustion.
+            exc:  The TokenBudgetExceededError carrying provider and wait_until.
+        """
+        wait_until_dt = exc.retry_after
+        wait_until_iso = wait_until_dt.isoformat() if wait_until_dt else None
+ 
+        task.wait_until = wait_until_iso
+        task.wait_reason = f"budget:{exc.provider}"
+        task.status = TaskStatus.WAITING
+        self.queue.update(task)
+ 
+        self._mark_backend_exhausted(exc.provider)
+ 
+        logger.warning(
+            "Task [%s] waiting on %s budget exhaustion. "
+            "wait_until=%s",
+            task.id, exc.provider, wait_until_iso or "unknown",
+        )
+        from matrixmouse import comms as comms_module
+        m = comms_module.get_manager()
+        if m:
+            try:
+                m.notify(
+                    title=f"Task [{task.id}] waiting — {exc.provider} budget exhausted",
+                    message=(
+                        f"Task: {task.title}\\n"
+                        f"Provider: {exc.provider}\\n"
+                        f"Earliest retry: {wait_until_iso or 'unknown'}"
+                    ),
+                )
+                m.emit("task_waiting_on_budget", {
+                    "task_id":    task.id,
+                    "task_title": task.title,
+                    "provider":   exc.provider,
+                    "wait_until": wait_until_iso,
+                })
+            except Exception as notify_err:
+                logger.warning(
+                    "Failed to emit budget exhaustion notification: %s",
+                    notify_err,
+                )
+ 
+    def _maybe_promote_waiting_tasks(self) -> int:
+        """Promote WAITING tasks whose wait_until has passed back to READY.
+ 
+        Called at the top of each main scheduling cycle. Scans all WAITING
+        tasks and moves any whose wait_until is in the past (or has no
+        wait_until set) back to READY so the scheduler can pick them up.
+ 
+        Returns:
+            Number of tasks promoted to READY.
+        """
+        now = datetime.now(timezone.utc)
+        promoted = 0
+ 
+        for task in self.queue.all_tasks():
+            if task.status != TaskStatus.WAITING:
+                continue
+ 
+            should_promote = False
+ 
+            if task.wait_until is None:
+                # No time gate — promote immediately
+                should_promote = True
+            else:
+                try:
+                    wait_until_dt = datetime.fromisoformat(task.wait_until)
+                    if wait_until_dt.tzinfo is None:
+                        wait_until_dt = wait_until_dt.replace(tzinfo=timezone.utc)
+                    if now >= wait_until_dt:
+                        should_promote = True
+                except (ValueError, TypeError):
+                    # Unparseable wait_until — promote and log
+                    logger.warning(
+                        "Task [%s] has unparseable wait_until %r — "
+                        "promoting to READY.",
+                        task.id, task.wait_until,
+                    )
+                    should_promote = True
+ 
+            if should_promote:
+                task.status = TaskStatus.READY
+                task.wait_until = None
+                task.wait_reason = ""
+                self.queue.update(task)
+                promoted += 1
+                logger.info(
+                    "Task [%s] promoted from WAITING to READY "
+                    "(wait_reason was: %r).",
+                    task.id, task.wait_reason or "(none)",
+                )
+ 
+        return promoted
+ 
+    def _mark_backend_exhausted(self, backend: str) -> None:
+        """Mark a backend as exhausted for the current scheduling cycle.
+ 
+        Thread-safe. Called by worker threads when a budget error occurs.
+        The scheduling thread reads and clears this set at the top of each
+        cycle via _get_and_clear_exhausted_backends.
+ 
+        Args:
+            backend: Provider name, e.g. ``"anthropic"``.
+        """
+        with self._exhausted_backends_lock:
+            self._exhausted_backends.add(backend)
+ 
+    def _get_and_clear_exhausted_backends(self) -> set[str]:
+        """Return and clear the set of exhausted backends for this cycle.
+ 
+        Thread-safe. Called by the scheduling thread at the top of each
+        cycle to get a snapshot of which backends hit budget limits since
+        the last cycle, then clears the set for the next cycle.
+ 
+        Returns:
+            Snapshot of exhausted backend names.
+        """
+        with self._exhausted_backends_lock:
+            exhausted = set(self._exhausted_backends)
+            self._exhausted_backends.clear()
+        return exhausted
+    
 
     # -----------------------------------------------------------------------
     # Helpers

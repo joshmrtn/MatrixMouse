@@ -154,7 +154,6 @@ class TokenBudgetTracker:
         model: str,
         input_tokens: int,
         output_tokens: int,
-        api_retry_after: datetime | None = None,
     ) -> None:
         """Record token usage after a successful inference call.
 
@@ -166,9 +165,6 @@ class TokenBudgetTracker:
             model:           Backend-local model identifier.
             input_tokens:    Prompt tokens consumed.
             output_tokens:   Completion tokens produced.
-            api_retry_after: If the API indicated a rate limit alongside
-                             the response, pass the reset datetime here.
-                             Stored for use in wait_until calculation.
         """
         total = input_tokens + output_tokens
         if total <= 0:
@@ -229,7 +225,6 @@ class TokenBudgetTracker:
                         model=model,
                         budget=budget,
                         wait_until=cached_wait_until,
-                        api_retry_after=api_retry_after,
                     )
                 else:
                     # Cache says exhausted but wait_until has passed — re-check DB
@@ -282,7 +277,6 @@ class TokenBudgetTracker:
                 model=model,
                 budget=budget,
                 wait_until=wait_until,
-                api_retry_after=api_retry_after,
                 period=exceeded_period,
                 limit=exceeded_limit,
                 used=exceeded_used,
@@ -413,7 +407,7 @@ class TokenBudgetTracker:
         now = datetime.now(timezone.utc)
         total = sum(r.input_tokens + r.output_tokens for r in records)
 
-        calculated: datetime | None = None
+        calculated: datetime = now + timedelta(seconds=1)
 
         for record in records:
             total -= (record.input_tokens + record.output_tokens)
@@ -445,7 +439,6 @@ class TokenBudgetTracker:
         model: str,
         budget: ProviderBudget,
         wait_until: datetime | None,
-        api_retry_after: datetime | None = None,
         period: str = "hour",
         limit: int = 0,
         used: int = 0,
@@ -457,8 +450,6 @@ class TokenBudgetTracker:
             model:           Model identifier.
             budget:          ProviderBudget for this provider.
             wait_until:      Calculated earliest retry datetime.
-            api_retry_after: API-supplied reset time (already folded into
-                             wait_until but included for the error for logging).
             period:          ``"hour"`` or ``"day"``.
             limit:           The configured limit that was exceeded.
             used:            Tokens used in the window.

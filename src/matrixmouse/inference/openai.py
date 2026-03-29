@@ -23,6 +23,7 @@ The return value is always a fully assembled ``LLMResponse``.
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import logging
 import uuid
@@ -34,6 +35,7 @@ from matrixmouse.inference.base import (
     LLMBackend,
     LLMResponse,
     TextBlock,
+    TokenBudgetExceededError,
     ToolUseBlock,
     Tool,
     ModelNotAvailableError,
@@ -41,6 +43,7 @@ from matrixmouse.inference.base import (
     LLMBackendError,
 )
 from matrixmouse.inference.openai_compat import to_openai_messages, finalise_tool_calls
+from matrixmouse.inference.token_budget import TokenBudgetTracker
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,49 @@ def _translate_schema(tool: Tool) -> dict:
     }
 
 
+def _parse_retry_after(response: requests.Response | None) -> datetime | None:
+    """Extract a retry-after datetime from an HTTP error response.
+ 
+    Checks headers in priority order:
+        1. ``x-ratelimit-reset-tokens`` (OpenAI, ISO timestamp)
+        2. ``x-ratelimit-reset-requests`` (OpenAI, ISO timestamp)
+        3. ``Retry-After`` (standard HTTP, seconds as integer)
+ 
+    Args:
+        response: The HTTP error response, or None.
+ 
+    Returns:
+        UTC-aware datetime of the earliest suggested retry, or None if
+        no parseable retry hint is present.
+    """
+    from datetime import datetime, timezone, timedelta
+    if response is None:
+        return None
+ 
+    # OpenAI-style ISO timestamp headers (most precise)
+    for header in ("x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+        raw = response.headers.get(header)
+        if raw:
+            try:
+                dt = datetime.fromisoformat(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except (ValueError, TypeError):
+                pass
+ 
+    # Standard Retry-After: integer seconds
+    retry_after_raw = response.headers.get("Retry-After")
+    if retry_after_raw:
+        try:
+            seconds = int(retry_after_raw)
+            return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        except (ValueError, TypeError):
+            pass
+ 
+    return None
+
+
 class OpenAIBackend(LLMBackend):
     """LLM backend adapter for the OpenAI Chat Completions API.
 
@@ -108,10 +154,12 @@ class OpenAIBackend(LLMBackend):
         api_key: str,
         base_url: str = "https://api.openai.com",
         max_tokens: int = 4096,
+         budget_tracker: TokenBudgetTracker | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._max_tokens = max_tokens
+        self._budget_tracker = budget_tracker
         logger.debug("OpenAIBackend initialised: base_url=%s", self._base_url)
 
     def _headers(self) -> dict:
@@ -150,10 +198,15 @@ class OpenAIBackend(LLMBackend):
             Fully assembled ``LLMResponse``.
 
         Raises:
+            TokenBudgetExceededError: If the OpenAI token budget is exhausted.
             ModelNotAvailableError: On 404.
             BackendConnectionError: If the API cannot be reached.
             LLMBackendError: For other API errors.
         """
+        # --- Upfront budget check ---
+        if self._budget_tracker is not None:
+            self._budget_tracker.check_budget(provider="openai", model=model)
+
         payload: dict = {
             "model":      model,
             "max_tokens": self._max_tokens,
@@ -170,8 +223,20 @@ class OpenAIBackend(LLMBackend):
             if do_stream:
                 payload["stream"] = True
                 payload["stream_options"] = {"include_usage": True}
-                return self._chat_streaming(url, payload, chunk_callback)  # type: ignore[arg-type]
-            return self._chat_blocking(url, payload)
+                response = self._chat_streaming(url, payload, chunk_callback)  # type: ignore[arg-type]
+            else:
+                response = self._chat_blocking(url, payload)
+
+            # --- Record usage after success ---
+            if self._budget_tracker is not None:
+                self._budget_tracker.record(
+                    provider="openai",
+                    model=model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                )
+            return response
+
         except requests.ConnectionError as e:
             raise BackendConnectionError(
                 f"Could not connect to OpenAI API at {self._base_url}: {e}"
@@ -189,7 +254,24 @@ class OpenAIBackend(LLMBackend):
                 ) from e
             if status == 404:
                 raise ModelNotAvailableError(
-                    f"OpenAI model '{model}' not found (HTTP 404)."
+                    f"OpenAI model \'{model}\' not found (HTTP 404)."
+                ) from e
+            if status == 429:
+                # OpenAI provides Retry-After header and x-ratelimit-reset-* headers
+                retry_after = _parse_retry_after(e.response)
+                if self._budget_tracker is not None:
+                    wait_until = self._budget_tracker.calculate_wait_until_for_provider(
+                        provider="openai",
+                        api_retry_after=retry_after,
+                    )
+                else:
+                    wait_until = retry_after
+                raise TokenBudgetExceededError(
+                    provider="openai",
+                    period="hour",
+                    limit=0,
+                    used=0,
+                    retry_after=wait_until,
                 ) from e
             raise LLMBackendError(
                 f"OpenAI API error {status}: {e}"
