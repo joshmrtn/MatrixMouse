@@ -10,7 +10,7 @@ init_db() which is called by both repositories on startup.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import logging
 from pathlib import Path
@@ -18,7 +18,7 @@ from typing import Any
 
 from matrixmouse.repository.sqlite_db import get_connection, init_db
 from matrixmouse.repository.workspace_state_repository import (
-    WorkspaceStateRepository, SessionContext, SessionMode
+    WorkspaceStateRepository, SessionContext, SessionMode, TokenUsageRecord
 )
 from matrixmouse.task import TaskStatus
 
@@ -438,3 +438,103 @@ class SQLiteWorkspaceStateRepository(WorkspaceStateRepository):
                 """,
                 (repo_name, json.dumps(branches), now),
             )
+
+    def record_token_usage(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        """Record a token usage event and prune stale rows.
+ 
+        Args:
+            provider:      Provider name, e.g. ``"anthropic"``.
+            model:         Backend-local model identifier.
+            input_tokens:  Tokens consumed from the prompt.
+            output_tokens: Tokens produced in the response.
+        """
+        now = _now_iso()
+        conn = self._conn()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO token_usage
+                    (provider, model, input_tokens, output_tokens, recorded_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (provider, model, input_tokens, output_tokens, now),
+            )
+        try:
+            self.prune_token_usage()
+        except Exception as e:
+            logger.warning("Token usage pruning failed: %s", e)
+ 
+    def get_token_usage_since(
+        self,
+        provider: str,
+        since: datetime,
+    ) -> list:
+        """Return token usage records for provider since the given datetime.
+ 
+        Args:
+            provider: Provider name to filter by.
+            since:    Earliest recorded_at to include (UTC datetime).
+ 
+        Returns:
+            List of TokenUsageRecord, oldest first.
+        """
+        from matrixmouse.repository.workspace_state_repository import TokenUsageRecord
+        since_iso = since.isoformat() if since.tzinfo else since.replace(
+            tzinfo=timezone.utc
+        ).isoformat()
+        rows = self._conn().execute(
+            """
+            SELECT provider, model, input_tokens, output_tokens, recorded_at
+            FROM token_usage
+            WHERE provider = ? AND recorded_at >= ?
+            ORDER BY recorded_at ASC
+            """,
+            (provider, since_iso),
+        ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                recorded_at = datetime.fromisoformat(row["recorded_at"])
+                if recorded_at.tzinfo is None:
+                    recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                recorded_at = datetime.now(timezone.utc)
+            result.append(TokenUsageRecord(
+                provider=row["provider"],
+                model=row["model"],
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                recorded_at=recorded_at,
+            ))
+        return result
+ 
+    def prune_token_usage(self, max_retention_hours: int = 25) -> int:
+        """Delete token usage rows older than max_retention_hours.
+ 
+        Args:
+            max_retention_hours: Rows older than this are deleted.
+ 
+        Returns:
+            Number of rows deleted.
+        """
+        from datetime import timedelta
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=max_retention_hours)
+        ).isoformat()
+        conn = self._conn()
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM token_usage WHERE recorded_at < ?",
+                (cutoff,),
+            )
+        deleted = cursor.rowcount
+        if deleted:
+            logger.debug("Pruned %d stale token_usage rows.", deleted)
+        return deleted
+ 

@@ -32,6 +32,24 @@ from matrixmouse.task import TaskStatus
 
 
 @dataclass
+class TokenUsageRecord:
+    """A single token usage entry from the token_usage table.
+ 
+    Attributes:
+        provider:      Provider name, e.g. ``"anthropic"``.
+        model:         Backend-local model identifier.
+        input_tokens:  Tokens consumed from the prompt.
+        output_tokens: Tokens produced in the response.
+        recorded_at:   UTC datetime when the usage was recorded.
+    """
+    provider:      str
+    model:         str
+    input_tokens:  int
+    output_tokens: int
+    recorded_at:   datetime
+ 
+
+@dataclass
 class SessionContext:
     """
     Transient execution context for special agent sessions.
@@ -335,3 +353,65 @@ class WorkspaceStateRepository(ABC):
     def set_last_review_summary(self, summary: str) -> None:
         """Store the summary from the last Manager review."""
         self.set("last_review_summary", summary)
+
+    @abstractmethod
+    def record_token_usage(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        '''
+        Record a token usage event.
+ 
+        Also prunes rows older than max_retention_hours to keep the
+        table bounded. Pruning is best-effort — failure is logged but
+        does not prevent the record from being written.
+ 
+        Args:
+            provider:      Provider name, e.g. ``"anthropic"``.
+            model:         Backend-local model identifier.
+            input_tokens:  Tokens consumed from the prompt.
+            output_tokens: Tokens produced in the response.
+        '''
+ 
+    @abstractmethod
+    def get_token_usage_since(
+        self,
+        provider: str,
+        since: datetime,
+    ) -> list[TokenUsageRecord]:
+        '''
+        Return all token usage records for the given provider since
+        ``since`` (inclusive), ordered by ``recorded_at`` ascending.
+ 
+        Used by TokenBudgetTracker to calculate rolling window usage
+        and to determine when the budget will next be available.
+ 
+        Args:
+            provider: Provider name to filter by.
+            since:    Earliest recorded_at to include (UTC datetime).
+ 
+        Returns:
+            List of TokenUsageRecord, oldest first.
+        '''
+ 
+    @abstractmethod
+    def prune_token_usage(self, max_retention_hours: int = 25) -> int:
+        '''
+        Delete token usage rows older than max_retention_hours.
+ 
+        Called automatically by record_token_usage. Can also be called
+        explicitly on startup to recover from a crash that left stale rows.
+ 
+        The default retention of 25 hours is one hour beyond the longest
+        standard rolling window (24h/day), ensuring no data needed for
+        budget calculations is lost.
+ 
+        Args:
+            max_retention_hours: Rows older than this are deleted.
+ 
+        Returns:
+            Number of rows deleted.
+        '''
