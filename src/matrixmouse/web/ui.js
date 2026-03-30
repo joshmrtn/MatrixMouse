@@ -11,14 +11,10 @@ let streamingRow = null;  // current token accumulation row
 let thinkingRow = null;  // current thinking accumulation row
 let inferring = false; // true while waiting for model response
 
-// New state variables for UI overhaul
+// Task tree state
 let tasks = [];  // full task list for client-side tree building
 let selectedTask = null;  // currently selected task for task panel view
-let decisionModal = null;  // current pending decision modal state
-let interjectionReceipts = {};  // map of task_id to {received_at, read_at} timestamps
-
-// Task tree expansion state
-let expandedTasks = {};  // set of task_ids that are expanded
+let expandedTasks = {};  // set of task_ids that are expanded in tree
 
 // ─── Utilities ────────────────────────────────────────────────────
 function ts() { return new Date().toTimeString().slice(0, 8); }
@@ -32,23 +28,6 @@ function esc(s) {
 function escLines(s) { return esc(s).replace(/\n/g, '<br>'); }
 
 function $id(id) { return document.getElementById(id); }
-
-function formatTime(isoString) {
-  if (!isoString) return '';
-  const d = new Date(isoString);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function formatRelativeTime(isoString) {
-  if (!isoString) return '';
-  const d = new Date(isoString);
-  const now = new Date();
-  const diff = Math.floor((now - d) / 1000);
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return formatTime(isoString);
-}
 
 // ─── Sidebar (mobile toggle) ──────────────────────────────────────
 function toggleSidebar() {
@@ -101,9 +80,6 @@ function selectTab(tab) {
   } else if (tab === 'status') {
     showPanel('status-panel');
     loadStatusDashboard();
-  } else if (tab === 'chat') {
-    showPanel('chat-panel');
-    loadContext(currentScope);
   }
 }
 
@@ -134,12 +110,9 @@ function selectSettingsSection(sectionKey) {
 
 // ─── Header status ────────────────────────────────────────────────
 function updateStatus(data) {
-  $id('v-task').textContent = data.task || '—';
-  $id('v-phase').textContent = data.phase || '—';
-  $id('v-model').textContent = data.model || '—';
-  $id('v-turns').textContent = data.turns ?? '—';
-
   const v = $id('v-status');
+  if (!v) return; // Element may not exist during initial load
+
   if (data.stopped) {
     v.textContent = 'STOPPED'; v.className = 'val stopped';
   } else if (data.blocked) {
@@ -439,7 +412,7 @@ async function loadContext(scope) {
 
 // ─── Clarification banner ─────────────────────────────────────────
 function showClarification(question) {
-  $id('clar-question').textContent = '🔕 ' + question;
+  $id('clar-question').textContent = '🔔 ' + question;
   $id('clarification').classList.add('visible');
   $id('clar-input').focus();
   addEvent('blocked_human', 'blocked', question);
@@ -457,16 +430,8 @@ async function sendAnswer() {
   addEvent('you', 'you', reply);
   hideClarification();
 
-  // Use /tasks/{id}/answer if we have a selected task, otherwise use old endpoint
-  if (selectedTask && selectedTask.id) {
-    await apiPost(`/tasks/${selectedTask.id}/answer`, { message: reply });
-  } else {
-    // Fallback to workspace/repo interjection for non-task clarification
-    await apiPost('/interject', {
-      message: reply,
-      repo: currentScope === 'workspace' ? null : currentScope,
-    });
-  }
+  // Clarification answers are workspace-wide (comms module handles distribution)
+  await apiPost('/interject/workspace', { message: reply });
 }
 
 $id('clar-input').addEventListener('keydown', e => {
@@ -495,10 +460,7 @@ async function sendInterjection() {
   addEvent('you', 'you', msg);
 
   // Use new scoped interjection endpoints
-  if (selectedTask && selectedTask.id) {
-    // Task-scoped interjection
-    await apiPost(`/tasks/${selectedTask.id}/interject`, { message: msg });
-  } else if (currentScope === 'workspace') {
+  if (currentScope === 'workspace') {
     // Workspace-wide interjection
     await apiPost('/interject/workspace', { message: msg });
   } else {
@@ -543,351 +505,6 @@ async function confirmKill() {
 $id('modal-overlay').addEventListener('click', e => {
   if (e.target === $id('modal-overlay')) closeModal();
 });
-
-// ─── Task Tree Building ───────────────────────────────────────────
-function buildTaskTree() {
-  // Build hierarchical tree from flat task list using parent_task_id
-  // Only include non-terminal tasks (not COMPLETE or CANCELLED)
-  const terminalStatuses = ['complete', 'cancelled'];
-  const nonTerminalTasks = tasks.filter(t => !terminalStatuses.includes(t.status));
-
-  const taskMap = {};
-  const rootTasks = [];
-
-  // First pass: create map and initialize children arrays
-  nonTerminalTasks.forEach(task => {
-    taskMap[task.id] = { ...task, children: [] };
-  });
-
-  // Second pass: build tree structure
-  nonTerminalTasks.forEach(task => {
-    const parent = taskMap[task.parent_task_id];
-    if (parent) {
-      parent.children.push(taskMap[task.id]);
-    } else {
-      rootTasks.push(taskMap[task.id]);
-    }
-  });
-
-  return rootTasks;
-}
-
-function renderSidebarTaskTree() {
-  const sbRepos = $id('sb-repos');
-  if (!sbRepos) return;
-
-  // Clear existing repo items but keep workspace item
-  const workspaceItem = sbRepos.querySelector('.sb-item[data-scope="workspace"]');
-  sbRepos.innerHTML = '';
-  if (workspaceItem) {
-    sbRepos.appendChild(workspaceItem);
-  }
-
-  // Add repos with their task trees
-  repos.forEach(repo => {
-    const repoItem = document.createElement('div');
-    repoItem.className = 'sb-item sb-repo-item';
-    repoItem.dataset.scope = repo.name;
-    repoItem.innerHTML =
-      `<span class="sb-icon">⬡</span>` +
-      `<span class="sb-name">${esc(repo.name)}</span>` +
-      `<span class="sb-spinner"></span>`;
-    repoItem.onclick = (e) => {
-      e.stopPropagation();
-      selectScope(repo.name);
-      closeSidebar();
-    };
-    sbRepos.appendChild(repoItem);
-
-    // Build and render task tree for this repo
-    const repoTasks = tasks.filter(t => t.repo && t.repo.includes(repo.name));
-    if (repoTasks.length > 0) {
-      const taskTreeContainer = document.createElement('div');
-      taskTreeContainer.className = 'task-tree-container';
-      taskTreeContainer.dataset.repo = repo.name;
-
-      const tree = buildTaskTree().filter(t => t.repo && t.repo.includes(repo.name));
-      tree.forEach(taskNode => {
-        taskTreeContainer.appendChild(renderTaskTreeNode(taskNode, 0));
-      });
-
-      sbRepos.appendChild(taskTreeContainer);
-    }
-  });
-}
-
-function renderTaskTreeNode(taskNode, depth) {
-  const container = document.createElement('div');
-  container.className = 'task-tree-node';
-  container.dataset.taskId = taskNode.id;
-  container.style.paddingLeft = `${depth * 16 + 8}px`;
-
-  const isExpanded = expandedTasks[taskNode.id];
-  const hasChildren = taskNode.children && taskNode.children.length > 0;
-
-  const node = document.createElement('div');
-  node.className = 'task-tree-item';
-  node.innerHTML = `
-    <span class="task-expand-arrow ${hasChildren ? 'expandable' : ''} ${isExpanded ? 'expanded' : ''}">
-      ${hasChildren ? (isExpanded ? '▼' : '▶') : '•'}
-    </span>
-    <span class="task-status-dot ${dotClass(taskNode.status)}"></span>
-    <span class="task-tree-title">${esc(taskNode.title)}</span>
-  `;
-
-  node.onclick = (e) => {
-    e.stopPropagation();
-    if (hasChildren && e.target.classList.contains('task-expand-arrow')) {
-      toggleTaskExpand(taskNode.id);
-    } else {
-      selectTask(taskNode.id);
-    }
-  };
-
-  container.appendChild(node);
-
-  // Render children if expanded
-  if (hasChildren && isExpanded) {
-    taskNode.children.forEach(child => {
-      container.appendChild(renderTaskTreeNode(child, depth + 1));
-    });
-  }
-
-  return container;
-}
-
-function toggleTaskExpand(taskId) {
-  expandedTasks[taskId] = !expandedTasks[taskId];
-  renderSidebarTaskTree();
-}
-
-function selectTask(taskId) {
-  const task = tasks.find(t => t.id === taskId);
-  if (!task) return;
-
-  selectedTask = taskId;
-  showTaskPanel(taskId);
-  closeSidebar();
-}
-
-// ─── Task Panel ───────────────────────────────────────────────────
-function showTaskPanel(taskId) {
-  const task = tasks.find(t => t.id === taskId);
-  if (!task) return;
-
-  showPanel('task-panel');
-
-  // Render task header
-  $id('task-panel-title').textContent = task.title;
-  $id('task-panel-status').className = `task-status-badge status-${task.status}`;
-  $id('task-panel-status').textContent = task.status;
-  $id('task-panel-repo').textContent = (task.repo || []).join(', ') || 'workspace';
-  $id('task-panel-phase').textContent = task.phase || '—';
-
-  // Render conversation
-  renderTaskConversation(task);
-
-  // Setup interjection input
-  const interjectionInput = $id('task-interjection-input');
-  if (interjectionInput) {
-    interjectionInput.value = '';
-    interjectionInput.onkeydown = (e) => {
-      if (e.key === 'Enter') {
-        sendTaskInterjection(taskId, interjectionInput.value);
-      }
-    };
-  }
-}
-
-function renderTaskConversation(task) {
-  const conversationContainer = $id('task-conversation');
-  if (!conversationContainer) return;
-
-  conversationContainer.innerHTML = '';
-
-  const contextMessages = task.context_messages || [];
-  if (!contextMessages.length) {
-    conversationContainer.innerHTML = '<div class="no-messages">No conversation yet</div>';
-    return;
-  }
-
-  contextMessages.forEach(msg => {
-    const bubble = document.createElement('div');
-    bubble.className = `conversation-bubble bubble-${msg.role}`;
-
-    let content = '';
-    if (msg.role === 'user') {
-      content = escLines(msg.content || '');
-    } else if (msg.role === 'assistant') {
-      content = renderMarkdown(msg.content || '');
-    } else if (msg.role === 'tool_call') {
-      content = `<div class="tool-call-label">Tool Call</div>${escLines(msg.content || '')}`;
-    } else if (msg.role === 'tool_result') {
-      content = `<div class="tool-result-label">Tool Result</div>${renderToolResult(msg.content || '')}`;
-    } else {
-      content = escLines(msg.content || '');
-    }
-
-    bubble.innerHTML = `
-      <div class="bubble-role">${esc(msg.role)}</div>
-      <div class="bubble-content">${content}</div>
-    `;
-
-    conversationContainer.appendChild(bubble);
-  });
-
-  // Scroll to bottom
-  conversationContainer.scrollTop = conversationContainer.scrollHeight;
-}
-
-async function sendTaskInterjection(taskId, message) {
-  const input = $id('task-interjection-input');
-  const msg = typeof message === 'string' ? message.trim() : input?.value.trim();
-  if (!msg) return;
-
-  if (input) input.value = '';
-
-  // Add to conversation view
-  const conversationContainer = $id('task-conversation');
-  const bubble = document.createElement('div');
-  bubble.className = 'conversation-bubble bubble-user interjection';
-  bubble.innerHTML = `
-    <div class="bubble-role">interjection</div>
-    <div class="bubble-content">${escLines(msg)}</div>
-    <div class="interjection-receipt" data-task-id="${taskId}">
-      <span class="receipt-status">pending</span>
-    </div>
-  `;
-  conversationContainer.appendChild(bubble);
-  conversationContainer.scrollTop = conversationContainer.scrollHeight;
-
-  // Send to server
-  try {
-    await apiPost(`/tasks/${taskId}/interject`, { message: msg });
-
-    // Initialize receipt
-    updateReadReceipt(taskId, new Date().toISOString(), null);
-  } catch (e) {
-    addEvent('error', 'error', 'Failed to send interjection: ' + e.message);
-  }
-}
-
-// ─── Confirmation Modal ───────────────────────────────────────────
-function showConfirmationModal(config) {
-  decisionModal = config;
-
-  const modal = $id('confirmation-modal');
-  const overlay = $id('modal-overlay');
-
-  $id('confirm-modal-title').textContent = config.title || 'Confirmation Required';
-  $id('confirm-modal-body').innerHTML = renderMarkdown(config.body || '');
-
-  // Setup choices
-  const choicesContainer = $id('confirm-modal-choices');
-  choicesContainer.innerHTML = '';
-
-  const choices = config.choices || [{ label: 'Confirm', value: 'confirm' }, { label: 'Deny', value: 'deny' }];
-  choices.forEach(choice => {
-    const btn = document.createElement('button');
-    btn.className = 'confirm-choice-btn';
-    btn.textContent = choice.label;
-    btn.dataset.value = choice.value;
-    btn.onclick = () => {
-      const text = config.require_text ? $id('confirm-modal-text').value : '';
-      if (config.require_text && !text.trim()) {
-        $id('confirm-modal-text').focus();
-        return;
-      }
-      handleModalResponse(choice.value, text);
-    };
-    choicesContainer.appendChild(btn);
-  });
-
-  // Setup text input if required
-  const textContainer = $id('confirm-modal-text-container');
-  if (config.require_text) {
-    textContainer.classList.add('visible');
-    $id('confirm-modal-text').placeholder = config.text_placeholder || 'Enter your response...';
-    $id('confirm-modal-text').value = '';
-  } else {
-    textContainer.classList.remove('visible');
-  }
-
-  modal.classList.add('visible');
-  overlay.classList.add('visible');
-}
-
-function hideConfirmationModal() {
-  decisionModal = null;
-  $id('confirmation-modal').classList.remove('visible');
-  $id('modal-overlay').classList.remove('visible');
-}
-
-async function handleModalResponse(choice, text) {
-  if (!decisionModal) return;
-
-  const taskId = decisionModal.task_id;
-  const decisionType = decisionModal.decision_type || 'confirmation';
-
-  try {
-    await submitDecision(taskId, decisionType, choice, text, decisionModal.metadata);
-    hideConfirmationModal();
-    addEvent('system', 'sys', `Decision submitted: ${choice}`);
-  } catch (e) {
-    addEvent('error', 'error', 'Failed to submit decision: ' + e.message);
-  }
-}
-
-// ─── Read Receipts ────────────────────────────────────────────────
-function updateReadReceipt(taskId, received_at, read_at) {
-  if (!interjectionReceipts[taskId]) {
-    interjectionReceipts[taskId] = {};
-  }
-
-  if (received_at) {
-    interjectionReceipts[taskId].received_at = received_at;
-  }
-  if (read_at) {
-    interjectionReceipts[taskId].read_at = read_at;
-  }
-
-  renderReadReceipt(taskId);
-}
-
-function renderReadReceipt(taskId) {
-  const receipt = interjectionReceipts[taskId];
-  if (!receipt) return;
-
-  const receiptEl = document.querySelector(`.interjection-receipt[data-task-id="${taskId}"]`);
-  if (!receiptEl) return;
-
-  const receivedStr = receipt.received_at ? `received ${formatRelativeTime(receipt.received_at)}` : '';
-  const readStr = receipt.read_at ? `read ${formatRelativeTime(receipt.read_at)}` : '';
-
-  const statusEl = receiptEl.querySelector('.receipt-status');
-  if (statusEl) {
-    if (receipt.read_at) {
-      statusEl.textContent = `${receivedStr} / ${readStr}`;
-      statusEl.className = 'receipt-status read';
-    } else if (receipt.received_at) {
-      statusEl.textContent = receivedStr;
-      statusEl.className = 'receipt-status received';
-    } else {
-      statusEl.textContent = 'pending';
-      statusEl.className = 'receipt-status pending';
-    }
-  }
-}
-
-// ─── Decision Endpoint ────────────────────────────────────────────
-async function submitDecision(taskId, decisionType, choice, note, metadata) {
-  return await apiPost(`/tasks/${taskId}/decision`, {
-    decision_type: decisionType,
-    choice: choice,
-    note: note,
-    metadata: metadata || {},
-  });
-}
 
 // ─── Tasks ────────────────────────────────────────────────────────
 function toggleAddTask() {
@@ -942,9 +559,7 @@ async function loadTasks() {
 
   try {
     const data = await apiFetch(url);
-    tasks = data.tasks || [];  // Store full task list for tree building
-    renderTasks(tasks);
-    renderSidebarTaskTree();  // Update sidebar tree
+    renderTasks(data.tasks || []);
   } catch (e) {
     $id('tasks-list').innerHTML =
       '<div style="padding:14px;color:var(--text3)">Failed to load tasks.</div>';
@@ -954,14 +569,13 @@ async function loadTasks() {
 function dotClass(status) {
   return {
     pending: 'dot-pending', active: 'dot-active', blocked_human: 'dot-blocked',
-    complete: 'dot-complete', cancelled: 'dot-cancelled',
-    ready: 'dot-pending', running: 'dot-active', blocked_by_task: 'dot-blocked', blocked_by_human: 'dot-blocked'
-  }[status?.toLowerCase()] || 'dot-pending';
+    complete: 'dot-complete', cancelled: 'dot-cancelled'
+  }[status] || 'dot-pending';
 }
 
 function taskRowClass(status) {
-  if (status === 'active' || status === 'running') return 'task-row active-task';
-  if (status === 'blocked_human' || status === 'blocked_by_human' || status === 'blocked_by_task') return 'task-row blocked-task';
+  if (status === 'active') return 'task-row active-task';
+  if (status === 'blocked_human') return 'task-row blocked-task';
   if (status === 'complete' || status === 'cancelled') return 'task-row complete-task';
   return 'task-row';
 }
@@ -1207,32 +821,238 @@ async function loadRepos() {
     const sbRepos = $id('sb-repos');
     sbRepos.innerHTML = '';
 
-    // Workspace item
-    const wsItem = document.createElement('div');
-    wsItem.className = 'sb-item';
-    wsItem.dataset.scope = 'workspace';
-    wsItem.innerHTML =
-      `<span class="sb-icon">◈</span>` +
-      `<span class="sb-name">workspace</span>` +
-      `<span class="sb-spinner"></span>`;
-    wsItem.onclick = () => { selectScope('workspace'); closeSidebar(); };
-    sbRepos.appendChild(wsItem);
-
     repos.forEach(r => {
+      // Create repo item with expand arrow (default collapsed ▶)
       const item = document.createElement('div');
       item.className = 'sb-item';
       item.dataset.scope = r.name;
       item.innerHTML =
+        `<button class="sb-repo-expand" onclick="toggleRepoTasks(event, '${r.name}')">▶</button>` +
         `<span class="sb-icon">⬡</span>` +
         `<span class="sb-name">${esc(r.name)}</span>` +
         `<span class="sb-spinner"></span>`;
-      item.onclick = () => { selectScope(r.name); closeSidebar(); };
+      item.onclick = (e) => {
+        if (e.target.className !== 'sb-repo-expand') {
+          selectScope(r.name); closeSidebar();
+        }
+      };
       sbRepos.appendChild(item);
+
+      // Create task tree container for this repo (nested under repo item)
+      const treeContainer = document.createElement('div');
+      treeContainer.id = `sb-task-tree-${r.name}`;
+      treeContainer.className = 'sb-task-tree';
+      sbRepos.appendChild(treeContainer);
     });
 
     injectRepoSettings(repos);
-    renderSidebarTaskTree();  // Render task trees under repos
+
+    // Load tasks for task tree
+    await loadTasksForTree();
   } catch (e) { }
+}
+
+function toggleRepoTasks(event, repoName) {
+  event.stopPropagation();
+  const treeContainer = $id(`sb-task-tree-${repoName}`);
+  const expandBtn = event.target;
+
+  if (treeContainer) {
+    const isVisible = treeContainer.classList.contains('visible');
+    if (isVisible) {
+      // Collapse
+      treeContainer.classList.remove('visible');
+      expandBtn.textContent = '▶';
+    } else {
+      // Expand
+      treeContainer.classList.add('visible');
+      expandBtn.textContent = '▼';
+    }
+  }
+}
+
+function toggleWorkspaceTasks(event) {
+  event.stopPropagation();
+  const treeContainer = $id('sb-task-tree-workspace');
+  const expandBtn = event.target;
+
+  if (treeContainer) {
+    const isVisible = treeContainer.classList.contains('visible');
+    if (isVisible) {
+      // Collapse
+      treeContainer.classList.remove('visible');
+      expandBtn.textContent = '▶';
+    } else {
+      // Expand
+      treeContainer.classList.add('visible');
+      expandBtn.textContent = '▼';
+    }
+  }
+}
+
+function selectScopeWorkspace(event) {
+  event.stopPropagation();
+  if (event.target.className !== 'sb-repo-expand') {
+    selectScope('workspace');
+    closeSidebar();
+  }
+}
+
+// ─── Task Tree ────────────────────────────────────────────────────
+async function loadTasksForTree() {
+  try {
+    const data = await apiFetch('/tasks?all=true');
+    tasks = data.tasks || [];
+    renderTaskTrees();
+  } catch (e) {
+    console.error('Failed to load tasks for tree:', e);
+  }
+}
+
+function buildTaskTree() {
+  // Build hierarchical tree from flat task list using parent_task_id
+  const taskMap = {};
+  const rootTasks = [];
+
+  tasks.forEach(t => {
+    taskMap[t.id] = { ...t, children: [] };
+  });
+
+  tasks.forEach(t => {
+    if (t.parent_task_id && taskMap[t.parent_task_id]) {
+      taskMap[t.parent_task_id].children.push(taskMap[t.id]);
+    } else {
+      rootTasks.push(taskMap[t.id]);
+    }
+  });
+
+  return { taskMap, rootTasks };
+}
+
+function getStatusClass(status) {
+  const statusMap = {
+    'pending': 'status-pending',
+    'ready': 'status-ready',
+    'running': 'status-running',
+    'blocked_by_task': 'status-blocked-task',
+    'blocked_by_human': 'status-blocked-human',
+  };
+  return statusMap[status] || 'status-pending';
+}
+
+function renderTaskTrees() {
+  const { taskMap, rootTasks } = buildTaskTree();
+
+  // Group tasks by repo
+  const tasksByRepo = {};
+  repos.forEach(r => { tasksByRepo[r.name] = []; });
+  // Workspace channel for tasks without a repo
+  tasksByRepo['workspace'] = [];
+
+  rootTasks.forEach(t => {
+    const repoList = t.repo || [];
+    if (repoList.length === 0) {
+      // Workspace-level task
+      tasksByRepo['workspace'].push(t);
+    } else {
+      repoList.forEach(repoName => {
+        if (tasksByRepo[repoName]) {
+          tasksByRepo[repoName].push(t);
+        }
+      });
+    }
+  });
+
+  // Render task tree for each repo (starts collapsed)
+  repos.forEach(r => {
+    const treeContainer = $id(`sb-task-tree-${r.name}`);
+    if (treeContainer) {
+      treeContainer.innerHTML = '';
+      const repoTasks = tasksByRepo[r.name] || [];
+
+      // Don't auto-expand - user must click to expand
+      repoTasks.forEach(t => {
+        const taskNode = renderTaskTreeNode(t, 0);
+        treeContainer.appendChild(taskNode);
+      });
+    }
+  });
+
+  // Render task tree for Workspace channel (starts collapsed)
+  const workspaceTreeContainer = $id('sb-task-tree-workspace');
+  if (workspaceTreeContainer) {
+    workspaceTreeContainer.innerHTML = '';
+    const workspaceTasks = tasksByRepo['workspace'] || [];
+
+    // Don't auto-expand - user must click to expand
+    workspaceTasks.forEach(t => {
+      const taskNode = renderTaskTreeNode(t, 0);
+      workspaceTreeContainer.appendChild(taskNode);
+    });
+  }
+}
+
+function renderTaskTreeNode(task, depth) {
+  const div = document.createElement('div');
+  div.className = 'sb-task-item' + (selectedTask && selectedTask.id === task.id ? ' active' : '');
+  div.dataset.taskId = task.id;
+
+  const hasChildren = task.children && task.children.length > 0;
+  const isExpanded = expandedTasks[task.id] || false;
+
+  div.innerHTML =
+    `<button class="sb-task-expand" onclick="toggleTaskExpand(event, '${task.id}')">${hasChildren ? (isExpanded ? '▼' : '▶') : '•'}</button>` +
+    `<span class="sb-task-status ${getStatusClass(task.status)}"></span>` +
+    `<span class="sb-task-title">${esc(task.title)}</span>`;
+
+  div.onclick = (e) => {
+    if (e.target.className !== 'sb-task-expand') {
+      selectTask(task.id);
+    }
+  };
+
+  // Add indentation via style
+  div.style.marginLeft = (depth * 16) + 'px';
+
+  // Render children if expanded
+  if (hasChildren && isExpanded) {
+    const childrenContainer = document.createElement('div');
+    childrenContainer.className = 'sb-task-tree visible';
+    task.children.forEach(child => {
+      childrenContainer.appendChild(renderTaskTreeNode(child, depth + 1));
+    });
+    div.appendChild(childrenContainer);
+  }
+
+  return div;
+}
+
+function toggleTaskExpand(event, taskId) {
+  event.stopPropagation();
+  expandedTasks[taskId] = !expandedTasks[taskId];
+  renderTaskTrees();
+}
+
+function selectTask(taskId) {
+  const task = tasks.find(t => t.id === taskId);
+  if (!task) return;
+
+  selectedTask = task;
+  renderTaskTrees(); // Update active highlight
+
+  // Switch to chat panel and show task conversation
+  currentTab = 'chat';
+  showPanel('chat-panel');
+  loadTaskConversation(task);
+}
+
+function loadTaskConversation(task) {
+  // TODO: Load and display task's context_messages as conversation
+  // For now, just show a placeholder
+  const log = $id('log');
+  if (log) {
+    log.innerHTML = `<div style="padding:14px;color:var(--text3)">Task conversation for [${task.id}] ${task.title} - coming soon</div>`;
+  }
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────
@@ -1295,149 +1115,6 @@ function connect() {
     if (currentTab === 'tasks' &&
       ['complete', 'phase_change', 'escalation'].includes(msg.type)) {
       loadTasks();
-    }
-
-    // ─── New WebSocket Event Handlers ─────────────────────────────
-    // Task tree update - rebuild sidebar task tree
-    if (msg.type === 'task_tree_update') {
-      tasks = msg.data.tasks || tasks;
-      renderSidebarTaskTree();
-      if (selectedTask) {
-        const task = tasks.find(t => t.id === selectedTask);
-        if (task) renderTaskConversation(task);
-      }
-      return;
-    }
-
-    // Decomposition confirmation required
-    if (msg.type === 'decomposition_confirmation_required') {
-      showConfirmationModal({
-        task_id: msg.data.task_id,
-        decision_type: 'decomposition',
-        title: 'Decomposition Confirmation',
-        body: msg.data.body || 'Please confirm the proposed decomposition.',
-        choices: msg.data.choices || [
-          { label: 'Approve', value: 'approve' },
-          { label: 'Modify', value: 'modify' },
-          { label: 'Reject', value: 'reject' }
-        ],
-        require_text: msg.data.require_text || false,
-        text_placeholder: msg.data.text_placeholder || 'Explain your decision...',
-        metadata: msg.data.metadata || {}
-      });
-      return;
-    }
-
-    // PR approval required
-    if (msg.type === 'pr_approval_required') {
-      showConfirmationModal({
-        task_id: msg.data.task_id,
-        decision_type: 'pr_approval',
-        title: 'PR Approval Required',
-        body: msg.data.body || 'Please review and approve the pull request.',
-        choices: [
-          { label: 'Approve', value: 'approve' },
-          { label: 'Request Changes', value: 'request_changes' }
-        ],
-        require_text: false,
-        metadata: msg.data.metadata || {}
-      });
-      return;
-    }
-
-    // PR rejection
-    if (msg.type === 'pr_rejection') {
-      showConfirmationModal({
-        task_id: msg.data.task_id,
-        decision_type: 'pr_rejection',
-        title: 'PR Rejection',
-        body: msg.data.body || 'The pull request was rejected. Please provide feedback.',
-        choices: [{ label: 'Submit Feedback', value: 'submit' }],
-        require_text: true,
-        text_placeholder: 'Describe the changes needed...',
-        metadata: msg.data.metadata || {}
-      });
-      return;
-    }
-
-    // Turn limit reached
-    if (msg.type === 'turn_limit_reached') {
-      showConfirmationModal({
-        task_id: msg.data.task_id,
-        decision_type: 'turn_limit',
-        title: 'Turn Limit Reached',
-        body: msg.data.body || 'The task has reached its turn limit. How would you like to proceed?',
-        choices: [
-          { label: 'Continue', value: 'continue' },
-          { label: 'Stop', value: 'stop' }
-        ],
-        metadata: msg.data.metadata || {}
-      });
-      return;
-    }
-
-    // Critic turn limit reached
-    if (msg.type === 'critic_turn_limit_reached') {
-      showConfirmationModal({
-        task_id: msg.data.task_id,
-        decision_type: 'critic_turn_limit',
-        title: 'Critic Turn Limit Reached',
-        body: msg.data.body || 'The critic has reached its turn limit.',
-        choices: [
-          { label: 'Continue', value: 'continue' },
-          { label: 'Accept', value: 'accept' }
-        ],
-        metadata: msg.data.metadata || {}
-      });
-      return;
-    }
-
-    // Merge conflict resolution turn limit reached
-    if (msg.type === 'merge_conflict_resolution_turn_limit_reached') {
-      showConfirmationModal({
-        task_id: msg.data.task_id,
-        decision_type: 'merge_conflict_turn_limit',
-        title: 'Merge Conflict Resolution Limit',
-        body: msg.data.body || 'Merge conflict resolution has reached its turn limit.',
-        choices: [
-          { label: 'Continue', value: 'continue' },
-          { label: 'Abort', value: 'abort' }
-        ],
-        metadata: msg.data.metadata || {}
-      });
-      return;
-    }
-
-    // Planning turn limit reached
-    if (msg.type === 'planning_turn_limit_reached') {
-      showConfirmationModal({
-        task_id: msg.data.task_id,
-        decision_type: 'planning_turn_limit',
-        title: 'Planning Turn Limit Reached',
-        body: msg.data.body || 'Planning has reached its turn limit.',
-        choices: [
-          { label: 'Continue', value: 'continue' },
-          { label: 'Proceed with Current Plan', value: 'proceed' }
-        ],
-        metadata: msg.data.metadata || {}
-      });
-      return;
-    }
-
-    // Message received - update read receipt received_at
-    if (msg.type === 'message_received') {
-      const taskId = msg.data.task_id;
-      const receivedAt = msg.data.received_at || new Date().toISOString();
-      updateReadReceipt(taskId, receivedAt, null);
-      return;
-    }
-
-    // Message read - update read receipt read_at
-    if (msg.type === 'message_read') {
-      const taskId = msg.data.task_id;
-      const readAt = msg.data.read_at || new Date().toISOString();
-      updateReadReceipt(taskId, null, readAt);
-      return;
     }
   };
 

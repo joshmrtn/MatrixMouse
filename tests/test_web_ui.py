@@ -81,8 +81,8 @@ class TestHeaderControls:
     def test_conn_indicator(self, html):
         assert 'id="conn-dot"' in html and 'id="conn-label"' in html
     def test_status_fields(self, html):
-        for fid in ["v-status", "v-task", "v-phase", "v-model", "v-turns"]:
-            assert f'id="{fid}"' in html
+        # Simplified header - only v-status remains
+        assert 'id="v-status"' in html
     def test_hamburger_button(self, html):
         assert 'id="sidebar-toggle"' in html
 
@@ -207,6 +207,8 @@ class TestStreamingPrep:
 class TestApiIntegration:
     def test_stop_endpoint(self, html): assert "'/stop'" in html or '"/stop"' in html
     def test_kill_endpoint(self, html): assert "'/kill'" in html or '"/kill"' in html
-    def test_interject_endpoint(self, html): assert "'/interject'" in html or '"/interject"' in html
+    def test_interject_endpoint(self, html):
+        # New scoped interjection endpoints
+        assert "'/interject/workspace'" in html or '"/interject/workspace"' in html
     def test_context_endpoint(self, html): assert "'/context'" in html or '"/context"' in html
     def test_wss_for_https(self, html): assert "wss" in html and "https:" in html

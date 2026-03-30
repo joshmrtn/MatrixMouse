@@ -375,7 +375,8 @@ class TestReportBlocked:
         s = Scheduler(make_config())
         q = InMemoryTaskRepository()
         q.add(make_task())
-        assert s.report_blocked(q) == "No blocked tasks."
+        report = s.report_blocked(q)
+        assert report == {"human": [], "dependencies": [], "waiting": []}
 
     def test_lists_blocked_by_human(self):
         s = Scheduler(make_config())
@@ -384,8 +385,9 @@ class TestReportBlocked:
         q.add(task)
         q.mark_blocked_by_human(task.id, "needs decision")
         report = s.report_blocked(q)
-        assert "waiting for human" in report
-        assert "Blocked by human" in report
+        assert len(report["human"]) == 1
+        assert "waiting for human" in report["human"][0]["title"]
+        assert "needs decision" in report["human"][0]["blocking_reason"]
 
     def test_lists_blocked_by_task(self):
         s = Scheduler(make_config())
@@ -396,8 +398,9 @@ class TestReportBlocked:
         q.add(blocked)
         q.add_dependency(blocker.id, blocked.id)
         report = s.report_blocked(q)
-        assert "blocked task" in report
-        assert "Blocked by dependencies" in report
+        assert len(report["dependencies"]) == 1
+        assert "blocked task" in report["dependencies"][0]["title"]
+        assert "Waiting on" in report["dependencies"][0]["blocking_reason"]
 
 # ---------------------------------------------------------------------------
 # Stale clarification detection
@@ -609,11 +612,11 @@ class TestWaitingAndExclude:
         waiting_task.wait_reason = "budget:anthropic"
         waiting_task.wait_until = "2026-04-01T00:00:00+00:00"
         q.add(waiting_task)
-        
+
         report = s.report_blocked(q)
-        
-        assert "Waiting" in report
-        assert "waiting task" in report
+
+        assert len(report["waiting"]) == 1
+        assert "waiting task" in report["waiting"][0]["title"]
 
     def test_report_blocked_shows_wait_reason_and_wait_until(self):
         """report_blocked shows wait_reason and wait_until for WAITING tasks."""
@@ -623,15 +626,15 @@ class TestWaitingAndExclude:
         waiting_task.wait_reason = "budget:anthropic"
         waiting_task.wait_until = "2026-04-01T00:00:00+00:00"
         q.add(waiting_task)
-        
+
         report = s.report_blocked(q)
-        
-        assert "budget:anthropic" in report
-        assert "2026-04-01T00:00:00+00:00" in report
-        assert "retry after" in report.lower()
+
+        assert "budget:anthropic" in report["waiting"][0]["blocking_reason"]
+        assert "2026-04-01T00:00:00+00:00" in report["waiting"][0]["blocking_reason"]
+        assert "retry after" in report["waiting"][0]["blocking_reason"].lower()
 
     def test_report_blocked_returns_no_blocked_tasks_when_only_waiting_with_active_wait(self):
-        """report_blocked returns 'No blocked tasks.' when only WAITING tasks
+        """report_blocked returns empty lists when only WAITING tasks
         present but wait is active (WAITING is not 'blocked' in the human-
         intervention sense).
         """
@@ -641,14 +644,13 @@ class TestWaitingAndExclude:
         waiting_task.wait_reason = "budget:anthropic"
         waiting_task.wait_until = "2026-04-01T00:00:00+00:00"
         q.add(waiting_task)
-        
+
         report = s.report_blocked(q)
         
         # WAITING tasks are included in the report (they're not "blocked"
         # but they are shown in a separate "Waiting" section)
         # This is the desired behavior - WAITING tasks are shown separately
         # from blocked tasks since they resume automatically
-        assert "Waiting" in report
-        # The report should NOT say "No blocked tasks." because there IS
-        # a WAITING task (which is shown in its own section)
-        assert report != "No blocked tasks."
+        assert len(report["waiting"]) == 1
+        # The report should have the waiting task in the waiting list
+        assert "waiting task" in report["waiting"][0]["title"]

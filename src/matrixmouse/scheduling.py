@@ -338,10 +338,14 @@ class Scheduler:
         limit   = self._slice_minutes(level)
         return elapsed >= limit
 
-    def report_blocked(self, queue: TaskRepository) -> str:
-        """Return a human-readable summary of all blocked and waiting tasks.
+    def report_blocked(self, queue: TaskRepository) -> dict:
+        """Return a structured summary of all blocked and waiting tasks.
 
-        Used by GET /status and the web UI.
+        Used by GET /blocked and the web UI status dashboard.
+        
+        Returns:
+            dict with keys: human, dependencies, waiting
+            Each value is a list of dicts with task info.
         """
         blocked_by_task = [
             t for t in queue.active_tasks()
@@ -356,38 +360,39 @@ class Scheduler:
             if t.status == TaskStatus.WAITING
         ]
 
-        if not blocked_by_task and not blocked_by_human and not waiting:
-            return "No blocked tasks."
+        result = {
+            "human": [],
+            "dependencies": [],
+            "waiting": [],
+        }
 
-        lines = []
+        for t in blocked_by_human:
+            entry = {
+                "id": t.id,
+                "title": t.title,
+                "blocking_reason": t.notes.splitlines()[-1] if t.notes else "Awaiting human input",
+            }
+            result["human"].append(entry)
 
-        if blocked_by_human:
-            lines.append(f"Blocked by human ({len(blocked_by_human)}):")
-            for t in blocked_by_human:
-                lines.append(f"  [{t.id}] {t.title}")
-                if t.notes:
-                    lines.append(f"        {t.notes.splitlines()[-1]}")
+        for t in blocked_by_task:
+            blockers = queue.get_blocked_by(t.id)
+            blocker_ids = ", ".join(b.id for b in blockers)
+            entry = {
+                "id": t.id,
+                "title": t.title,
+                "blocking_reason": f"Waiting on: {blocker_ids}",
+            }
+            result["dependencies"].append(entry)
 
-        if blocked_by_task:
-            lines.append(f"Blocked by dependencies ({len(blocked_by_task)}):")
-            for t in blocked_by_task:
-                blockers = queue.get_blocked_by(t.id)
-                blocker_ids = ", ".join(b.id for b in blockers)
-                lines.append(
-                    f"  [{t.id}] {t.title} — waiting on: {blocker_ids}"
-                )
+        for t in waiting:
+            entry = {
+                "id": t.id,
+                "title": t.title,
+                "blocking_reason": f"Reason: {t.wait_reason or 'unspecified'}, retry after: {t.wait_until or 'unknown'}",
+            }
+            result["waiting"].append(entry)
 
-        if waiting:
-            lines.append(f"Waiting (resumes automatically) ({len(waiting)}):")
-            for t in waiting:
-                reason = t.wait_reason or "unspecified"
-                until = t.wait_until or "unknown"
-                lines.append(
-                    f"  [{t.id}] {t.title} — reason: {reason}, "
-                    f"retry after: {until}"
-                )
-
-        return "\n".join(lines)
+        return result
     # -----------------------------------------------------------------------
     # Stale clarification detection
     # -----------------------------------------------------------------------
