@@ -442,6 +442,7 @@ def main() -> None:
         comms.configure(_config)
 
         # --- Token budget tracker ---
+        ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
         from matrixmouse.inference.token_budget import TokenBudgetTracker
         budget_tracker = TokenBudgetTracker(
             ws_state_repo=ws_state_repo,
@@ -461,7 +462,6 @@ def main() -> None:
 
         # --- Orchestrator ---
         queue = SQLiteTaskRepository(paths.db_file)
-        ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
         orchestrator = Orchestrator(
             config=_config,
             paths=paths,
