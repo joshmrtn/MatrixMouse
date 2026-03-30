@@ -1061,3 +1061,314 @@ def _enter_planning_mode_if_needed() -> None:
             if _config else 10,
         ),
     )
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
+
+DECLARE_COMPLETE_SCHEMA = {
+    "name": "declare_complete",
+    "description": (
+        "Signal that your assigned work is finished. Include a concise summary "
+        "of what was accomplished — this is recorded in the task history and "
+        "provides context for dependent tasks. Do not call this speculatively."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": (
+                    "What was accomplished. Be specific: mention files changed, "
+                    "decisions made, tests passed, or design choices taken."
+                ),
+            },
+        },
+        "required": ["summary"],
+    },
+}
+
+CREATE_TASK_SCHEMA = {
+    "name": "create_task",
+    "description": (
+        "Create a new task and add it to the queue. "
+        "Use this to address human intent or system needs. "
+        "To decompose an existing task into subtasks, use split_task instead."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Short actionable title, e.g. 'Add input validation to login endpoint'.",
+            },
+            "description": {
+                "type": "string",
+                "description": (
+                    "Full specification: what to build, constraints, definition of done, "
+                    "and any context the implementing agent will need. "
+                    "The agent sees only this description — be precise."
+                ),
+            },
+            "role": {
+                "type": "string",
+                "enum": ["coder", "writer"],
+                "description": (
+                    "'coder' for tasks that touch source code. "
+                    "'writer' for documentation, copy, or configuration prose."
+                ),
+            },
+            "repo": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Repository names this task applies to. Most tasks have one entry.",
+            },
+            "target_files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Files the agent should focus on. Helps scope the task. Optional.",
+            },
+            "importance": {
+                "type": "number",
+                "description": "How much this task matters to the overall goal (0.0–1.0). Default 0.5. Reserve >0.8 for genuinely critical work.",
+            },
+            "urgency": {
+                "type": "number",
+                "description": "How time-sensitive this task is (0.0–1.0). Default 0.5. Reserve >0.8 for genuinely urgent work.",
+            },
+        },
+        "required": ["title", "description", "role", "repo"],
+    },
+}
+
+SPLIT_TASK_SCHEMA = {
+    "name": "split_task",
+    "description": (
+        "Decompose a task into subtasks. Use when a task is too large to complete "
+        "safely in one pass and can be divided into independent units of work. "
+        "Each subtask should target a single function, method, or self-contained concern. "
+        "The parent task is automatically blocked until all subtasks complete. "
+        "May require human confirmation if the task graph is deeply nested."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "ID of the task to decompose. Must not be currently RUNNING.",
+            },
+            "subtasks": {
+                "type": "array",
+                "description": "List of subtask specifications. Must contain at least one entry.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Short descriptive title.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": (
+                                "Full specification. Include what the parent task has already "
+                                "attempted if relevant."
+                            ),
+                        },
+                        "role": {
+                            "type": "string",
+                            "enum": ["coder", "writer"],
+                            "description": "Agent role to assign.",
+                        },
+                        "target_files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Files to focus on. Optional.",
+                        },
+                        "importance": {
+                            "type": "number",
+                            "description": "Importance 0.0–1.0. Defaults to parent's value.",
+                        },
+                        "urgency": {
+                            "type": "number",
+                            "description": "Urgency 0.0–1.0. Defaults to parent's value.",
+                        },
+                    },
+                    "required": ["title", "description", "role"],
+                },
+            },
+        },
+        "required": ["task_id", "subtasks"],
+    },
+}
+
+UPDATE_TASK_SCHEMA = {
+    "name": "update_task",
+    "description": (
+        "Update fields on a task. All fields except task_id are optional — "
+        "only specified fields are changed. Use add_blocked_by / remove_blocked_by "
+        "to manage dependencies; cycle detection runs automatically and rejects "
+        "changes that would create a cycle."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "ID of the task to update.",
+            },
+            "title": {
+                "type": "string",
+                "description": "New title.",
+            },
+            "description": {
+                "type": "string",
+                "description": "New description.",
+            },
+            "role": {
+                "type": "string",
+                "enum": ["coder", "writer"],
+                "description": "New role.",
+            },
+            "importance": {
+                "type": "number",
+                "description": "New importance weight 0.0–1.0.",
+            },
+            "urgency": {
+                "type": "number",
+                "description": "New urgency weight 0.0–1.0.",
+            },
+            "notes": {
+                "type": "string",
+                "description": "Text appended to the task's notes. Cumulative — does not replace existing notes.",
+            },
+            "add_blocked_by": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Task IDs to add as blocking dependencies.",
+            },
+            "remove_blocked_by": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Task IDs to remove from blocking dependencies.",
+            },
+        },
+        "required": ["task_id"],
+    },
+}
+
+# NOTE: this schema doesn't appear in tools.__init__, it's pulled in to the BRANCH_SETUP SessionMode as needed.
+SET_BRANCH_SCHEMA = {
+    "name": "set_branch",
+    "description": (
+        "Assign a git branch to this task and create it in the repository. "
+        "Must be called before any file work or task decomposition. "
+        "The branch name is permanent — it cannot be changed after assignment. "
+        "The full branch name is constructed as '<prefix>/<slug>'."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "ID of the task to assign the branch to.",
+            },
+            "slug": {
+                "type": "string",
+                "description": (
+                    "Human-meaningful branch slug, e.g. 'refactor/foobar' or 'fix/login-timeout'. "
+                    "Lowercase letters, digits, hyphens, and forward slashes only. "
+                    "No leading/trailing hyphens or slashes. Max 50 characters. "
+                    "Do not include the prefix."
+                ),
+            },
+        },
+        "required": ["task_id", "slug"],
+    },
+}
+
+GET_TASK_INFO_SCHEMA = {
+    "name": "get_task_info",
+    "description": (
+        "Read details of a task: status, role, branch, dependencies, subtasks, "
+        "description, and notes. Defaults to the current active task if no ID is given."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "Task ID to look up. Defaults to the current active task.",
+            },
+        },
+        "required": [],
+    },
+}
+
+LIST_TASKS_SCHEMA = {
+    "name": "list_tasks",
+    "description": (
+        "List tasks in the queue. By default shows all non-terminal tasks sorted "
+        "by priority score. Use filters to narrow the view."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": [
+                    "ready", "running", "pending",
+                    "blocked_by_task", "blocked_by_human",
+                    "complete", "cancelled",
+                ],
+                "description": "Filter by status. Defaults to all non-terminal tasks.",
+            },
+            "repo": {
+                "type": "string",
+                "description": "Filter by repository name.",
+            },
+            "role": {
+                "type": "string",
+                "enum": ["manager", "coder", "writer", "critic"],
+                "description": "Filter by agent role.",
+            },
+        },
+        "required": [],
+    },
+}
+
+APPROVE_SCHEMA = {
+    "name": "approve",
+    "description": (
+        "Approve the reviewed task as complete. Call this when the work meets "
+        "the definition of done and no significant issues were found."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+DENY_SCHEMA = {
+    "name": "deny",
+    "description": (
+        "Reject the reviewed task and return it for rework. The feedback is "
+        "injected into the implementing agent's context so it knows what to fix. "
+        "Be specific: name files, functions, or behaviours that are wrong and "
+        "describe what the correct outcome should be. Vague feedback wastes turns."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "feedback": {
+                "type": "string",
+                "description": (
+                    "Specific, actionable description of what is wrong and what "
+                    "must change before the task can be approved."
+                ),
+            },
+        },
+        "required": ["feedback"],
+    },
+}

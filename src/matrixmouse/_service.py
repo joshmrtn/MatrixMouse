@@ -35,6 +35,7 @@ from pathlib import Path
 
 from matrixmouse.repository.sqlite_task_repository import SQLiteTaskRepository
 from matrixmouse.repository.sqlite_workspace_state_repository import SQLiteWorkspaceStateRepository
+from matrixmouse.router import Router
 from matrixmouse.utils.logging_utils import setup_logging
 
 # ---------------------------------------------------------------------------
@@ -47,7 +48,6 @@ logger = logging.getLogger(__name__)
 # Remaining imports
 # ---------------------------------------------------------------------------
 from matrixmouse.config import load_config
-from matrixmouse.init import validate_models
 from matrixmouse.graph import analyze_project
 from matrixmouse import memory, comms
 from matrixmouse.orchestrator import Orchestrator
@@ -200,6 +200,70 @@ def _load_env_file(env_file_path: str | None) -> None:
     logger.debug("Loaded %d value(s) from %s", loaded, env_path)
 
 
+def _load_inference_secrets(config) -> None:
+    """Load API key files for any remote inference backends in the config.
+
+    Only loads key files for backends that are actually configured.
+    Raises immediately if a required key file is missing or empty —
+    better to fail loudly at startup than silently at first inference call.
+
+    Args:
+        config: Loaded MatrixMouseConfig.
+
+    Raises:
+        SystemExit: If a required API key file is missing or empty.
+    """
+    from matrixmouse.router import parse_model_string, _REMOTE_BACKENDS
+
+    # Collect every configured model string
+    all_model_strings = [
+        config.manager_model,
+        config.coder_model,
+        config.writer_model,
+        config.critic_model,
+        config.summarizer_model,
+        config.merge_resolution_model,
+    ] + list(config.coder_cascade)
+
+    backends_in_use: set[str] = set()
+    for model_string in all_model_strings:
+        if not model_string:
+            continue
+        try:
+            parsed = parse_model_string(model_string)
+            if parsed.backend in _REMOTE_BACKENDS:
+                backends_in_use.add(parsed.backend)
+        except ValueError:
+            pass  # malformed strings caught later by Router._validate_config()
+
+    # Load and validate key for each remote backend in use
+    _BACKEND_KEY_FILES: dict[str, tuple[str, str]] = {
+        "anthropic": (
+            "/etc/matrixmouse/secrets/anthropic_api_key",
+            "ANTHROPIC_API_KEY",
+        ),
+        "openai": (
+            "/etc/matrixmouse/secrets/openai_api_key",
+            "OPENAI_API_KEY",
+        ),
+    }
+
+    for backend in sorted(backends_in_use):
+        if backend not in _BACKEND_KEY_FILES:
+            continue
+        key_file, env_var = _BACKEND_KEY_FILES[backend]
+        _load_env_file(key_file)
+
+        if not os.environ.get(env_var):
+            logger.error(
+                "Backend '%s' is configured but %s is not set. "
+                "Create %s with the API key and restart.",
+                backend, env_var, key_file,
+            )
+            sys.exit(1)
+
+        logger.info("API key loaded for backend '%s'.", backend)
+
 # ---------------------------------------------------------------------------
 # Workspace and repo resolution
 # ---------------------------------------------------------------------------
@@ -324,6 +388,7 @@ def main() -> None:
         # --- Secrets ---
         _load_env_file("/etc/matrixmouse/secrets/github_token")
         _load_env_file("/etc/matrixmouse/secrets/ntfy")
+        _load_inference_secrets(_config)
 
         # --- Git tools check
         from matrixmouse.tools.git_tools import _require_ssh_key
@@ -343,7 +408,8 @@ def main() -> None:
             )
 
         # --- Model validation ---
-        validate_models(_config)
+        router = Router(_config)        # parse + local_only check
+        router.ensure_all_models()     # pull/verify each model
 
         # --- AST graphs for all registered repos ---
         repo_paths = _load_registered_repos(workspace_root)
@@ -375,6 +441,24 @@ def main() -> None:
         memory.configure(paths.agent_notes)
         comms.configure(_config)
 
+        # --- Token budget tracker ---
+        from matrixmouse.inference.token_budget import TokenBudgetTracker
+        budget_tracker = TokenBudgetTracker(
+            ws_state_repo=ws_state_repo,
+            anthropic_tokens_per_hour=_config.anthropic_tokens_per_hour,
+            anthropic_tokens_per_day=_config.anthropic_tokens_per_day,
+            openai_tokens_per_hour=_config.openai_tokens_per_hour,
+            openai_tokens_per_day=_config.openai_tokens_per_day,
+        )
+        logger.info(
+            "Token budget tracker initialised: "
+            "anthropic=%d/%d tokens/hour/day, openai=%d/%d tokens/hour/day",
+            _config.anthropic_tokens_per_hour,
+            _config.anthropic_tokens_per_day,
+            _config.openai_tokens_per_hour,
+            _config.openai_tokens_per_day,
+        )
+
         # --- Orchestrator ---
         queue = SQLiteTaskRepository(paths.db_file)
         ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
@@ -384,6 +468,7 @@ def main() -> None:
             queue=queue,
             ws_state_repo=ws_state_repo,
             graph=graphs,
+            budget_tracker=budget_tracker,
         )
         orchestrator.configure_api()
 

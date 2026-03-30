@@ -66,6 +66,7 @@ class TaskStatus(Enum):
     RUNNING          = "running"
     BLOCKED_BY_TASK  = "blocked_by_task"
     BLOCKED_BY_HUMAN = "blocked_by_human"
+    WAITING          = "waiting"          # paused until wait_until; resumes automatically
     COMPLETE         = "complete"
     CANCELLED        = "cancelled"
 
@@ -75,7 +76,13 @@ class TaskStatus(Enum):
 
     @property
     def is_blocked(self) -> bool:
+        """True for statuses that require external intervention to clear."""
         return self in (TaskStatus.BLOCKED_BY_TASK, TaskStatus.BLOCKED_BY_HUMAN)
+
+    @property
+    def is_waiting(self) -> bool:
+        """True for statuses that clear automatically after a time condition."""
+        return self == TaskStatus.WAITING
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +108,7 @@ class Task:
                                     — number of human confirmation events granted
                                       on this branch's decomposition depth
         time_slice_started          — Unix timestamp when status became RUNNING
-        turn_limit                  — Per-task turn limit override. 0 means use 
+        turn_limit                  — Per-task turn limit override. 0 means use
                                       config.agent_max_turns.
         preempt                     — transient flag set by orchestrator to preempt
                                       the currently running task
@@ -126,20 +133,30 @@ class Task:
         pr_state                    — current state of the PR. See PRState enum.
         pr_poll_next_at             — ISO timestamp of next scheduled PR state
                                       poll. Empty string means no poll pending.
+        wait_until                  — ISO timestamp; when WAITING, the earliest
+                                      datetime at which the orchestrator may
+                                      promote this task back to READY. None means
+                                      no time gate (promote immediately on next
+                                      poll if other conditions are met).
+        wait_reason                 — machine-readable tag describing why the task
+                                      is WAITING. Convention: "category:detail",
+                                      e.g. "budget:anthropic", "budget:openai",
+                                      "rate_limit:anthropic". Empty string when
+                                      not WAITING.
 
     Removed vs the previous model:
         phase                       — replaced by role
         source                      — unused in practice
-        blocking, blocked_by        — moved to task_dependencies table 
-                                      in the repository layer; query via 
-                                      repository.get_blocked_by() / 
+        blocking, blocked_by        — moved to task_dependencies table
+                                      in the repository layer; query via
+                                      repository.get_blocked_by() /
                                       repository.get_blocking()
-        subtasks                    — made redundant by new 
+        subtasks                    — made redundant by new
                                       repository.get_subtasks()
 
-    Identity note: task_id is a 16-character hex string (16^16 possible values).  
-    Global uniqueness is enforced at creation time by TaskRepository.add(). For 
-    terminated tasks, the natural unique identifier is the composite of 
+    Identity note: task_id is a 16-character hex string (16^16 possible values).
+    Global uniqueness is enforced at creation time by TaskRepository.add(). For
+    terminated tasks, the natural unique identifier is the composite of
     (id, created_at, completed_at)
     TODO: Implement archival strategy and retention policy for terminated tasks
     """
@@ -167,8 +184,12 @@ class Task:
     urgency: float = 0.5
     time_slice_started: Optional[float] = None
     turn_limit: int = field(default=0)
-    preempt: bool = field(default = False)
+    preempt: bool = field(default=False)
     preemptable: bool = field(default=True)
+
+    # --- Waiting (time-gated pause, resumes automatically) ---
+    wait_until: Optional[str] = field(default=None)   # ISO timestamp or None
+    wait_reason: str = field(default="")              # e.g. "budget:anthropic"
 
     # --- Git ---
     wip_commit_hash: str = field(default="")
@@ -195,7 +216,7 @@ class Task:
     last_modified: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
-    pending_question: str = field(default="") # request_clarification questions land here
+    pending_question: str = field(default="")  # request_clarification questions land here
 
     # --- PR tracking ---
     pr_url:          str     = field(default="")
@@ -265,6 +286,8 @@ class Task:
             "turn_limit":                   self.turn_limit,
             "preempt":                      self.preempt,
             "preemptable":                  self.preemptable,
+            "wait_until":                   self.wait_until,
+            "wait_reason":                  self.wait_reason,
             "wip_commit_hash":              self.wip_commit_hash,
             "merge_resolution_decisions":   self.merge_resolution_decisions,
             "pending_tool_calls":           self.pending_tool_calls,
@@ -279,7 +302,7 @@ class Task:
             "last_modified":                self.last_modified,
             "pending_question":             self.pending_question,
             "pr_url":                       self.pr_url,
-            "pr_state":                     self.pr_state,
+            "pr_state":                     self.pr_state.value,
             "pr_poll_next_at":              self.pr_poll_next_at,
         }
 
@@ -322,6 +345,8 @@ class Task:
             turn_limit=data.get("turn_limit", 0),
             preempt=data.get("preempt") or False,
             preemptable=data.get("preemptable", True),
+            wait_until=data.get("wait_until"),
+            wait_reason=data.get("wait_reason", ""),
             wip_commit_hash=data.get("wip_commit_hash") or "",
             merge_resolution_decisions=data.get("merge_resolution_decisions", []),
             pending_tool_calls=data.get("pending_tool_calls", []),
@@ -338,7 +363,7 @@ class Task:
             last_modified=data.get(
                 "last_modified",
                 data.get("created_at", datetime.now(timezone.utc).isoformat())
-                ),
+            ),
             pending_question=data.get("pending_question", ""),
             pr_url=data.get("pr_url", ""),
             pr_state=PRState(data.get("pr_state", "")),

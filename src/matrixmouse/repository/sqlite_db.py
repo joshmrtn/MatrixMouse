@@ -27,7 +27,7 @@ _local = threading.local()
 _SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
-
+ 
 CREATE TABLE IF NOT EXISTS tasks (
     id                              TEXT PRIMARY KEY,
     title                           TEXT NOT NULL,
@@ -61,27 +61,29 @@ CREATE TABLE IF NOT EXISTS tasks (
     pr_url                          TEXT NOT NULL DEFAULT '',
     pr_state                        TEXT NOT NULL DEFAULT '',
     pr_poll_next_at                 TEXT NOT NULL DEFAULT '',
+    wait_until                      TEXT,
+    wait_reason                     TEXT NOT NULL DEFAULT '',
     data                            TEXT
 );
-
+ 
 CREATE TABLE IF NOT EXISTS task_dependencies (
     blocking_task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     blocked_task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     PRIMARY KEY (blocking_task_id, blocked_task_id)
 );
-
+ 
 CREATE TABLE IF NOT EXISTS stale_clarification_tasks (
     blocked_task_id     TEXT PRIMARY KEY
                             REFERENCES tasks(id) ON DELETE CASCADE,
     manager_task_id     TEXT NOT NULL
                             REFERENCES tasks(id) ON DELETE CASCADE
 );
-
+ 
 CREATE TABLE IF NOT EXISTS workspace_state (
     key     TEXT PRIMARY KEY,
     value   TEXT NOT NULL
 );
-
+ 
 -- Session contexts: transient execution state for special agent sessions
 -- (BRANCH_SETUP, MERGE_RESOLUTION, PLANNING). Cleared when session ends.
 CREATE TABLE IF NOT EXISTS session_contexts (
@@ -92,7 +94,7 @@ CREATE TABLE IF NOT EXISTS session_contexts (
     turn_limit_override    INTEGER NOT NULL DEFAULT 0,
     created_at             TEXT NOT NULL
 );
-
+ 
 -- Merge locks: per-parent-branch mutex preventing concurrent sibling merges.
 -- Lock is live while locked_by task is RUNNING or BLOCKED_BY_HUMAN.
 -- Stale if locked_by task is terminal, READY, not found, or locked_at > 24h.
@@ -102,7 +104,7 @@ CREATE TABLE IF NOT EXISTS merge_locks (
     locked_at  TEXT NOT NULL,              -- ISO timestamp
     queue      TEXT NOT NULL DEFAULT '[]'  -- JSON array of waiting task IDs, FIFO
 );
-
+ 
 -- Repo metadata: per-repo git provider config and cached protected branches.
 -- protected_branches is a JSON array, invalidated after branch_protection_cache_ttl_minutes.
 CREATE TABLE IF NOT EXISTS repo_metadata (
@@ -112,7 +114,19 @@ CREATE TABLE IF NOT EXISTS repo_metadata (
     protected_branches TEXT NOT NULL DEFAULT '[]', -- JSON array, cached
     cache_timestamp    TEXT NOT NULL DEFAULT ''    -- ISO timestamp of last cache update
 );
-
+ 
+-- Token usage log for rolling-window budget enforcement.
+-- Each row records one LLM API response. Budget tracker queries this
+-- table with a WHERE recorded_at > ? to sum usage in the rolling window.
+CREATE TABLE IF NOT EXISTS token_usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider      TEXT    NOT NULL,           -- "anthropic" | "openai"
+    model         TEXT    NOT NULL,           -- backend-local model identifier
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    recorded_at   TEXT    NOT NULL            -- ISO timestamp (UTC)
+);
+ 
 CREATE INDEX IF NOT EXISTS idx_tasks_status
     ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent
@@ -121,6 +135,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_last_modified
     ON tasks(last_modified);
 CREATE INDEX IF NOT EXISTS idx_dependencies_blocked
     ON task_dependencies(blocked_task_id);
+CREATE INDEX IF NOT EXISTS idx_token_usage_provider_recorded
+    ON token_usage(provider, recorded_at);
 """
 
 

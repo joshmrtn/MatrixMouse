@@ -964,8 +964,8 @@ def cmd_config_set(args):
     Set a config value via PATCH /config.
 
     Usage:
-        matrixmouse config set coder qwen2.5-coder:14b
-        matrixmouse config set --repo myrepo coder qwen2.5-coder:7b
+        matrixmouse config set coder ollama:qwen2.5-coder:14b
+        matrixmouse config set --repo myrepo coder ollama:qwen2.5-coder:7b
         matrixmouse config set --repo myrepo --commit create_design_docs true
     """
     port   = _resolve_port()

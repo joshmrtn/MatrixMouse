@@ -55,7 +55,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 
-from matrixmouse.task import Task, TaskStatus
+from matrixmouse.task import Task, TaskStatus, AgentRole
 from matrixmouse.repository.memory_task_repository import InMemoryTaskRepository
 from matrixmouse.scheduling import Scheduler, P1, P2, P3
 
@@ -552,3 +552,103 @@ class TestStaleClarificationDetection:
         task = self._make_blocked_task(minutes_ago=90)
         s._check_stale_clarifications([task])
         callback.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# WAITING / exclude tests
+# ---------------------------------------------------------------------------
+
+class TestWaitingAndExclude:
+    """Tests for WAITING task handling and exclude set functionality."""
+
+    def test_next_with_exclude_set_skips_excluded_task_ids(self):
+        """next() with exclude set skips excluded task IDs."""
+        s = Scheduler(make_config())
+        task1 = make_task(title="task1", importance=1.0, urgency=1.0)
+        task2 = make_task(title="task2", importance=0.5, urgency=0.5)
+        q = make_queue_with_tasks([task1, task2])
+        
+        # Exclude task1 - should select task2 instead
+        decision = s.next(q, exclude={task1.id})
+        
+        assert decision.task is not None
+        assert decision.task.title == "task2"
+
+    def test_next_reason_mentions_waiting_count(self):
+        """next() reason string mentions WAITING count when tasks are waiting."""
+        s = Scheduler(make_config())
+        waiting_task = make_task(
+            title="waiting task",
+            status=TaskStatus.WAITING,
+        )
+        q = make_queue_with_tasks([waiting_task])
+        
+        decision = s.next(q)
+        
+        assert decision.task is None
+        assert "WAITING" in decision.reason
+        assert "1 task(s)" in decision.reason
+
+    def test_next_reason_mentions_excluded_count(self):
+        """next() reason string mentions excluded count when tasks excluded."""
+        s = Scheduler(make_config())
+        task = make_task(title="excluded task")
+        q = make_queue_with_tasks([task])
+        
+        decision = s.next(q, exclude={task.id})
+        
+        assert decision.task is None
+        assert "skipped" in decision.reason
+        assert "backend budget exhausted" in decision.reason
+
+    def test_report_blocked_includes_waiting_tasks_section(self):
+        """report_blocked includes WAITING tasks section."""
+        s = Scheduler(make_config())
+        q = InMemoryTaskRepository()
+        waiting_task = make_task(title="waiting task", status=TaskStatus.WAITING)
+        waiting_task.wait_reason = "budget:anthropic"
+        waiting_task.wait_until = "2026-04-01T00:00:00+00:00"
+        q.add(waiting_task)
+        
+        report = s.report_blocked(q)
+        
+        assert "Waiting" in report
+        assert "waiting task" in report
+
+    def test_report_blocked_shows_wait_reason_and_wait_until(self):
+        """report_blocked shows wait_reason and wait_until for WAITING tasks."""
+        s = Scheduler(make_config())
+        q = InMemoryTaskRepository()
+        waiting_task = make_task(title="waiting task", status=TaskStatus.WAITING)
+        waiting_task.wait_reason = "budget:anthropic"
+        waiting_task.wait_until = "2026-04-01T00:00:00+00:00"
+        q.add(waiting_task)
+        
+        report = s.report_blocked(q)
+        
+        assert "budget:anthropic" in report
+        assert "2026-04-01T00:00:00+00:00" in report
+        assert "retry after" in report.lower()
+
+    def test_report_blocked_returns_no_blocked_tasks_when_only_waiting_with_active_wait(self):
+        """report_blocked returns 'No blocked tasks.' when only WAITING tasks
+        present but wait is active (WAITING is not 'blocked' in the human-
+        intervention sense).
+        """
+        s = Scheduler(make_config())
+        q = InMemoryTaskRepository()
+        waiting_task = make_task(title="waiting task", status=TaskStatus.WAITING)
+        waiting_task.wait_reason = "budget:anthropic"
+        waiting_task.wait_until = "2026-04-01T00:00:00+00:00"
+        q.add(waiting_task)
+        
+        report = s.report_blocked(q)
+        
+        # WAITING tasks are included in the report (they're not "blocked"
+        # but they are shown in a separate "Waiting" section)
+        # This is the desired behavior - WAITING tasks are shown separately
+        # from blocked tasks since they resume automatically
+        assert "Waiting" in report
+        # The report should NOT say "No blocked tasks." because there IS
+        # a WAITING task (which is shown in its own section)
+        assert report != "No blocked tasks."

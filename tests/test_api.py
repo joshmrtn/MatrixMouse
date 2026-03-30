@@ -37,7 +37,7 @@ def reset_flags():
 def workspace(tmp_path):
     ws = tmp_path / "workspace"
     (ws / ".matrixmouse").mkdir(parents=True)
-    configure(queue=MagicMock(), status={}, workspace_root=ws, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository())
+    configure(queue=MagicMock(), scheduler=MagicMock(), status={}, workspace_root=ws, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository())
     return ws
 
 
@@ -57,7 +57,7 @@ def queue_workspace(tmp_path):
     q = InMemoryTaskRepository()
     cfg = MagicMock()
     cfg.agent_max_turns = 50
-    configure(queue=q, status={}, workspace_root=ws, config=cfg, ws_state_repo=InMemoryWorkspaceStateRepository())
+    configure(queue=q, scheduler=MagicMock(), status={}, workspace_root=ws, config=cfg, ws_state_repo=InMemoryWorkspaceStateRepository())
     return ws, q
 
 
@@ -127,7 +127,7 @@ class TestKill:
         assert client.get("/estop").json()["engaged"] is True
 
     def test_503_without_workspace(self):
-        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository) # type: ignore[arg-type]
+        configure(queue=MagicMock(), scheduler=MagicMock(), status={}, workspace_root=None, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository) # type: ignore[arg-type]
         assert TestClient(app, raise_server_exceptions=False).post("/kill").status_code == 503
 
 
@@ -147,7 +147,7 @@ class TestEstopReset:
         assert client.get("/estop").json()["engaged"] is False
 
     def test_503_without_workspace(self):
-        configure(queue=MagicMock(), status={}, workspace_root=None, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository()) # type: ignore[arg-type]
+        configure(queue=MagicMock(), scheduler=MagicMock(), status={}, workspace_root=None, config=MagicMock(), ws_state_repo=InMemoryWorkspaceStateRepository()) # type: ignore[arg-type]
         assert TestClient(app, raise_server_exceptions=False).post("/estop/reset").status_code == 503
 
 
@@ -586,7 +586,7 @@ def queue_workspace_with_state(tmp_path):
     cfg.agent_max_turns = 50
     cfg.critic_max_turns = 5
     configure(
-        queue=q, status={}, workspace_root=ws,
+        queue=q, scheduler=MagicMock(), status={}, workspace_root=ws,
         config=cfg, ws_state_repo=ws_state_repo
     )
     return ws, q, ws_state_repo

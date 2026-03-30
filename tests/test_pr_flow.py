@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.git.git_remote_provider import AuthenticationError, ProviderAPIError
 from matrixmouse.repository.memory_workspace_state_repository import (
     InMemoryWorkspaceStateRepository,
@@ -59,14 +60,38 @@ def _make_paths(tmp_path):
     return paths
 
 
-def _make_orchestrator(tmp_path, **config_kwargs):
-    from matrixmouse.orchestrator import Orchestrator
-    return Orchestrator(
-        config=_make_config(**config_kwargs),
-        paths=_make_paths(tmp_path),
-        queue=InMemoryTaskRepository(),
-        ws_state_repo=InMemoryWorkspaceStateRepository(),
-    )
+def _make_orchestrator(tmp_path: Path, **config_kwargs) -> Orchestrator:
+    """Construct an Orchestrator with minimal real dependencies.
+
+    The Router is patched out entirely — test_router.py covers routing logic.
+    All other orchestrator logic runs against real in-memory repositories.
+    """
+    config        = _make_config(**config_kwargs)
+    paths         = MagicMock()
+    paths.workspace_root = tmp_path
+    paths.agent_notes    = tmp_path / "AGENT_NOTES.md"
+    queue         = InMemoryTaskRepository()
+    ws_state_repo = InMemoryWorkspaceStateRepository()
+
+    mock_router = MagicMock()
+    mock_router.model_for_role.return_value        = "ollama:test-model"
+    mock_router.parsed_model_for_role.return_value = MagicMock(model="test-model")
+    mock_router.backend_for_role.return_value      = MagicMock()
+    mock_router.get_backend.return_value           = MagicMock()
+    mock_router.stream_for_role.return_value       = False
+    mock_router.think_for_role.return_value        = False
+
+    with patch("matrixmouse.orchestrator.Router", return_value=mock_router):
+        orch = Orchestrator(
+            config=config,
+            paths=paths,
+            queue=queue,
+            ws_state_repo=ws_state_repo,
+        )
+    # Replace the router with our mock after construction too, in case
+    # Orchestrator stores it as self._router
+    orch._router = mock_router
+    return orch
 
 
 def _ready_task(
@@ -517,6 +542,7 @@ def api_client(tmp_path):
     ws_state_repo = InMemoryWorkspaceStateRepository()
     api_module.configure(
         queue=queue,
+        scheduler=MagicMock(),
         status={},
         workspace_root=tmp_path,
         config=_make_config(),

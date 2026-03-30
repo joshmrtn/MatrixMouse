@@ -19,10 +19,11 @@ purposes of test coverage.
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from matrixmouse.repository.workspace_state_repository import (
+    TokenUsageRecord,
     WorkspaceStateRepository,
     SessionContext,
     SessionMode,
@@ -44,6 +45,7 @@ class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
         self._merge_locks: dict[str, str] = {}
         self._merge_queues: dict[str, deque[str]] = {}
         self._repo_metadata: dict[str, dict] = {}
+        self._token_usage: list[TokenUsageRecord] = []
 
     # ------------------------------------------------------------------
     # Key-value primitives
@@ -172,4 +174,67 @@ class InMemoryWorkspaceStateRepository(WorkspaceStateRepository):
             "protected_branches": branches,
             "cache_timestamp":    datetime.now(timezone.utc).isoformat(),
         }
-        
+ 
+    def record_token_usage(
+        self,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        """Record a token usage event and prune stale rows.
+ 
+        Args:
+            provider:      Provider name, e.g. ``"anthropic"``.
+            model:         Backend-local model identifier.
+            input_tokens:  Tokens consumed from the prompt.
+            output_tokens: Tokens produced in the response.
+        """
+        from matrixmouse.repository.workspace_state_repository import TokenUsageRecord
+        record = TokenUsageRecord(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            recorded_at=datetime.now(timezone.utc),
+        )
+        self._token_usage.append(record)
+        self.prune_token_usage()
+ 
+    def get_token_usage_since(
+        self,
+        provider: str,
+        since: datetime,
+    ) -> list:
+        """Return token usage records for provider since the given datetime.
+ 
+        Args:
+            provider: Provider name to filter by.
+            since:    Earliest recorded_at to include (UTC datetime).
+ 
+        Returns:
+            List of TokenUsageRecord, oldest first.
+        """
+        since_aware = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        return [
+            r for r in self._token_usage
+            if r.provider == provider and r.recorded_at >= since_aware
+        ]
+ 
+    def prune_token_usage(self, max_retention_hours: int = 25) -> int:
+        """Delete token usage rows older than max_retention_hours.
+ 
+        Args:
+            max_retention_hours: Rows older than this are deleted.
+ 
+        Returns:
+            Number of rows deleted.
+        """
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_retention_hours)
+        before = len(self._token_usage)
+        self._token_usage = [
+            r for r in self._token_usage if r.recorded_at >= cutoff
+        ]
+        return before - len(self._token_usage)
+ 

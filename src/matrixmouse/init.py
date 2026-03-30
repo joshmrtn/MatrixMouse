@@ -1,7 +1,7 @@
 """
 matrixmouse/init.py
 
-Repo initialisation and model validation.
+Repo initialisation.
 
 setup_repo() is idempotent — safe to call on every run and every add-repo.
 It creates only what is missing and never overwrites existing content.
@@ -22,14 +22,18 @@ The .matrixmouse/ directory in the repo is never created by setup_repo.
 It is created on demand when the user writes a repo-level config key via
 `matrixmouse config set <key> <value> --repo <name>`, handled by the
 API's PATCH /config/repos/{name} endpoint.
+
+Model validation:
+    Model availability and capability checks are not the responsibility of
+    this module. They are handled during the service startup sequence in
+    _service.py via Router.ensure_all_models(), which delegates to each
+    backend's ensure_model() implementation.
 """
 
 import logging
 import os
 from pathlib import Path
 from typing import Optional
-
-import ollama
 
 from matrixmouse.config import (
     MatrixMouseConfig,
@@ -48,6 +52,7 @@ logger = logging.getLogger(__name__)
 def _ensure_repo_state_dir(paths: RepoPaths) -> None:
     """
     Create <workspace>/.matrixmouse/<repo_name>/ if it doesn't exist.
+
     This is the only directory setup_repo unconditionally creates.
     """
     if not paths.state_dir.exists():
@@ -58,6 +63,7 @@ def _ensure_repo_state_dir(paths: RepoPaths) -> None:
 def _ensure_notes_file(paths: RepoPaths) -> None:
     """
     Create AGENT_NOTES.md in the workspace state dir if missing.
+
     Scoped to this repo — the agent only reads its own repo's notes.
     """
     if paths.agent_notes.exists():
@@ -79,6 +85,7 @@ def _ensure_notes_file(paths: RepoPaths) -> None:
 def _ensure_workspace_ignore(paths: RepoPaths) -> None:
     """
     Create the per-repo local ignore file in the workspace state dir.
+
     Untracked counterpart to <repo>/.matrixmouse/ignore.
     """
     if paths.local_ignore.exists():
@@ -101,7 +108,7 @@ def _ensure_workspace_ignore(paths: RepoPaths) -> None:
 
 def _ensure_repo_config(paths: RepoPaths) -> None:
     """
-    Write a starter config.toml into <repo>/.matrixmouse/ IF that directory
+    Write a starter config.toml into <repo>/.matrixmouse/ if that directory
     already exists. Does not create the directory.
 
     If a user has set a repo-level config key (which creates the dir via the
@@ -178,6 +185,7 @@ def _ensure_adr_template(adr_dir: Path) -> None:
 def _ensure_docs_structure(paths: RepoPaths, config: MatrixMouseConfig) -> None:
     """
     Scaffold docs/ in the repo if the user has opted in.
+
     Both flags default to False — nothing created unless explicitly enabled.
     """
     if config.create_design_docs:
@@ -206,6 +214,7 @@ def _verify_git(repo_root: Path) -> None:
 
 MIRROR_REMOTE = "mm-mirror"
 
+
 def _ensure_mirror(repo_root: Path, workspace_root: Path, repo_name: str) -> None:
     """
     Ensure the local bare mirror exists and is registered as a remote.
@@ -214,12 +223,12 @@ def _ensure_mirror(repo_root: Path, workspace_root: Path, repo_name: str) -> Non
     If it doesn't exist, it is created as a bare clone of the repo.
     If the remote 'mm-mirror' is not registered, it is added.
 
-    This is idempotent — safe to call on every setup_repo invocation.
+    Idempotent — safe to call on every setup_repo invocation.
 
     Args:
-        repo_root:      Root directory of the repo.
+        repo_root: Root directory of the repo.
         workspace_root: Workspace root (used to build MatrixMousePaths).
-        repo_name:      Name of the repo (directory name).
+        repo_name: Name of the repo (directory name).
     """
     import subprocess
     from matrixmouse.config import MatrixMousePaths
@@ -274,18 +283,16 @@ def _ensure_mirror(repo_root: Path, workspace_root: Path, repo_name: str) -> Non
             )
         else:
             logger.debug(
-                "%s remote already configured for %s", MIRROR_REMOTE, repo_name
+                "%s remote already configured for %s", MIRROR_REMOTE, repo_name,
             )
 
 
 def _git_env_for_init() -> dict:
     """
     Build git environment for init-time operations.
+
     Mirrors _git_env() from git_tools but without the import dependency.
     """
-    import os
-    from pathlib import Path
-
     env = os.environ.copy()
     from matrixmouse import config as config_module
     cfg = getattr(config_module, "_loaded_config", None)
@@ -298,9 +305,14 @@ def _git_env_for_init() -> dict:
                 f"-o IdentitiesOnly=yes "
                 f"-o StrictHostKeyChecking=accept-new"
             )
-        env["GIT_AUTHOR_NAME"]    = cfg.agent_git_name
-        env["GIT_AUTHOR_EMAIL"]   = cfg.agent_git_email
-        env["GIT_COMMITTER_NAME"] = cfg.agent_git_name
+        else:
+            raise FileNotFoundError(
+            f"SSH key not found at {key_path}. "
+            "Create it or fix gh_ssh_key_file in your config."
+        )
+        env["GIT_AUTHOR_NAME"]     = cfg.agent_git_name
+        env["GIT_AUTHOR_EMAIL"]    = cfg.agent_git_email
+        env["GIT_COMMITTER_NAME"]  = cfg.agent_git_name
         env["GIT_COMMITTER_EMAIL"] = cfg.agent_git_email
     return env
 
@@ -316,6 +328,7 @@ def setup_repo(
 ) -> RepoPaths:
     """
     Idempotent repo setup. Safe to call on every run and every add-repo.
+
     Creates only what is missing — never overwrites existing content.
 
     ALWAYS creates (workspace state dir only, repo untouched):
@@ -330,11 +343,11 @@ def setup_repo(
         <repo>/docs/adr/                    create_adr_docs    = true
 
     Args:
-        repo_root:       Root directory of the repo.
-        workspace_root:  Root of the workspace. Falls back to WORKSPACE_PATH
-                         env var or repo parent.
-        config:          Loaded config for flag checks. Defaults to
-                         MatrixMouseConfig() (both doc flags False).
+        repo_root: Root directory of the repo.
+        workspace_root: Root of the workspace. Falls back to WORKSPACE_PATH
+            env var or repo parent.
+        config: Loaded config for flag checks. Defaults to
+            MatrixMouseConfig() (both doc flags False).
 
     Returns:
         RepoPaths with all resolved paths for this repo.
@@ -342,8 +355,6 @@ def setup_repo(
     if config is None:
         config = MatrixMouseConfig()
 
-    # Resolve workspace_root the same way MatrixMousePaths.repo_paths() would,
-    # so the paths are consistent whether called from the service or the CLI.
     if workspace_root is None:
         env_workspace = os.environ.get("WORKSPACE_PATH")
         workspace_root = (
@@ -357,12 +368,10 @@ def setup_repo(
     repo_name = Path(repo_root).resolve().name
     paths = ws_paths.repo_paths(repo_name)
 
-    # Workspace side — always safe, never touches the repo
     _ensure_repo_state_dir(paths)
     _ensure_notes_file(paths)
     _ensure_workspace_ignore(paths)
 
-    # Repo side — only if user has explicitly opted in
     _ensure_repo_config(paths)
     _ensure_docs_structure(paths, config)
 
@@ -370,58 +379,3 @@ def setup_repo(
     _ensure_mirror(repo_root, workspace_root, repo_name)
 
     return paths
-
-
-# ---------------------------------------------------------------------------
-# Model validation
-# ---------------------------------------------------------------------------
-
-def validate_models(config: MatrixMouseConfig) -> None:
-    """
-    Verify all configured models are available and support tool calling.
-    Pulls missing models automatically (Ollama only).
-    Called once at service startup before the orchestrator starts.
-
-    TODO: When LLM backend flexibility is implemented (#10), this function
-    will delegate to the backend adapter's ensure_model() and
-    is_model_available() methods rather than calling ollama directly.
-    """
-    models_to_check = {
-        "coder":      (config.coder_model,       True),
-        "manager":    (config.manager_model,     True),
-        "critic":     (config.critic_model,     True), 
-        "writer":     (config.writer_model,     True),
-        "summarizer": (config.summarizer_model,  False),
-    }
-    # Deduplicate — same model may serve multiple roles
-    seen: set[str] = set()
-    for role, (model_name, requires_tools) in models_to_check.items():
-        if model_name in seen:
-            continue
-        seen.add(model_name)
-        _ensure_model_available(model_name)
-        if requires_tools:
-            _ensure_model_supports_tools(model_name, role)
-
-def _ensure_model_available(model_name: str) -> None:
-    try:
-        ollama.show(model_name)
-        logger.info("Model available: %s", model_name)
-    except ollama.ResponseError as e:
-        if e.status_code == 404:
-            logger.info("Pulling model %s...", model_name)
-            print(f"Pulling model {model_name}...")
-            ollama.pull(model_name)
-            logger.info("Model %s pulled successfully.", model_name)
-        else:
-            raise
-
-
-def _ensure_model_supports_tools(model_name: str, role: str) -> None:
-    info = ollama.show(model_name)
-    capabilities = getattr(info, "capabilities", []) or []
-    if "tools" not in capabilities:
-        raise ValueError(
-            f"Model '{model_name}' (role '{role}') does not support tool calling. "
-            f"Check with: ollama show {model_name}"
-        )

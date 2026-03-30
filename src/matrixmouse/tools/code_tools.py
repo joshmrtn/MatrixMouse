@@ -365,3 +365,121 @@ def get_imports(filename: str) -> str:
         return f"No imports found for '{filename}'."
 
     return "\n".join(imports)
+
+GET_FUNCTION_DEF_SCHEMA = {
+    "name": "get_function_def",
+    "description": (
+        "Return the full source of a function with surrounding context and line numbers. "
+        "Use this before editing a function to see exactly what it contains. "
+        "For methods, use 'ClassName.method_name' to disambiguate."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "func_name": {
+                "type": "string",
+                "description": (
+                    "Function or method name to look up. "
+                    "Use 'method_name' or 'ClassName.method_name' for methods."
+                ),
+            },
+        },
+        "required": ["func_name"],
+    },
+}
+
+GET_FUNCTION_LIST_SCHEMA = {
+    "name": "get_function_list",
+    "description": (
+        "List all functions and methods defined in a file with line numbers, "
+        "grouped by class. Use this to get an overview of a file's contents "
+        "before deciding which function to inspect or edit."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Path to the Python file to inspect.",
+            },
+        },
+        "required": ["filename"],
+    },
+}
+
+GET_CLASS_SUMMARY_SCHEMA = {
+    "name": "get_class_summary",
+    "description": (
+        "Return a class's docstring and all method signatures without bodies. "
+        "Use this to understand a class's interface before reading its implementation. "
+        "Cheaper than read_file for understanding what a class does and exposes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "class_name": {
+                "type": "string",
+                "description": "The class name to look up.",
+            },
+        },
+        "required": ["class_name"],
+    },
+}
+
+GET_DEPENDENCIES_SCHEMA = {
+    "name": "get_dependencies",
+    "description": (
+        "Show what functions a given function calls internally. "
+        "Use this before modifying a function to understand what it depends on, "
+        "or to trace the origin of a call during debugging. "
+        "Only tracks internal project calls — external library calls are not shown."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "func_name": {
+                "type": "string",
+                "description": "The function or method name to inspect.",
+            },
+        },
+        "required": ["func_name"],
+    },
+}
+
+GET_CALL_SITES_SCHEMA = {
+    "name": "get_call_sites",
+    "description": (
+        "Show what functions call a given function. "
+        "Use this before changing a function's signature or behaviour "
+        "to understand the blast radius — how many callers will be affected."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "func_name": {
+                "type": "string",
+                "description": "The function or method name to inspect.",
+            },
+        },
+        "required": ["func_name"],
+    },
+}
+
+GET_IMPORTS_SCHEMA = {
+    "name": "get_imports",
+    "description": (
+        "Return the import statements from a file. "
+        "Use this to quickly understand a file's dependencies "
+        "without reading the full source."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Path to the Python file to inspect.",
+            },
+        },
+        "required": ["filename"],
+    },
+}

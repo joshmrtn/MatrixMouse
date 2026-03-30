@@ -51,13 +51,30 @@ from matrixmouse.task import AgentRole
 
 class TestToolsList:
     def test_no_duplicate_tool_names(self):
-        names = [fn.__name__ for fn in TOOLS]
+        names = [t.fn.__name__ for t in TOOLS]
         assert len(names) == len(set(names)), \
             f"Duplicate tools: {[n for n in names if names.count(n) > 1]}"
-
+ 
     def test_all_tools_are_callable(self):
-        for fn in TOOLS:
-            assert callable(fn), f"Tool {fn} is not callable"
+        for t in TOOLS:
+            assert callable(t.fn), f"Tool {t.fn} is not callable"
+ 
+    def test_all_tools_have_schemas(self):
+        for t in TOOLS:
+            assert isinstance(t.schema, dict), \
+                f"Tool '{t.fn.__name__}' has no schema dict"
+            assert "name" in t.schema, \
+                f"Tool '{t.fn.__name__}' schema missing 'name'"
+            assert "input_schema" in t.schema, \
+                f"Tool '{t.fn.__name__}' schema missing 'input_schema'"
+ 
+    def test_schema_names_match_function_names(self):
+        for t in TOOLS:
+            assert t.schema["name"] == t.fn.__name__, (
+                f"Schema name '{t.schema['name']}' does not match "
+                f"function name '{t.fn.__name__}'"
+            )
+ 
 
 
 # ---------------------------------------------------------------------------
@@ -66,16 +83,22 @@ class TestToolsList:
 
 class TestToolRegistry:
     def test_keys_match_function_names(self):
-        for name, fn in TOOL_REGISTRY.items():
-            assert fn.__name__ == name
-
+        for name, t in TOOL_REGISTRY.items():
+            assert t.fn.__name__ == name
+ 
+    def test_all_values_are_tool_descriptors(self):
+        from matrixmouse.inference.base import Tool
+        for t in TOOL_REGISTRY.values():
+            assert isinstance(t, Tool), \
+                f"Registry value {t!r} is not a Tool instance"
+ 
     def test_all_values_are_callable(self):
-        for fn in TOOL_REGISTRY.values():
-            assert callable(fn)
-
+        for t in TOOL_REGISTRY.values():
+            assert callable(t.fn)
+ 
     def test_registry_covers_all_tools(self):
-        for fn in TOOLS:
-            assert fn.__name__ in TOOL_REGISTRY
+        for t in TOOLS:
+            assert t.fn.__name__ in TOOL_REGISTRY
 
     def test_registry_size_matches_tools(self):
         assert len(TOOL_REGISTRY) == len(TOOLS)
@@ -166,27 +189,33 @@ class TestToolsForRoleList:
         for role in AgentRole:
             assert isinstance(tools_for_role_list(role), list)
 
-    def test_all_returned_items_are_callable(self):
-        for role in AgentRole:
-            for fn in tools_for_role_list(role):
-                assert callable(fn)
-
     def test_length_matches_frozenset(self):
         for role in AgentRole:
             assert len(tools_for_role_list(role)) == len(tools_for_role(role))
 
+    def test_all_returned_items_are_tool_descriptors(self):
+        from matrixmouse.inference.base import Tool
+        for role in AgentRole:
+            for t in tools_for_role_list(role):
+                assert isinstance(t, Tool), \
+                    f"tools_for_role_list({role}) returned {t!r}, not a Tool"
+ 
+    def test_all_returned_items_are_callable(self):
+        for role in AgentRole:
+            for t in tools_for_role_list(role):
+                assert callable(t.fn)
+ 
     def test_all_functions_in_tool_registry(self):
         for role in AgentRole:
-            for fn in tools_for_role_list(role):
-                assert fn.__name__ in TOOL_REGISTRY
-
+            for t in tools_for_role_list(role):
+                assert t.fn.__name__ in TOOL_REGISTRY
+ 
     def test_manager_list_excludes_str_replace(self):
-        fns = tools_for_role_list(AgentRole.MANAGER)
-        names = [fn.__name__ for fn in fns]
+        names = [t.fn.__name__ for t in tools_for_role_list(AgentRole.MANAGER)]
         assert "str_replace" not in names
-
+ 
     def test_critic_list_includes_approve_and_deny(self):
-        fns = tools_for_role_list(AgentRole.CRITIC)
-        names = [fn.__name__ for fn in fns]
+        names = [t.fn.__name__ for t in tools_for_role_list(AgentRole.CRITIC)]
         assert "approve" in names
         assert "deny" in names
+        

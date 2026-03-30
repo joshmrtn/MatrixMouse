@@ -171,11 +171,13 @@ class TestRequestClarificationNotifications:
         setup(tmp_path, task=task, grace_minutes=0.0)
         mock_comms = MagicMock()
         with patch("matrixmouse.tools.comms_tools.time.sleep"), \
-             patch("matrixmouse.comms.get_manager", return_value=mock_comms):
+            patch("matrixmouse.comms.get_manager", return_value=mock_comms):
             comms_tools.request_clarification("What next?")
         mock_comms.notify.assert_called_once()
-        notify_args = mock_comms.notify.call_args[0][0]
-        assert "What next?" in notify_args or task.id in notify_args
+        notify_kwargs = mock_comms.notify.call_args.kwargs
+        combined = (notify_kwargs.get("title", "") + 
+                    notify_kwargs.get("message", ""))
+        assert "What next?" in combined or task.id in combined
 
     def test_emits_clarification_requested_event(self, tmp_path):
         task = make_task()

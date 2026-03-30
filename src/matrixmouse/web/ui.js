@@ -1,23 +1,23 @@
 'use strict';
 
 // ─── State ────────────────────────────────────────────────────────
-let currentScope   = 'workspace';
-let currentTab     = 'chat';
+let currentScope = 'workspace';
+let currentTab = 'chat';
 let currentSettingsSection = 'ws-general';
 let settingsTarget = 'workspace';
-let repos          = [];
+let repos = [];
 let pendingSettingsChanges = {};
-let streamingRow   = null;  // current token accumulation row
-let thinkingRow    = null;  // current thinking accumulation row
-let inferring      = false; // true while waiting for model response
+let streamingRow = null;  // current token accumulation row
+let thinkingRow = null;  // current thinking accumulation row
+let inferring = false; // true while waiting for model response
 
 // ─── Utilities ────────────────────────────────────────────────────
 function ts() { return new Date().toTimeString().slice(0, 8); }
 
 function esc(s) {
   return String(s ?? '')
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function escLines(s) { return esc(s).replace(/\n/g, '<br>'); }
@@ -38,7 +38,7 @@ function closeSidebar() {
 // ─── Navigation ───────────────────────────────────────────────────
 function selectScope(scope) {
   currentScope = scope;
-  currentTab   = 'chat';
+  currentTab = 'chat';
 
   document.querySelectorAll('.sb-item[data-scope]').forEach(el => {
     el.classList.toggle('active', el.dataset.scope === scope);
@@ -102,7 +102,7 @@ function selectSettingsSection(sectionKey) {
 
 // ─── Header status ────────────────────────────────────────────────
 function updateStatus(data) {
-  $id('v-task').textContent  = data.task  || '—';
+  $id('v-task').textContent = data.task || '—';
   $id('v-phase').textContent = data.phase || '—';
   $id('v-model').textContent = data.model || '—';
   $id('v-turns').textContent = data.turns ?? '—';
@@ -125,7 +125,7 @@ function updateStatus(data) {
 
 function updateSidebarSpinners(data) {
   const activeRepo = data.repo || null;
-  const isRunning  = !data.idle && !data.stopped;
+  const isRunning = !data.idle && !data.stopped;
 
   // Workspace spinner
   const wsItem = document.querySelector('.sb-item[data-scope="workspace"]');
@@ -148,19 +148,19 @@ function setInferring(on, stage) {
 
 // ─── Event log ────────────────────────────────────────────────────
 const EVENT_LABELS = {
-  tool_call:             'tool',
-  tool_result:           'result',
-  content:               'agent',
-  token:                 'agent',
-  phase_change:          'phase →',
-  escalation:            'escalate',
-  blocked_human:         'blocked',
-  complete:              '✓ done',
-  error:                 'error',
-  you:                   'you',
-  system:                'sys',
+  tool_call: 'tool',
+  tool_result: 'result',
+  content: 'agent',
+  token: 'agent',
+  phase_change: 'phase →',
+  escalation: 'escalate',
+  blocked_human: 'blocked',
+  complete: '✓ done',
+  error: 'error',
+  you: 'you',
+  system: 'sys',
   clarification_request: 'clarification',
-  thinking:              'thinking',
+  thinking: 'thinking',
 };
 
 // ─── Markdown renderer ───────────────────────────────────────────
@@ -287,7 +287,7 @@ function renderToolResult(raw) {
 
 
 function renderEvText(type, text) {
-  if (type === 'content')     return renderMarkdown(text);
+  if (type === 'content') return renderMarkdown(text);
   if (type === 'tool_result') return renderToolResult(text);
   return escLines(text);
 }
@@ -311,21 +311,21 @@ function addEvent(type, label, text, historical) {
 // Streaming thinking/token accumulation
 
 function appendThinking(text) {
-    const log = $id('log');
-    if (!thinkingRow) {
-        thinkingRow = document.createElement('div');
-        thinkingRow.className = 'ev thinking';
-        thinkingRow.innerHTML =
-            `<span class="ev-ts">${ts()}</span>` +
-            `<span class="ev-lbl">thinking</span>` +
-            `<span class="ev-txt" data-raw=""></span>`;
-        log.appendChild(thinkingRow);
-    }
-    const txtEl = thinkingRow.querySelector('.ev-txt');
-    const raw = (txtEl.dataset.raw || '') + text;
-    txtEl.dataset.raw = raw;
-    txtEl.innerHTML = escLines(raw);  // plain text, not markdown
-    log.scrollTop = log.scrollHeight;
+  const log = $id('log');
+  if (!thinkingRow) {
+    thinkingRow = document.createElement('div');
+    thinkingRow.className = 'ev thinking';
+    thinkingRow.innerHTML =
+      `<span class="ev-ts">${ts()}</span>` +
+      `<span class="ev-lbl">thinking</span>` +
+      `<span class="ev-txt" data-raw=""></span>`;
+    log.appendChild(thinkingRow);
+  }
+  const txtEl = thinkingRow.querySelector('.ev-txt');
+  const raw = (txtEl.dataset.raw || '') + text;
+  txtEl.dataset.raw = raw;
+  txtEl.innerHTML = escLines(raw);  // plain text, not markdown
+  log.scrollTop = log.scrollHeight;
 }
 
 function appendToken(text) {
@@ -354,7 +354,7 @@ async function loadContext(scope) {
   streamingRow = null;
 
   const repo = scope === 'workspace' ? null : scope;
-  const qs   = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  const qs = repo ? `?repo=${encodeURIComponent(repo)}` : '';
 
   try {
     const data = await apiFetch('/context' + qs);
@@ -372,13 +372,13 @@ async function loadContext(scope) {
     log.appendChild(sep);
 
     messages.forEach(m => {
-      const role    = m.role || 'unknown';
+      const role = m.role || 'unknown';
       const content = m.content || '';
       if (!content.trim()) return;
 
       // Detect context summary blocks
       const isSummary = content.includes('[CONTEXT SUMMARY');
-      const type  = isSummary ? 'context-summary' : (role === 'assistant' ? 'content' : 'system');
+      const type = isSummary ? 'context-summary' : (role === 'assistant' ? 'content' : 'system');
       const label = isSummary ? 'summary' : role;
 
       const div = document.createElement('div');
@@ -400,7 +400,7 @@ async function loadContext(scope) {
     log.appendChild(endSep);
 
     log.scrollTop = log.scrollHeight;
-  } catch(e) {
+  } catch (e) {
     // Context endpoint may not be available — not an error
   }
 }
@@ -444,13 +444,13 @@ setInterval(async () => {
     } else if (!data.pending && clar.classList.contains('visible')) {
       hideClarification();
     }
-  } catch(e) {}
+  } catch (e) { }
 }, 5000);
 
 // ─── Interjection ─────────────────────────────────────────────────
 async function sendInterjection() {
   const input = $id('msg-input');
-  const msg   = input.value.trim();
+  const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
   addEvent('you', 'you', msg);
@@ -469,7 +469,7 @@ $id('btn-stop').onclick = async () => {
   try {
     await apiPost('/stop', {});
     addEvent('system', 'sys', 'Soft stop requested — agent will halt after current tool call.');
-  } catch(e) {
+  } catch (e) {
     addEvent('error', 'error', 'Failed to request stop: ' + e.message);
   }
 };
@@ -488,7 +488,7 @@ async function confirmKill() {
   try {
     await apiPost('/kill', {});
     addEvent('error', 'error', 'E-STOP engaged. Service shutting down.');
-  } catch(e) {
+  } catch (e) {
     addEvent('error', 'error', 'E-STOP signal sent. Service may have shut down.');
   }
 }
@@ -527,14 +527,14 @@ async function submitNewTask() {
     await apiPost('/tasks', {
       title,
       description: $id('atf-desc').value.trim(),
-      repo:        $id('atf-repo').value ? [$id('atf-repo').value] : [],
-      importance:  parseFloat($id('atf-imp').value) || 0.5,
-      urgency:     parseFloat($id('atf-urg').value) || 0.5,
+      repo: $id('atf-repo').value ? [$id('atf-repo').value] : [],
+      importance: parseFloat($id('atf-imp').value) || 0.5,
+      urgency: parseFloat($id('atf-urg').value) || 0.5,
     });
-    ['atf-title','atf-desc'].forEach(id => $id(id).value = '');
+    ['atf-title', 'atf-desc'].forEach(id => $id(id).value = '');
     $id('add-task-form').classList.remove('open');
     await loadTasks();
-  } catch(e) {
+  } catch (e) {
     alert('Failed to create task: ' + e.message);
   }
 }
@@ -546,25 +546,27 @@ async function loadTasks() {
 
   let url = '/tasks';
   if (filter === 'all') url += '?all=true';
-  else if (filter)      url += '?status=' + filter;
+  else if (filter) url += '?status=' + filter;
 
   try {
     const data = await apiFetch(url);
     renderTasks(data.tasks || []);
-  } catch(e) {
+  } catch (e) {
     $id('tasks-list').innerHTML =
       '<div style="padding:14px;color:var(--text3)">Failed to load tasks.</div>';
   }
 }
 
 function dotClass(status) {
-  return { pending:'dot-pending', active:'dot-active', blocked_human:'dot-blocked',
-           complete:'dot-complete', cancelled:'dot-cancelled' }[status] || 'dot-pending';
+  return {
+    pending: 'dot-pending', active: 'dot-active', blocked_human: 'dot-blocked',
+    complete: 'dot-complete', cancelled: 'dot-cancelled'
+  }[status] || 'dot-pending';
 }
 
 function taskRowClass(status) {
-  if (status === 'active')         return 'task-row active-task';
-  if (status === 'blocked_human')  return 'task-row blocked-task';
+  if (status === 'active') return 'task-row active-task';
+  if (status === 'blocked_human') return 'task-row blocked-task';
   if (status === 'complete' || status === 'cancelled') return 'task-row complete-task';
   return 'task-row';
 }
@@ -578,7 +580,7 @@ function renderTasks(tasks) {
   list.innerHTML = '';
   tasks.forEach(t => {
     const score = (t.priority_score ?? 0).toFixed(3);
-    const repo  = (t.repo || []).join(', ') || '—';
+    const repo = (t.repo || []).join(', ') || '—';
 
     const row = document.createElement('div');
     row.className = taskRowClass(t.status);
@@ -603,10 +605,10 @@ function renderTasks(tasks) {
     ef.id = 'ef-' + t.id;
     ef.innerHTML = `
       <div><label>Title</label><input id="ef-title-${t.id}" type="text" value="${esc(t.title)}"></div>
-      <div><label>Description</label><textarea id="ef-desc-${t.id}">${esc(t.description||'')}</textarea></div>
+      <div><label>Description</label><textarea id="ef-desc-${t.id}">${esc(t.description || '')}</textarea></div>
       <div class="ef-row">
-        <div><label>Importance</label><input id="ef-imp-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.importance??0.5}"></div>
-        <div><label>Urgency</label><input id="ef-urg-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.urgency??0.5}"></div>
+        <div><label>Importance</label><input id="ef-imp-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.importance ?? 0.5}"></div>
+        <div><label>Urgency</label><input id="ef-urg-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.urgency ?? 0.5}"></div>
       </div>
       <div class="ef-btns">
         <button class="save-btn"   onclick="saveTaskEdit('${t.id}')">Save</button>
@@ -630,13 +632,13 @@ function toggleTaskEdit(id, e) {
 async function saveTaskEdit(id) {
   try {
     await apiPatch('/tasks/' + id, {
-      title:       $id('ef-title-' + id)?.value.trim(),
-      description: $id('ef-desc-'  + id)?.value.trim(),
-      importance:  parseFloat($id('ef-imp-' + id)?.value) || 0.5,
-      urgency:     parseFloat($id('ef-urg-' + id)?.value) || 0.5,
+      title: $id('ef-title-' + id)?.value.trim(),
+      description: $id('ef-desc-' + id)?.value.trim(),
+      importance: parseFloat($id('ef-imp-' + id)?.value) || 0.5,
+      urgency: parseFloat($id('ef-urg-' + id)?.value) || 0.5,
     });
     await loadTasks();
-  } catch(e) { alert('Failed to save: ' + e.message); }
+  } catch (e) { alert('Failed to save: ' + e.message); }
 }
 
 async function cancelTask(id) {
@@ -644,7 +646,7 @@ async function cancelTask(id) {
   try {
     await apiDelete('/tasks/' + id);
     await loadTasks();
-  } catch(e) { alert('Failed: ' + e.message); }
+  } catch (e) { alert('Failed: ' + e.message); }
 }
 
 setInterval(() => { if (currentTab === 'tasks') loadTasks(); }, 10000);
@@ -656,7 +658,7 @@ async function loadConfig() {
   try {
     _configCache = await apiFetch('/config');
     populateSettingsFields(_configCache);
-  } catch(e) {}
+  } catch (e) { }
 }
 
 function populateSettingsFields(data) {
@@ -670,7 +672,7 @@ function populateSettingsFields(data) {
   // Attach change listeners (idempotent via named function)
   document.querySelectorAll('[data-key]').forEach(el => {
     el.onchange = () => onSettingChange(el, el.dataset.key);
-    el.oninput  = () => onSettingChange(el, el.dataset.key);
+    el.oninput = () => onSettingChange(el, el.dataset.key);
   });
 }
 
@@ -690,7 +692,7 @@ async function saveSettings() {
     pendingSettingsChanges = {};
     $id('settings-save-bar').classList.remove('visible');
     addEvent('system', 'sys', 'Settings saved. Restart service to apply: sudo systemctl restart matrixmouse');
-  } catch(e) { alert('Failed to save: ' + e.message); }
+  } catch (e) { alert('Failed to save: ' + e.message); }
 }
 
 function cancelSettings() {
@@ -700,7 +702,7 @@ function cancelSettings() {
 }
 
 function injectRepoSettings(repoList) {
-  const nav      = $id('settings-repo-nav');
+  const nav = $id('settings-repo-nav');
   const sections = $id('settings-repo-sections');
   nav.innerHTML = '';
   sections.innerHTML = '';
@@ -731,7 +733,7 @@ function injectRepoSettings(repoList) {
         </p>
         <div class="setting-row">
           <div class="setting-key">Coder Model<small>Override for this repo</small></div>
-          <div class="setting-val"><input type="text" data-key="coder_model" placeholder="(inherit from workspace)"></div>
+          <div class="setting-val"><input type="text" data-key="coder_model" placeholder="e.g. ollama:qwen2.5-coder:7b"></div>
         </div>
         <div class="setting-row">
           <div class="setting-key">Coder Think<small>Override for this repo</small></div>
@@ -763,16 +765,16 @@ async function loadRepos() {
     });
 
     injectRepoSettings(repos);
-  } catch(e) {}
+  } catch (e) { }
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws    = new WebSocket(`${proto}://${location.host}/ws`);
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => {
-    $id('conn-dot').className   = 'live';
+    $id('conn-dot').className = 'live';
     $id('conn-label').className = 'live';
     $id('conn-label').textContent = 'live';
   };
@@ -817,20 +819,20 @@ function connect() {
     }
 
     const label = EVENT_LABELS[msg.type] || msg.type;
-    const text  = msg.data?.text
-               ?? msg.data?.summary
-               ?? msg.data?.question
-               ?? JSON.stringify(msg.data);
+    const text = msg.data?.text
+      ?? msg.data?.summary
+      ?? msg.data?.question
+      ?? JSON.stringify(msg.data);
     addEvent(msg.type, label, text);
 
     if (currentTab === 'tasks' &&
-        ['complete','phase_change','escalation'].includes(msg.type)) {
+      ['complete', 'phase_change', 'escalation'].includes(msg.type)) {
       loadTasks();
     }
   };
 
   ws.onclose = () => {
-    $id('conn-dot').className   = '';
+    $id('conn-dot').className = '';
     $id('conn-label').className = '';
     $id('conn-label').textContent = 'reconnecting';
     setInferring(false);
@@ -853,7 +855,7 @@ async function apiFetch(url) {
 async function apiPost(url, body) {
   const r = await fetch(url, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!r.ok) {
@@ -866,7 +868,7 @@ async function apiPost(url, body) {
 async function apiPatch(url, body) {
   const r = await fetch(url, {
     method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!r.ok) {

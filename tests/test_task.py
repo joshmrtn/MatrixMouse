@@ -316,6 +316,50 @@ class TestTaskSerialisation:
         del data["merge_resolution_decisions"]
         assert Task.from_dict(data).merge_resolution_decisions == []
 
+    def test_to_dict_includes_wait_until_and_wait_reason(self):
+        """Task.to_dict includes wait_until and wait_reason."""
+        task = make_task(status=TaskStatus.WAITING)
+        task.wait_until = "2026-04-01T00:00:00+00:00"
+        task.wait_reason = "budget:anthropic"
+        data = task.to_dict()
+        assert data["wait_until"] == "2026-04-01T00:00:00+00:00"
+        assert data["wait_reason"] == "budget:anthropic"
+
+    def test_from_dict_round_trips_wait_until_and_wait_reason(self):
+        """Task.from_dict round-trips wait_until and wait_reason."""
+        task = make_task(status=TaskStatus.WAITING)
+        task.wait_until = "2026-04-01T00:00:00+00:00"
+        task.wait_reason = "budget:anthropic"
+        restored = Task.from_dict(task.to_dict())
+        assert restored.wait_until == "2026-04-01T00:00:00+00:00"
+        assert restored.wait_reason == "budget:anthropic"
+
+    def test_from_dict_handles_missing_wait_until(self):
+        """Task.from_dict handles missing wait_until (None default)."""
+        task = make_task()
+        data = task.to_dict()
+        del data["wait_until"]
+        restored = Task.from_dict(data)
+        assert restored.wait_until is None
+
+    def test_from_dict_handles_missing_wait_reason(self):
+        """Task.from_dict handles missing wait_reason (empty string default)."""
+        task = make_task()
+        data = task.to_dict()
+        del data["wait_reason"]
+        restored = Task.from_dict(data)
+        assert restored.wait_reason == ""
+
+    def test_from_dict_deserialises_waiting_status_correctly(self):
+        """Task.from_dict deserialises WAITING status correctly."""
+        task = make_task(status=TaskStatus.WAITING)
+        task.wait_until = "2026-04-01T00:00:00+00:00"
+        task.wait_reason = "budget:anthropic"
+        restored = Task.from_dict(task.to_dict())
+        assert restored.status == TaskStatus.WAITING
+        assert restored.wait_until == "2026-04-01T00:00:00+00:00"
+        assert restored.wait_reason == "budget:anthropic"
+
 # ---------------------------------------------------------------------------
 # TaskStatus helpers
 # ---------------------------------------------------------------------------
@@ -352,6 +396,22 @@ class TestTaskStatus:
 
     def test_pending_is_not_blocked(self):
         assert TaskStatus.PENDING.is_blocked is False
+
+    def test_waiting_is_not_terminal(self):
+        """TaskStatus.WAITING.is_terminal is False."""
+        assert TaskStatus.WAITING.is_terminal is False
+
+    def test_waiting_is_not_blocked(self):
+        """TaskStatus.WAITING.is_blocked is False."""
+        assert TaskStatus.WAITING.is_blocked is False
+
+    def test_waiting_is_waiting(self):
+        """TaskStatus.WAITING.is_waiting is True."""
+        assert TaskStatus.WAITING.is_waiting is True
+
+    def test_ready_is_not_waiting(self):
+        """TaskStatus.READY.is_waiting is False."""
+        assert TaskStatus.READY.is_waiting is False
 
 # ---------------------------------------------------------------------------
 # Task — last_modified

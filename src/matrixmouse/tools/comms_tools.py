@@ -113,8 +113,8 @@ def request_clarification(question: str) -> str:
     if m:
         try:
             m.notify(
-                f"Agent needs clarification on task [{active_task_id}]:\n"
-                f"{question}"
+                title=f"Agent needs clarification on task [{active_task_id}]:\n",
+                message=f"{question}"
             )
             m.emit("clarification_requested", {
                 "task_id":  active_task_id,
@@ -174,6 +174,28 @@ def request_clarification(question: str) -> str:
         f"when the operator provides an answer via the web UI or CLI."
     )
 
+REQUEST_CLARIFICATION_SCHEMA = {
+    "name": "request_clarification",
+    "description": (
+        "Ask the human operator a question and park this task until answered. "
+        "Use only when genuinely blocked — the task moves to BLOCKED_BY_HUMAN "
+        "immediately and the scheduler works on other tasks while waiting. "
+        "The answer appears as a user message when the task resumes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": (
+                    "The question to ask. Include what you have tried, what is unclear, "
+                    "and what you need to proceed. Vague questions produce vague answers."
+                ),
+            },
+        },
+        "required": ["question"],
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Internal helpers
