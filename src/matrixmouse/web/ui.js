@@ -45,6 +45,9 @@ function selectScope(scope) {
   currentScope = scope;
   currentTab = 'chat';
 
+  // Clear selected task when switching scope
+  selectedTask = null;
+
   document.querySelectorAll('.sb-item[data-scope]').forEach(el => {
     el.classList.toggle('active', el.dataset.scope === scope);
   });
@@ -61,6 +64,9 @@ function selectScope(scope) {
 
   showPanel('chat-panel');
   loadContext(scope);
+
+  // Re-render task trees to clear task highlight
+  renderTaskTrees();
 }
 
 function selectTab(tab) {
@@ -298,15 +304,23 @@ function renderEvText(type, text) {
 }
 
 
-function addEvent(type, label, text, historical) {
+function addEvent(type, label, text, timestamp) {
   thinkingRow = null;
   streamingRow = null;
   const div = document.createElement('div');
-  div.className = 'ev ' + type + (historical ? ' historical' : '');
-  div.innerHTML =
+  div.className = 'ev ' + type;
+
+  let html =
     `<span class="ev-ts">${ts()}</span>` +
     `<span class="ev-lbl">${esc(label || type)}</span>` +
     `<span class="ev-txt">${renderEvText(type, text)}</span>`;
+
+  // Add timestamp/receipt for user messages
+  if (type === 'you' && timestamp) {
+    html += `<span class="ev-receipt">sent at ${timestamp}</span>`;
+  }
+
+  div.innerHTML = html;
   const log = $id('log');
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
@@ -451,20 +465,94 @@ setInterval(async () => {
   } catch (e) { }
 }, 5000);
 
+// ─── Confirmation Modal ───────────────────────────────────────────
+let currentDecision = null;  // { taskId, decisionType, choices, requireText }
+
+function showConfirmationModal(config) {
+  currentDecision = config;
+
+  const overlay = $id('confirmation-modal-overlay');
+  const title = $id('confirmation-modal-title');
+  const body = $id('confirmation-modal-body');
+  const choices = $id('confirmation-modal-choices');
+  const textContainer = $id('confirmation-modal-text-container');
+  const textInput = $id('confirmation-modal-text-input');
+
+  if (!overlay) return;
+
+  title.textContent = config.title;
+  body.innerHTML = renderMarkdown(config.body);
+
+  // Render choice buttons
+  choices.innerHTML = '';
+  config.choices.forEach(choice => {
+    const btn = document.createElement('button');
+    btn.textContent = choice.label;
+    btn.onclick = () => handleModalResponse(choice.value);
+    choices.appendChild(btn);
+  });
+
+  // Show/hide text input
+  if (config.requireText) {
+    textContainer.style.display = 'block';
+    textInput.placeholder = config.textPlaceholder || 'Please provide details...';
+    textInput.value = '';
+  } else {
+    textContainer.style.display = 'none';
+  }
+
+  overlay.classList.add('visible');
+}
+
+function hideConfirmationModal() {
+  const overlay = $id('confirmation-modal-overlay');
+  if (overlay) overlay.classList.remove('visible');
+  currentDecision = null;
+}
+
+async function handleModalResponse(choice) {
+  if (!currentDecision) return;
+
+  const textInput = $id('confirmation-modal-text-input');
+  const note = textInput.value.trim();
+
+  // Validate required text
+  if (currentDecision.requireText && !note) {
+    textInput.style.borderColor = 'var(--red)';
+    return;
+  }
+
+  // Submit decision
+  await apiPost(`/tasks/${currentDecision.taskId}/decision`, {
+    decision_type: currentDecision.decisionType,
+    choice: choice,
+    note: note,
+  });
+
+  hideConfirmationModal();
+}
+
+$id('confirmation-modal-cancel').onclick = hideConfirmationModal;
+
 // ─── Interjection ─────────────────────────────────────────────────
 async function sendInterjection() {
   const input = $id('msg-input');
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
-  addEvent('you', 'you', msg);
 
-  // Use new scoped interjection endpoints
-  if (currentScope === 'workspace') {
-    // Workspace-wide interjection
+  const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  addEvent('you', 'you', msg, timestamp);
+
+  // Priority: Task > Repo > Workspace
+  if (selectedTask && selectedTask.id) {
+    // Task-scoped interjection - goes directly to the task's agent
+    await apiPost(`/tasks/${selectedTask.id}/interject`, { message: msg });
+  } else if (currentScope === 'workspace') {
+    // Workspace-wide interjection - goes to Manager
     await apiPost('/interject/workspace', { message: msg });
   } else {
-    // Repo-scoped interjection
+    // Repo-scoped interjection - goes to Manager for that repo
     await apiPost(`/interject/repo/${encodeURIComponent(currentScope)}`, { message: msg });
   }
 }
@@ -893,8 +981,11 @@ function toggleWorkspaceTasks(event) {
 function selectScopeWorkspace(event) {
   event.stopPropagation();
   if (event.target.className !== 'sb-repo-expand') {
+    // Clear selected task when switching to workspace scope
+    selectedTask = null;
     selectScope('workspace');
     closeSidebar();
+    // selectScope already calls renderTaskTrees()
   }
 }
 
@@ -1038,7 +1129,25 @@ function selectTask(taskId) {
   if (!task) return;
 
   selectedTask = task;
-  renderTaskTrees(); // Update active highlight
+
+  // Update scope based on task's repo(s)
+  const repoList = task.repo || [];
+  if (repoList.length === 0) {
+    // No repo = workspace task
+    currentScope = 'workspace';
+  } else if (repoList.length === 1) {
+    // Single repo task - select that repo
+    currentScope = repoList[0];
+  } else {
+    // Multi-repo task - treat as workspace-scoped (Manager owns it)
+    currentScope = 'workspace';
+  }
+
+  // Update sidebar highlights
+  document.querySelectorAll('.sb-item[data-scope]').forEach(el => {
+    el.classList.toggle('active', el.dataset.scope === currentScope);
+  });
+  renderTaskTrees(); // Update task highlight
 
   // Switch to chat panel and show task conversation
   currentTab = 'chat';
@@ -1047,12 +1156,57 @@ function selectTask(taskId) {
 }
 
 function loadTaskConversation(task) {
-  // TODO: Load and display task's context_messages as conversation
-  // For now, just show a placeholder
   const log = $id('log');
-  if (log) {
-    log.innerHTML = `<div style="padding:14px;color:var(--text3)">Task conversation for [${task.id}] ${task.title} - coming soon</div>`;
+  if (!log) return;
+
+  log.innerHTML = '';
+
+  // Show task header info
+  const headerDiv = document.createElement('div');
+  headerDiv.style.cssText = 'padding:14px;border-bottom:1px solid var(--border);background:var(--bg1);margin-bottom:8px;flex-shrink:0;';
+  const repoList = task.repo || [];
+  const repoDisplay = repoList.length === 0 ? 'workspace' :
+    repoList.length === 1 ? repoList[0] :
+      'multi-repo (' + repoList.join(', ') + ')';
+  headerDiv.innerHTML = `
+    <div style="font-size:12px;font-weight:500;color:var(--text);margin-bottom:4px;">${esc(task.title)}</div>
+    <div style="font-size:10px;color:var(--text3);">
+      ID: ${task.id} | Status: ${task.status} | Role: ${task.role}
+      ${task.branch ? '| Branch: ' + esc(task.branch) : ''} | Repo: ${repoDisplay}
+    </div>
+  `;
+  log.appendChild(headerDiv);
+
+  // Show context messages as conversation
+  const contextMessages = task.context_messages || [];
+
+  if (contextMessages.length === 0) {
+    const emptyDiv = document.createElement('div');
+    emptyDiv.style.cssText = 'padding:14px;color:var(--text3);';
+    emptyDiv.textContent = 'No conversation yet.';
+    log.appendChild(emptyDiv);
+    return;
   }
+
+  contextMessages.forEach(msg => {
+    const role = msg.role || 'unknown';
+    const content = msg.content || '';
+    if (!content || !content.trim()) return;
+
+    const bubbleClass = role === 'user' ? 'context-bubble user' :
+      role === 'assistant' ? 'context-bubble assistant' :
+        'context-bubble system';
+
+    const bubbleDiv = document.createElement('div');
+    bubbleDiv.className = bubbleClass;
+    bubbleDiv.innerHTML = role === 'tool_call' || role === 'tool_result' ?
+      `<pre style="margin:0;white-space:pre-wrap;">${esc(content)}</pre>` :
+      renderMarkdown(content);
+
+    log.appendChild(bubbleDiv);
+  });
+
+  log.scrollTop = log.scrollHeight;
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────

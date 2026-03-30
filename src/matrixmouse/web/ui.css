@@ -420,7 +420,9 @@ html, body {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .ev {
@@ -511,6 +513,14 @@ html, body {
 .ev.thinking .ev-txt { color: var(--text3); font-style: italic; }
 
 .ev.token .ev-txt { color: var(--purple); }
+
+.ev-receipt {
+  grid-column: 2 / -1;
+  font-size: 9px;
+  color: var(--text3);
+  font-style: italic;
+  padding: 2px 14px 8px;
+}
 
 #input-row {
   display: flex;
@@ -901,6 +911,106 @@ html, body {
 }
 #modal-confirm:hover { background: #ff0000; }
 
+/* ─── Confirmation Modal (for decisions) ─────────────────────── */
+#confirmation-modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.85);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+#confirmation-modal-overlay.visible { display: flex; }
+
+#confirmation-modal {
+  background: var(--bg1);
+  border: 2px solid var(--blue);
+  padding: 24px 28px;
+  max-width: 500px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+#confirmation-modal h2 {
+  color: var(--blue);
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 12px;
+}
+.confirmation-modal-body {
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.7;
+  margin-bottom: 12px;
+}
+.confirmation-modal-body h1,
+.confirmation-modal-body h2,
+.confirmation-modal-body h3 {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  margin: 4px 0 2px;
+  letter-spacing: 0.04em;
+}
+.confirmation-modal-body h1 { color: var(--green); }
+.confirmation-modal-body h2 { color: var(--cyan); }
+.confirmation-modal-body code {
+  background: var(--bg3);
+  color: var(--amber);
+  padding: 1px 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.confirmation-modal-body pre {
+  background: var(--bg3);
+  border-left: 2px solid var(--border2);
+  padding: 8px 10px;
+  margin: 4px 0;
+  overflow-x: auto;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.confirmation-modal-body pre code {
+  background: none;
+  padding: 0;
+  color: var(--text);
+}
+.confirmation-modal-body ul,
+.confirmation-modal-body ol {
+  margin: 4px 0 4px 16px;
+  padding: 0;
+}
+.confirmation-modal-body li { margin: 1px 0; }
+.confirmation-modal-body strong { color: var(--text); font-weight: 700; }
+
+.confirmation-modal-choices {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.confirmation-modal-choices button {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  padding: 7px 18px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  transition: all 0.15s;
+}
+.confirmation-modal-choices button:hover {
+  border-color: var(--green);
+  color: var(--green);
+}
+
 /* ─── Scrollbars ─────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -980,6 +1090,52 @@ html, body {
 .status-task-reason {
   font-size: 10px;
   color: var(--text3);
+}
+
+/* ─── Task Conversation Bubbles ───────────────────────────────── */
+.context-bubble {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin: 8px 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  word-wrap: break-word;
+}
+
+.context-bubble.user {
+  align-self: flex-end;
+  margin-left: auto;
+  background: var(--blue);
+  color: #000;
+  border-bottom-right-radius: 2px;
+}
+
+.context-bubble.assistant {
+  align-self: flex-start;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 2px;
+}
+
+.context-bubble.system,
+.context-bubble.tool_call,
+.context-bubble.tool_result {
+  align-self: center;
+  max-width: 95%;
+  background: var(--bg3);
+  color: var(--text3);
+  font-size: 10px;
+  font-style: italic;
+  border: 1px dashed var(--border2);
+}
+
+.context-bubble pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
 }
 
 /* ─── Mobile / Responsive ────────────────────────────────────── */
