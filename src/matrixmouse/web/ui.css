@@ -634,7 +634,17 @@ html, body {
 .dot-complete  { background: var(--text3); }
 .dot-cancelled { background: var(--red); opacity: 0.5; }
 
-.task-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-title {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-title:hover {
+  overflow: visible;
+  white-space: normal;
+  word-break: break-word;
+}
 .task-repo  { color: var(--text3); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-score { color: var(--cyan); font-size: 10px; text-align: right; }
 .task-phase { color: var(--text3); font-size: 10px; }
@@ -660,9 +670,16 @@ html, body {
   flex-direction: column;
 }
 .task-edit-form.open { display: flex; }
-.task-edit-form label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
+.task-edit-form label {
+  font-size: 10px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 2px;
+}
 .task-edit-form input,
-.task-edit-form textarea {
+.task-edit-form textarea,
+.task-edit-form select {
   background: var(--bg1);
   border: 1px solid var(--border2);
   color: var(--text);
@@ -672,10 +689,27 @@ html, body {
   outline: none;
   width: 100%;
 }
-.task-edit-form textarea { resize: vertical; min-height: 60px; }
-.task-edit-form .ef-row { display: flex; gap: 10px; flex-wrap: wrap; }
-.task-edit-form .ef-row > div { flex: 1; min-width: 120px; display: flex; flex-direction: column; }
-.task-edit-form .ef-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.task-edit-form textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+.task-edit-form .ef-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.task-edit-form .ef-row > div {
+  flex: 1;
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+}
+.task-edit-form .ef-btns {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
 .ef-btns button {
   background: transparent;
   border: 1px solid var(--border2);
@@ -687,8 +721,13 @@ html, body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.ef-btns .save-btn   { border-color: var(--green2); color: var(--green); }
-.ef-btns .save-btn:hover { background: var(--green2); }
+.ef-btns .save-btn {
+  border-color: var(--green2);
+  color: var(--green);
+}
+.ef-btns .save-btn:hover {
+  background: var(--green2);
+}
 
 /* Add task form */
 #add-task-form {

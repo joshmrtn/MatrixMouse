@@ -684,8 +684,8 @@ function renderTasks(tasks) {
     row.dataset.taskId = t.id;
     row.innerHTML = `
       <div><div class="task-status-dot ${dotClass(t.status)}"></div></div>
-      <div>
-        <div class="task-title">${esc(t.title)}</div>
+      <div style="flex:1;min-width:0;">
+        <div class="task-title" title="${esc(t.title)}">${esc(t.title)}</div>
         <div class="task-repo">${esc(repo)}</div>
       </div>
       <div class="task-score">${score}</div>
@@ -693,25 +693,40 @@ function renderTasks(tasks) {
       <div class="task-repo">${esc(t.status)}</div>
       <div class="task-actions">
         <button onclick="toggleTaskEdit('${t.id}',event)">✎</button>
+        ${t.status === 'blocked_by_human' ? `<button onclick="unblockTask('${t.id}',event)" title="Unblock task">✓</button>` : ''}
       </div>`;
     list.appendChild(row);
 
-    // Inline edit form
+    // Inline edit form with all editable fields
     const ef = document.createElement('div');
     ef.className = 'task-edit-form';
     ef.id = 'ef-' + t.id;
     ef.innerHTML = `
       <div><label>Title</label><input id="ef-title-${t.id}" type="text" value="${esc(t.title)}"></div>
       <div><label>Description</label><textarea id="ef-desc-${t.id}">${esc(t.description || '')}</textarea></div>
+      <div><label>Notes</label><textarea id="ef-notes-${t.id}">${esc(t.notes || '')}</textarea></div>
       <div class="ef-row">
-        <div><label>Importance</label><input id="ef-imp-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.importance ?? 0.5}"></div>
-        <div><label>Urgency</label><input id="ef-urg-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.urgency ?? 0.5}"></div>
+        <div><label>Branch</label><input id="ef-branch-${t.id}" type="text" value="${esc(t.branch || '')}"></div>
+        <div><label>Role</label>
+          <select id="ef-role-${t.id}">
+            <option value="coder" ${t.role === 'coder' ? 'selected' : ''}>Coder</option>
+            <option value="writer" ${t.role === 'writer' ? 'selected' : ''}>Writer</option>
+            <option value="manager" ${t.role === 'manager' ? 'selected' : ''}>Manager</option>
+            <option value="critic" ${t.role === 'critic' ? 'selected' : ''}>Critic</option>
+            <option value="merge" ${t.role === 'merge' ? 'selected' : ''}>Merge</option>
+          </select>
+        </div>
+      </div>
+      <div class="ef-row">
+        <div><label>Importance (0–1)</label><input id="ef-imp-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.importance ?? 0.5}"></div>
+        <div><label>Urgency (0–1)</label><input id="ef-urg-${t.id}" type="number" min="0" max="1" step="0.1" value="${t.urgency ?? 0.5}"></div>
+        <div><label>Turn Limit</label><input id="ef-turns-${t.id}" type="number" min="0" value="${t.turn_limit || 0}"></div>
       </div>
       <div class="ef-btns">
-        <button class="save-btn"   onclick="saveTaskEdit('${t.id}')">Save</button>
+        <button class="save-btn" onclick="saveTaskEdit('${t.id}')">Save</button>
         <button class="cancel-btn" onclick="toggleTaskEdit('${t.id}',null)">Cancel</button>
-        <button style="margin-left:auto;border-color:var(--red2);color:var(--red)"
-                onclick="cancelTask('${t.id}')">Cancel Task</button>
+        <button style="margin-left:auto;border-color:var(--red2);color:var(--red)" onclick="cancelTask('${t.id}')">Cancel Task</button>
+        ${t.status === 'blocked_by_human' ? `<button style="border-color:var(--green2);color:var(--green)" onclick="unblockTask('${t.id}',null)">Unblock</button>` : ''}
       </div>`;
     list.appendChild(ef);
   });
@@ -728,14 +743,40 @@ function toggleTaskEdit(id, e) {
 
 async function saveTaskEdit(id) {
   try {
-    await apiPatch('/tasks/' + id, {
-      title: $id('ef-title-' + id)?.value.trim(),
-      description: $id('ef-desc-' + id)?.value.trim(),
-      importance: parseFloat($id('ef-imp-' + id)?.value) || 0.5,
-      urgency: parseFloat($id('ef-urg-' + id)?.value) || 0.5,
+    const updates = {
+      title: $id(`ef-title-${id}`)?.value.trim(),
+      description: $id(`ef-desc-${id}`)?.value.trim(),
+      notes: $id(`ef-notes-${id}`)?.value.trim(),
+      branch: $id(`ef-branch-${id}`)?.value.trim(),
+      role: $id(`ef-role-${id}`)?.value,
+      importance: parseFloat($id(`ef-imp-${id}`)?.value) || 0.5,
+      urgency: parseFloat($id(`ef-urg-${id}`)?.value) || 0.5,
+      turn_limit: parseInt($id(`ef-turns-${id}`)?.value) || 0,
+    };
+    await apiPatch(`/tasks/${id}`, updates);
+    await loadTasks();
+  } catch (e) {
+    alert('Failed to save: ' + e.message);
+  }
+}
+
+async function unblockTask(id, e) {
+  if (e) e.stopPropagation();
+
+  const note = prompt('Optional note to include with unblock:');
+  if (note === null) return; // User cancelled
+
+  try {
+    await apiPost(`/tasks/${id}/decision`, {
+      decision_type: 'turn_limit_reached',  // Generic unblock
+      choice: 'extend',
+      note: note || 'Unblocked via UI',
     });
     await loadTasks();
-  } catch (e) { alert('Failed to save: ' + e.message); }
+    alert('Task unblocked successfully');
+  } catch (e) {
+    alert('Failed to unblock: ' + e.message);
+  }
 }
 
 async function cancelTask(id) {
