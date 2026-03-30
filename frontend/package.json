@@ -1,0 +1,16 @@
+{
+  "name": "matrixmouse-frontend",
+  "version": "0.5.0",
+  "description": "MatrixMouse Web UI - TypeScript Frontend",
+  "type": "module",
+  "scripts": {
+    "build": "npx ts-node build.ts",
+    "dev": "npx tsc --watch",
+    "typecheck": "npx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.0.0"
+  }
+}
