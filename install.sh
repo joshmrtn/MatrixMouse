@@ -294,11 +294,11 @@ else
 # server_port = 8080
 
 # --- Models ---
-# coder_model     = "qwen3.5:4b"
-# manager_model   = "qwen3.5:4b"
-# critic_model     = "qwen3.5:4b"
-# summarizer_model = "qwen3.5:4b"
-# coder_cascade   = ["qwen3.5:4b", "qwen3.5:9b", "qwen3.5:27b"]
+# coder_model     = "ollama:qwen3.5:4b"
+# manager_model   = "ollama:qwen3.5:4b"
+# critic_model     = "ollama:qwen3.5:4b"
+# summarizer_model = "ollama:qwen3.5:4b"
+# coder_cascade   = ["ollama:qwen3.5:4b", "ollama:qwen3.5:9b", "ollama:qwen3.5:27b"]
 
 # --- Logging ---
 # log_level   = "INFO"
@@ -463,13 +463,13 @@ _cur_critic=$(read_toml "$CONFIG_FILE" "critic_model")
 _cur_summarizer=$(read_toml "$CONFIG_FILE" "summarizer_model")
 
 prompt_required CODER_MODEL      "Coder model (implementation)" \
-    "${_cur_coder:-qwen3.5:4b}"
+    "${_cur_coder:-ollama:qwen3.5:4b}"
 prompt_required MANAGER_MODEL    "Manager model (design/task management)" \
-    "${_cur_manager:-qwen3.5:9b}"
+    "${_cur_manager:-ollama:qwen3.5:9b}"
 prompt_required CRITIC_MODEL      "Critic model (critique/decision making)" \
-    "${_cur_critic:-qwen3.5:9b}"
+    "${_cur_critic:-ollama:qwen3.5:9b}"
 prompt_required SUMMARIZER_MODEL "Summarizer model (context compression)" \
-    "${_cur_summarizer:-qwen3.5:4b}"
+    "${_cur_summarizer:-ollama:qwen3.5:4b}"
 
 echo ""
 echo "Coder cascade: models to escalate through when stuck (comma-separated,"

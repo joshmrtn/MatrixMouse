@@ -136,18 +136,18 @@ matrixmouse config get
 matrixmouse config get --repo my_repo_name
 ```
 
-> **Example:**    
+> **Example:**
 > To set the workspace coder model to "qwen2.5:4b":
 > ```bash
-> matrixmouse config set coder_model "qwen2.5:4b"
+> matrixmouse config set coder_model "ollama:qwen2.5:4b"
 > ```
 
 
 #### Web UI Configuration
 
-Navigate to the Settings Tab (button near the bottom-left corner) and select the scope: Workspace or Repo Overrides. 
-> **Example:**   
-> To change the workspace-wide configuration for `coder_model` to `qwen2.5:4b`, click Settings -> Under Workspace click Models -> enter `qwen2.5:4b` into the Coder Model box.
+Navigate to the Settings Tab (button near the bottom-left corner) and select the scope: Workspace or Repo Overrides.
+> **Example:**
+> To change the workspace-wide configuration for `coder_model` to `qwen2.5:4b`, click Settings -> Under Workspace click Models -> enter `ollama:qwen2.5:4b` into the Coder Model box.
 
 
 ## Troubleshooting

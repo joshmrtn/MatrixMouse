@@ -72,6 +72,8 @@ def _row_to_task(row) -> Task:
         completed_at=row["completed_at"],
         created_at=row["created_at"],
         last_modified=row["last_modified"],
+        wait_until=row["wait_until"],
+        wait_reason=row["wait_reason"],
     )
 
 
@@ -109,6 +111,8 @@ def _task_to_params(task: Task) -> dict:
         "completed_at":                  task.completed_at or None,
         "created_at":                    task.created_at,
         "last_modified":                 task.last_modified,
+        "wait_until":                    task.wait_until,
+        "wait_reason":                   task.wait_reason or "",
     }
 
 

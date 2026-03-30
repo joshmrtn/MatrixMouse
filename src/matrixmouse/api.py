@@ -129,29 +129,35 @@ def clear_stop_requested() -> None:
 # ---------------------------------------------------------------------------
 
 _queue: TaskRepository       # TaskRepository
+_scheduler: Any = None       # Scheduler
 _status: dict = {}           # live agent status dict (mutated by orchestrator)
 _workspace_root: Path | None = None
 _config: Any = None          # MatrixMouseConfig
 _ws_state_repo: WorkspaceStateRepository | None = None
+_budget_tracker: Any = None  # TokenBudgetTracker
 
 
 def configure(
     queue: Any,
+    scheduler: Any,
     status: dict,
     workspace_root: Path,
     config: Any,
     ws_state_repo: WorkspaceStateRepository,
+    budget_tracker: Any | None = None,
 ) -> None:
     """
     Inject runtime state into the API module.
     Called once at startup before uvicorn starts.
     """
-    global _queue, _status, _workspace_root, _config, _ws_state_repo
+    global _queue, _scheduler, _status, _workspace_root, _config, _ws_state_repo, _budget_tracker
     _queue = queue
+    _scheduler = scheduler
     _status = status
     _workspace_root = workspace_root
     _config = config
     _ws_state_repo = ws_state_repo
+    _budget_tracker = budget_tracker
     logger.info("API module configured. Workspace: %s", workspace_root)
 
 
@@ -548,6 +554,49 @@ async def remove_repo(name: str):
 async def get_status():
     """Return the current agent status."""
     return dict(_status)
+
+
+@app.get("/blocked")
+async def get_blocked():
+    """
+    Return a human-readable summary of all blocked and waiting tasks.
+    
+    Includes:
+    - Tasks blocked by human intervention (BLOCKED_BY_HUMAN)
+    - Tasks blocked by dependencies (BLOCKED_BY_TASK)
+    - Tasks waiting on budget or time conditions (WAITING)
+    
+    This is the same output used by the web UI's status dashboard.
+    """
+    if _scheduler is None:
+        raise HTTPException(status_code=503, detail="Scheduler not configured.")
+    
+    report = _scheduler.report_blocked(_queue)
+    return {"report": report}
+
+
+@app.get("/token_usage")
+async def get_token_usage():
+    """
+    Return current rolling-window token usage per provider.
+    
+    Returns usage totals for the past hour and past day for each
+    configured provider (anthropic, openai).
+    
+    Response format:
+    {
+        "anthropic": {"hour": 12345, "day": 67890},
+        "openai": {"hour": 0, "day": 0}
+    }
+    """
+    if _budget_tracker is None:
+        raise HTTPException(status_code=503, detail="Budget tracker not configured.")
+    
+    usage = {
+        "anthropic": _budget_tracker.current_usage("anthropic"),
+        "openai": _budget_tracker.current_usage("openai"),
+    }
+    return usage
 
 
 @app.get("/pending")

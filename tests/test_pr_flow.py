@@ -542,6 +542,7 @@ def api_client(tmp_path):
     ws_state_repo = InMemoryWorkspaceStateRepository()
     api_module.configure(
         queue=queue,
+        scheduler=MagicMock(),
         status={},
         workspace_root=tmp_path,
         config=_make_config(),

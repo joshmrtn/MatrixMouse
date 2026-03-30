@@ -79,7 +79,7 @@ class ContextManager:
         context_manager = ContextManager(
             config=config,
             paths=paths,
-            coder_model="qwen3:4b",
+            coder_model=router.parsed_model_for_role(AgentRole.CODER).model,
             coder_backend=router.backend_for_role(AgentRole.CODER),
             summarizer_backend=router.get_backend(config.summarizer_model),
             summarizer_model=router.local_model_for_role(config.summarizer_model),
@@ -91,7 +91,8 @@ class ContextManager:
     Args:
         config: MatrixMouseConfig instance.
         paths: Resolved paths for this workspace.
-        coder_model: Backend-local model identifier for the working agent.
+        coder_model: Backend-local model identifier for the working agent
+            (the portion after ``backend:`` in the full model string).
             Used only to query the context length via coder_backend.
         coder_backend: LLMBackend for the working agent — provides
             get_context_length().
@@ -277,7 +278,8 @@ class ContextManager:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
             entry = f"### {timestamp}\n{summary}"
 
-            memory._manager.append_to_section("context_compression_log", entry)
+            if memory._manager is not None:
+                memory._manager.append_to_section("context_compression_log", entry)
             logger.debug("Discoveries written to context_compression_log before compression.")
 
         except Exception as e:

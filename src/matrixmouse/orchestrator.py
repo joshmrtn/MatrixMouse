@@ -516,10 +516,12 @@ class Orchestrator:
         import matrixmouse.api as api_module
         api_module.configure(
             queue=self.queue,
+            scheduler=self._scheduler,
             status=self._status,
             workspace_root=self.paths.workspace_root,
             config=self.config,
             ws_state_repo=self._ws_state_repo,
+            budget_tracker=self._budget_tracker,
         )
 
     # -----------------------------------------------------------------------

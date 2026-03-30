@@ -102,6 +102,36 @@ class MatrixMouseConfig(BaseSettings):
         ),
     )
 
+    # --- Token budgets for remote providers ---
+    anthropic_tokens_per_hour: int = Field(
+        default=0,
+        description=(
+            "Maximum tokens per rolling hour for Anthropic API. "
+            "0 = unlimited. Use rolling window budgets, not calendar hours."
+        ),
+    )
+    anthropic_tokens_per_day: int = Field(
+        default=0,
+        description=(
+            "Maximum tokens per rolling day for Anthropic API. "
+            "0 = unlimited. Use rolling window budgets, not calendar days."
+        ),
+    )
+    openai_tokens_per_hour: int = Field(
+        default=0,
+        description=(
+            "Maximum tokens per rolling hour for OpenAI API. "
+            "0 = unlimited. Use rolling window budgets, not calendar hours."
+        ),
+    )
+    openai_tokens_per_day: int = Field(
+        default=0,
+        description=(
+            "Maximum tokens per rolling day for OpenAI API. "
+            "0 = unlimited. Use rolling window budgets, not calendar days."
+        ),
+    )
+
     # --- Thinking and Streaming toggles ---
     coder_think: bool = Field(
         default=False,

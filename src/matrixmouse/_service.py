@@ -441,6 +441,24 @@ def main() -> None:
         memory.configure(paths.agent_notes)
         comms.configure(_config)
 
+        # --- Token budget tracker ---
+        from matrixmouse.inference.token_budget import TokenBudgetTracker
+        budget_tracker = TokenBudgetTracker(
+            ws_state_repo=ws_state_repo,
+            anthropic_tokens_per_hour=_config.anthropic_tokens_per_hour,
+            anthropic_tokens_per_day=_config.anthropic_tokens_per_day,
+            openai_tokens_per_hour=_config.openai_tokens_per_hour,
+            openai_tokens_per_day=_config.openai_tokens_per_day,
+        )
+        logger.info(
+            "Token budget tracker initialised: "
+            "anthropic=%d/%d tokens/hour/day, openai=%d/%d tokens/hour/day",
+            _config.anthropic_tokens_per_hour,
+            _config.anthropic_tokens_per_day,
+            _config.openai_tokens_per_hour,
+            _config.openai_tokens_per_day,
+        )
+
         # --- Orchestrator ---
         queue = SQLiteTaskRepository(paths.db_file)
         ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
@@ -450,6 +468,7 @@ def main() -> None:
             queue=queue,
             ws_state_repo=ws_state_repo,
             graph=graphs,
+            budget_tracker=budget_tracker,
         )
         orchestrator.configure_api()
 
