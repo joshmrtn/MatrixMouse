@@ -42,7 +42,7 @@ This installs the `matrixmouse` command and sets up the systemd service.
 
 ## Basic Usage
 
-Run `matrixmouse` without arguments to launch the TUI (Textual-based terminal interface):
+Run `matrixmouse` without arguments to display help information:
 
 ```bash
 matrixmouse

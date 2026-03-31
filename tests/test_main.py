@@ -59,7 +59,7 @@ class TestArgumentParser(unittest.TestCase):
         self.parser = build_parser()
 
     def test_no_command_shows_help(self):
-        """Running without arguments should not raise (shows help or TUI)."""
+        """Running without arguments should print help."""
         args = self.parser.parse_args([])
         self.assertIsNone(args.command)
 
