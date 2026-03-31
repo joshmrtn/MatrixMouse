@@ -14,9 +14,11 @@ Designed with local LLMs in mind, with a lot of focus on breaking problems down 
 
 > Note: MatrixMouse is still in early development. CLI commands and API endpoints are subject to change.
 
-The MatrixMouse agent loop runs continuously as a systemd service, acting on tasks if any are assigned. 
-Registering a repository creates a clone in the agent's workspace that the agent can interact with. The agent cannot interact with any filesystems outside of its workspace. 
+The MatrixMouse agent loop runs continuously as a systemd service, acting on tasks if any are assigned.
+Registering a repository creates a clone in the agent's workspace that the agent can interact with. The agent cannot interact with any filesystems outside of its workspace.
 Assigning a task to the agent adds it to the task queue. Tasks can be scoped to particular repositories or can apply to the whole workspace.
+
+For complete CLI documentation, see [CLI Reference](docs/CLI_REFERENCE.md).
 
 
 ### CLI
@@ -33,11 +35,37 @@ matrixmouse add-repo https://github.com/joshmrtn/MatrixMouse.git
 matrixmouse add-repo git@github.com:joshmrtn/MatrixMouse.git
 ```
 
-Add a task for MatrixMouse to work on interactively:
+Add a task for MatrixMouse to work on:
 ```bash
-matrixmouse tasks add 
+# Interactive mode (prompts for details)
+matrixmouse tasks add
+
+# Non-interactive mode
+matrixmouse tasks add --title "Fix authentication bug" \
+  --description "OAuth tokens expire without refresh" \
+  --repo my-repo \
+  --importance 0.8 \
+  --urgency 0.6
 ```
-This prompts you to fill out the details of the task, such as a description and priority level, what repos it is scoped to, etc. The system picks up your task and schedules it by priority. 
+
+This adds the task to the queue. The system picks up your task and schedules it by priority.
+
+View and manage tasks:
+```bash
+# List active tasks
+matrixmouse tasks list
+
+# Show task details
+matrixmouse tasks show <task-id>
+
+# Edit a task
+matrixmouse tasks edit <task-id>
+
+# Cancel a task
+matrixmouse tasks cancel <task-id>
+```
+
+For additional CLI commands, see [CLI Reference](docs/CLI_REFERENCE.md).
 
 
 ### Web UI
@@ -99,6 +127,10 @@ matrixmouse add-repo /home/your_username/your_repo/
 
 # give it a task to work on
 matrixmouse tasks add
+
+# watch the agent work via the web UI or CLI
+matrixmouse tasks context <task-id>  # View conversation history for a task
+matrixmouse blocked                  # Show blocked tasks
 ```
 And navigate to the web UI to watch.
 
@@ -124,23 +156,26 @@ Reading and setting configuration keys is supported through the CLI and through 
 
 #### CLI Configuration
 
-`get` and `set` config keys using `matrixmouse config get` or `matrixmouse config set`. The `--repo` argument scopes the command to the repo-local config, `--commit` flag writes the config to the repo-local-tracked config.
+Get and set config keys using `matrixmouse config get` or `matrixmouse config set`. The `--repo` argument scopes the command to the repo-local config. The `--commit` flag writes the config to the repo-local-tracked config.
 
 ```bash
 # List config keys and their values in the workspace-level config:
 matrixmouse config get
-```
 
-```bash
 # List config keys and their values in a repo-level config
 matrixmouse config get --repo my_repo_name
+
+# Set a workspace-level config value
+matrixmouse config set coder_model "ollama:qwen2.5:4b"
+
+# Set a repo-level config value (untracked)
+matrixmouse config set coder_model "ollama:qwen3.5:9b" --repo my_repo_name
+
+# Set a repo-level config value (tracked, committed to repo)
+matrixmouse config set coder_model "ollama:qwen3.5:9b" --repo my_repo_name --commit
 ```
 
-> **Example:**
-> To set the workspace coder model to "qwen2.5:4b":
-> ```bash
-> matrixmouse config set coder_model "ollama:qwen2.5:4b"
-> ```
+For complete configuration documentation, see [CLI Reference - Configuration](docs/CLI_REFERENCE.md#configuration).
 
 
 #### Web UI Configuration
@@ -155,6 +190,10 @@ Navigate to the Settings Tab (button near the bottom-left corner) and select the
 - Web UI connects and immediately disconnects -> websocket timeout, check nginx `proxy_read_timeout`
 - Tests time out -> `test_runner.sh` not running, check `systemctl status matrixmouse-test-runner`
 - Agent loops without making progress -> model doesn't support tools or is too small, check `ollama show <model>`
+- Service unreachable -> run `matrixmouse status` or `sudo systemctl status matrixmouse`
+- Permission denied on config -> log out and back in for group membership to take effect
+
+For additional troubleshooting, see [CLI Reference - Troubleshooting](docs/CLI_REFERENCE.md#troubleshooting).
 
 
 ## Notes
@@ -200,7 +239,7 @@ You may also set this globally in Ollama's systemd service.
 - [x] Refactor task persistence ([#14](../../issues/14))
 - [x] Branch-per-task, merge management ([#8](../../issues/8))
 - [ ] LLM backend flexibility ([#10](../../issues/10))
-- [ ] Refactor: Update CLI to current API ([#16](../../issues/16))
+- [x] Refactor: Update CLI to current API ([#16](../../issues/16))
 - [ ] Improved UI/UX for visibility and control ([#9](../../issues/9))
 - [ ] Documentation ([#17](../../issues/17))
 - [ ] **MVP Release**, API is mostly stable now, full system works.
