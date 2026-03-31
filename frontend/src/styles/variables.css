@@ -1,0 +1,48 @@
+/* MatrixMouse CSS Variables */
+
+:root {
+  /* Colors */
+  --bg: #0a0a0a;
+  --bg1: #111111;
+  --bg2: #181818;
+  --bg3: #1f1f1f;
+  --border: #2a2a2a;
+  --border2: #333333;
+  --text: #c8c8c8;
+  --text2: #888888;
+  --text3: #555555;
+  --green: #39ff14;
+  --green2: #1a7a00;
+  --amber: #ffaa00;
+  --amber2: #7a4a00;
+  --red: #ff2244;
+  --red2: #7a0011;
+  --blue: #00aaff;
+  --purple: #aa66ff;
+  --cyan: #00ddcc;
+
+  /* Typography */
+  --font-mono: 'Fragment Mono', 'Martian Mono', monospace;
+  --font-ui: 'Martian Mono', monospace;
+
+  /* Layout */
+  --sidebar-w: 200px;
+  --header-h: 48px;
+
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+
+  /* Border radius */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+
+  /* Transitions */
+  --transition-fast: 0.1s;
+  --transition-normal: 0.2s;
+  --transition-slow: 0.3s;
+}

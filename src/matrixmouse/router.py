@@ -69,8 +69,11 @@ _REMOTE_BACKENDS = frozenset({"anthropic", "openai"})
 # Backend identifiers that are always local (no network egress outside LAN).
 _LOCAL_BACKENDS = frozenset({"ollama", "llamacpp"})
 
+# Fake backend for testing (treated as local).
+_FAKE_BACKENDS = frozenset({"fake"})
+
 # All known backend identifiers.
-_KNOWN_BACKENDS = _REMOTE_BACKENDS | _LOCAL_BACKENDS
+_KNOWN_BACKENDS = _REMOTE_BACKENDS | _LOCAL_BACKENDS | _FAKE_BACKENDS
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +476,10 @@ class Router:
         if backend == "llamacpp":
             from matrixmouse.inference.llamacpp import LlamaCppBackend
             return LlamaCppBackend(host=parsed.host)
+
+        if backend == "fake":
+            from matrixmouse.inference.fake import FakeBackend
+            return FakeBackend()
 
         if backend == "anthropic":
             import os

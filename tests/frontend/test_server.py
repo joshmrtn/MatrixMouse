@@ -24,7 +24,7 @@ from matrixmouse.scheduling import Scheduler
 from .mock_llm import FakeLLMBackend
 
 
-class TestMatrixMouseServer:
+class MockMatrixMouseServer:
     """
     Real MatrixMouse server with mocked backend components for testing.
     
@@ -81,6 +81,10 @@ class TestMatrixMouseServer:
         """Configure the FastAPI app with our mocked components."""
         from matrixmouse import comms as comms_module
         from matrixmouse.server import _register_routes
+        from matrixmouse import web_ui
+        
+        # Invalidate web UI cache to ensure fresh build
+        web_ui.invalidate_cache()
         
         configure(
             queue=self.task_repo,

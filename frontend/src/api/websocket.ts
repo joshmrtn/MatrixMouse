@@ -1,212 +1,181 @@
-import type { WebSocketEvent, Task, DecisionConfig } from '../types';
-
-export type EventHandler = (event: WebSocketEvent) => void;
-
 /**
  * WebSocket connection manager for real-time events
  */
+
+import type {
+  WebSocketEvent,
+  WebSocketEventType,
+  StatusUpdateData,
+  TaskTreeUpdateData,
+  ClarificationRequestData,
+  TokenData,
+  ThinkingData,
+  ContentData,
+} from '../types';
+
+/**
+ * Event handler type
+ */
+export type EventHandler<T = unknown> = (data: T) => void;
+
+/**
+ * WebSocket Manager class
+ */
 export class WebSocketManager {
   private ws: WebSocket | null = null;
-  private handlers: Set<EventHandler> = new Set();
   private reconnectDelay = 3000;
-  private statusHandler: ((data: Record<string, unknown>) => void) | null = null;
-  private clarificationHandler: ((question: string) => void) | null = null;
-  private decisionHandler: ((config: DecisionConfig) => void) | null = null;
-  private taskTreeHandler: ((tasks: Task[]) => void) | null = null;
-  private tokenHandler: ((text: string) => void) | null = null;
-  private thinkingHandler: ((text: string) => void) | null = null;
+  private handlers = new Map<WebSocketEventType, Set<EventHandler>>();
+  private statusHandlers = new Set<EventHandler<StatusUpdateData>>();
+  private clarificationHandlers = new Set<EventHandler<ClarificationRequestData>>();
+  private tokenHandlers = new Set<EventHandler<TokenData>>();
+  private thinkingHandlers = new Set<EventHandler<ThinkingData>>();
+  private contentHandlers = new Set<EventHandler<ContentData>>();
 
+  /**
+   * Connect to WebSocket server
+   */
   connect(): void {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${window.location.host}/ws`;
-    
+
+    console.log('[WebSocket] Connecting to', url);
     this.ws = new WebSocket(url);
-    
+
     this.ws.onopen = () => {
-      console.log('WebSocket connected');
+      console.log('[WebSocket] Connected');
     };
-    
+
     this.ws.onmessage = (event) => {
       try {
         const wsEvent: WebSocketEvent = JSON.parse(event.data);
         this.handleEvent(wsEvent);
-      } catch (e) {
-        console.error('Failed to parse WebSocket message:', e);
+      } catch (error) {
+        console.error('[WebSocket] Failed to parse message:', error);
       }
     };
-    
+
     this.ws.onclose = () => {
-      console.log('WebSocket disconnected, reconnecting...');
+      console.log('[WebSocket] Disconnected, reconnecting...');
       setTimeout(() => this.connect(), this.reconnectDelay);
     };
-    
+
     this.ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
+      console.error('[WebSocket] Error:', error);
       this.ws?.close();
     };
   }
 
+  /**
+   * Handle incoming WebSocket event
+   */
   private handleEvent(event: WebSocketEvent): void {
-    // Handle status updates
-    if (event.type === 'status_update' && this.statusHandler) {
-      this.statusHandler(event.data as Record<string, unknown>);
+    // Handle specific event types
+    switch (event.type) {
+      case 'status_update':
+        this.statusHandlers.forEach((handler) =>
+          handler(event.data as StatusUpdateData)
+        );
+        break;
+
+      case 'clarification_request':
+        this.clarificationHandlers.forEach((handler) =>
+          handler(event.data as ClarificationRequestData)
+        );
+        break;
+
+      case 'token':
+        this.tokenHandlers.forEach((handler) =>
+          handler(event.data as TokenData)
+        );
+        break;
+
+      case 'thinking':
+        this.thinkingHandlers.forEach((handler) =>
+          handler(event.data as ThinkingData)
+        );
+        break;
+
+      case 'content':
+        this.contentHandlers.forEach((handler) =>
+          handler(event.data as ContentData)
+        );
+        break;
     }
-    
-    // Handle clarification requests
-    if (event.type === 'clarification_request' && this.clarificationHandler) {
-      this.clarificationHandler(event.data.question as string);
+
+    // Call generic handlers for this event type
+    const typeHandlers = this.handlers.get(event.type);
+    if (typeHandlers) {
+      typeHandlers.forEach((handler) => handler(event.data));
     }
-    
-    // Handle decision events
-    if (this.isDecisionEvent(event.type) && this.decisionHandler) {
-      const config: DecisionConfig = {
-        taskId: event.data.task_id as string,
-        decisionType: event.type,
-        title: this.getDecisionTitle(event.type),
-        body: event.data.message as string || event.data.body as string || '',
-        choices: this.getDecisionChoices(event.type),
-        requireText: this.requiresText(event.type),
-        textPlaceholder: this.getTextPlaceholder(event.type),
-      };
-      this.decisionHandler(config);
+  }
+
+  /**
+   * Register event handler
+   */
+  on<T = unknown>(eventType: WebSocketEventType, handler: EventHandler<T>): void {
+    if (!this.handlers.has(eventType)) {
+      this.handlers.set(eventType, new Set());
     }
-    
-    // Handle task tree updates
-    if (event.type === 'task_tree_update' && this.taskTreeHandler) {
-      this.taskTreeHandler(event.data.tasks as Task[]);
+    this.handlers.get(eventType)!.add(handler as EventHandler);
+  }
+
+  /**
+   * Unregister event handler
+   */
+  off<T = unknown>(eventType: WebSocketEventType, handler: EventHandler<T>): void {
+    const typeHandlers = this.handlers.get(eventType);
+    if (typeHandlers) {
+      typeHandlers.delete(handler as EventHandler);
     }
-    
-    // Handle streaming tokens
-    if (event.type === 'token' && this.tokenHandler) {
-      this.tokenHandler(event.data.text as string);
-    }
-    
-    // Handle thinking stream
-    if (event.type === 'thinking' && this.thinkingHandler) {
-      this.thinkingHandler(event.data.text as string);
-    }
-    
-    // Call generic handlers
-    this.handlers.forEach(handler => handler(event));
   }
 
-  private isDecisionEvent(type: string): boolean {
-    const decisionTypes = [
-      'decomposition_confirmation_required',
-      'pr_approval_required',
-      'pr_rejection',
-      'turn_limit_reached',
-      'critic_turn_limit_reached',
-      'merge_conflict_resolution_turn_limit_reached',
-      'planning_turn_limit_reached',
-    ];
-    return decisionTypes.includes(type);
+  /**
+   * Register status update handler
+   */
+  onStatusUpdate(handler: EventHandler<StatusUpdateData>): void {
+    this.statusHandlers.add(handler);
   }
 
-  private getDecisionTitle(type: string): string {
-    const titles: Record<string, string> = {
-      'decomposition_confirmation_required': 'Decomposition Request',
-      'pr_approval_required': 'PR Approval Required',
-      'pr_rejection': 'PR Rejected',
-      'turn_limit_reached': 'Turn Limit Reached',
-      'critic_turn_limit_reached': 'Critic Review',
-      'merge_conflict_resolution_turn_limit_reached': 'Merge Conflict',
-      'planning_turn_limit_reached': 'Planning Limit',
-    };
-    return titles[type] || 'Decision Required';
+  /**
+   * Register clarification request handler
+   */
+  onClarificationRequest(handler: EventHandler<ClarificationRequestData>): void {
+    this.clarificationHandlers.add(handler);
   }
 
-  private getDecisionChoices(type: string): Array<{ label: string; value: string }> {
-    const choices: Record<string, Array<{ label: string; value: string }>> = {
-      'decomposition_confirmation_required': [
-        { label: 'Allow', value: 'allow' },
-        { label: 'Deny', value: 'deny' },
-      ],
-      'pr_approval_required': [
-        { label: 'Approve', value: 'approve' },
-        { label: 'Reject', value: 'reject' },
-      ],
-      'pr_rejection': [
-        { label: 'Rework', value: 'rework' },
-        { label: 'Manual', value: 'manual' },
-      ],
-      'turn_limit_reached': [
-        { label: 'Extend', value: 'extend' },
-        { label: 'Respec', value: 'respec' },
-        { label: 'Cancel', value: 'cancel' },
-      ],
-      'critic_turn_limit_reached': [
-        { label: 'Approve Task', value: 'approve_task' },
-        { label: 'Extend Critic', value: 'extend_critic' },
-        { label: 'Block Task', value: 'block_task' },
-      ],
-      'merge_conflict_resolution_turn_limit_reached': [
-        { label: 'Extend', value: 'extend' },
-        { label: 'Abort', value: 'abort' },
-      ],
-      'planning_turn_limit_reached': [
-        { label: 'Extend', value: 'extend' },
-        { label: 'Commit', value: 'commit' },
-        { label: 'Cancel', value: 'cancel' },
-      ],
-    };
-    return choices[type] || [];
+  /**
+   * Register token stream handler
+   */
+  onToken(handler: EventHandler<TokenData>): void {
+    this.tokenHandlers.add(handler);
   }
 
-  private requiresText(type: string): boolean {
-    const requiresText = [
-      'decomposition_confirmation_required', // deny requires reason
-      'turn_limit_reached', // respec requires note
-    ];
-    return requiresText.includes(type);
+  /**
+   * Register thinking stream handler
+   */
+  onThinking(handler: EventHandler<ThinkingData>): void {
+    this.thinkingHandlers.add(handler);
   }
 
-  private getTextPlaceholder(type: string): string {
-    const placeholders: Record<string, string> = {
-      'decomposition_confirmation_required': 'Explain why decomposition should not be allowed...',
-      'turn_limit_reached': 'Provide guidance for the agent...',
-    };
-    return placeholders[type] || 'Please provide details...';
+  /**
+   * Register content handler
+   */
+  onContent(handler: EventHandler<ContentData>): void {
+    this.contentHandlers.add(handler);
   }
 
-  // Event handler registration
-  onStatusUpdate(handler: (data: Record<string, unknown>) => void): void {
-    this.statusHandler = handler;
-  }
-
-  onClarificationRequest(handler: (question: string) => void): void {
-    this.clarificationHandler = handler;
-  }
-
-  onDecisionRequired(handler: (config: DecisionConfig) => void): void {
-    this.decisionHandler = handler;
-  }
-
-  onTaskTreeUpdate(handler: (tasks: Task[]) => void): void {
-    this.taskTreeHandler = handler;
-  }
-
-  onToken(handler: (text: string) => void): void {
-    this.tokenHandler = handler;
-  }
-
-  onThinking(handler: (text: string) => void): void {
-    this.thinkingHandler = handler;
-  }
-
-  addHandler(handler: EventHandler): void {
-    this.handlers.add(handler);
-  }
-
-  removeHandler(handler: EventHandler): void {
-    this.handlers.delete(handler);
-  }
-
+  /**
+   * Disconnect from WebSocket
+   */
   disconnect(): void {
-    this.ws?.close();
-    this.ws = null;
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
   }
 }
 
-// Singleton instance
+/**
+ * Singleton WebSocket manager instance
+ */
 export const wsManager = new WebSocketManager();

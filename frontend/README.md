@@ -1,6 +1,6 @@
 # MatrixMouse Frontend
 
-TypeScript-based web UI for MatrixMouse.
+TypeScript-based web UI for MatrixMouse autonomous coding agent.
 
 ## Development
 
@@ -11,26 +11,36 @@ cd frontend
 npm install
 ```
 
-Or using uv:
+### Run Development Server
+
 ```bash
-uv run --with esbuild --with typescript npm install
+npm run dev
 ```
 
-### Build
+This starts Vite dev server at http://localhost:3000 with hot reload.
+
+### Build for Production
 
 ```bash
 npm run build
 ```
 
-Or:
-```bash
-uv run matrixmouse-frontend-build
-```
+Output goes to `dist/` directory.
 
-### Type Check
+### Run Tests
 
 ```bash
+# Unit tests
+npm run test
+
+# E2E tests
+npm run test:e2e
+
+# Type checking
 npm run typecheck
+
+# Linting
+npm run lint
 ```
 
 ## Project Structure
@@ -38,36 +48,69 @@ npm run typecheck
 ```
 frontend/
 ├── src/
-│   ├── index.ts           # Main entry point
-│   ├── types/             # TypeScript type definitions
-│   ├── api/               # API client and WebSocket handler
-│   ├── state/             # State management
-│   ├── components/        # UI components
-│   └── utils/             # Utility functions
-├── tests/                 # Unit tests (Vitest)
-├── ui.template.html       # HTML template (optional)
-├── build.ts               # Build script
-└── package.json
+│   ├── main.ts                 # Application entry point
+│   ├── app.ts                  # Main app component
+│   ├── api/                    # API client & WebSocket
+│   ├── components/             # Reusable UI components
+│   ├── pages/                  # Page components (routes)
+│   ├── state/                  # State management
+│   ├── types/                  # TypeScript types
+│   ├── utils/                  # Utility functions
+│   └── styles/                 # CSS styles
+├── public/                     # Static assets
+├── index.html                  # HTML template
+├── package.json                # Dependencies
+├── tsconfig.json              # TypeScript config
+└── vite.config.ts             # Build config
 ```
 
-## Migration from JavaScript
+## Routing
 
-The old `ui.js`, `ui.css`, and `ui.html` files are still in `src/matrixmouse/web/` for backwards compatibility.
+| Route | Component | Description |
+|-------|-----------|-------------|
+| `/` | Redirect | → `/channel/workspace` |
+| `/channel/:scope` | ChannelPage | Workspace/repo conversation |
+| `/task/:id` | TaskPage | Task detail & edit |
+| `/tasks` | TasksPage | Task list |
+| `/status` | StatusPage | Status dashboard |
+| `/settings` | SettingsPage | Settings |
 
-To migrate:
-1. Edit TypeScript sources in `frontend/src/`
-2. Run `npm run build`
-3. The built file will be in `src/matrixmouse/web/ui.html`
+## Architecture
 
-## Testing
+- **No framework**: Pure TypeScript + vanilla DOM
+- **Component-based**: Reusable UI components
+- **Type-safe**: Full TypeScript typing
+- **Central state**: Single source of truth
+- **Real-time**: WebSocket for live updates
 
-Unit tests (coming soon):
+## Testing Strategy
+
+### Unit Tests (Vitest)
+- API client
+- State management
+- Utility functions
+- Component rendering
+
+### Integration Tests (Playwright)
+- Task management flows
+- Conversation interactions
+- Settings changes
+- Modal interactions
+
+### E2E Tests (Playwright)
+- Complete user workflows
+- Cross-page navigation
+- WebSocket event handling
+
+## Build & Deploy
+
+Production builds are copied to `src/matrixmouse/web/` for serving by the Python backend.
+
 ```bash
-npm test
+npm run build
+cp -r dist/* ../src/matrixmouse/web/
 ```
 
-E2E tests with Playwright:
-```bash
-cd tests/frontend
-pytest
-```
+## License
+
+MIT

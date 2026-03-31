@@ -313,6 +313,28 @@ async def get_task(task_id: str):
     return task.to_dict()
 
 
+@app.get("/tasks/{task_id}/dependencies")
+async def get_task_dependencies(task_id: str):
+    """Get the list of tasks that this task depends on (is blocked by).
+    
+    Returns task objects for all dependencies.
+    """
+    queue = _require_queue()
+    
+    task = queue.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found.")
+    
+    # Get all tasks that block this one
+    blocking_tasks = queue.get_blocked_by(task.id)
+    
+    return {
+        "task_id": task_id,
+        "dependencies": [t.to_dict() for t in blocking_tasks],
+        "count": len(blocking_tasks),
+    }
+
+
 @app.post("/tasks", status_code=201)
 async def create_task(body: TaskCreateRequest):
     """
