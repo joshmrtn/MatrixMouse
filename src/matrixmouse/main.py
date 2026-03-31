@@ -1470,7 +1470,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Autonomous coding agent.\n\n"
             "The MatrixMouse service is managed by systemd:\n"
             "  sudo systemctl start|stop|restart|status matrixmouse\n\n"
-            "Run 'matrixmouse' without arguments to launch the TUI."
+            "Run 'matrixmouse' without arguments to show this help."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1663,18 +1663,9 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # No command given - launch TUI
+    # No command given - print help
     if args.command is None:
-        try:
-            from matrixmouse.tui.app import MatrixMouseTUI
-            from textual.app import App
-            print("Launching MatrixMouse TUI...")
-            app = MatrixMouseTUI()
-            app.run()
-        except ImportError:
-            print("TUI not installed. Run: pip install textual")
-            print("Use 'matrixmouse --help' for available commands.")
-            sys.exit(1)
+        parser.print_help()
         return
 
     # Handle commands with subcommands
