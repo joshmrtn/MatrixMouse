@@ -38,6 +38,10 @@ from pathlib import Path
 
 from matrixmouse.utils.logging_utils import setup_logging
 
+# Module-level constants
+CONTEXT_MESSAGE_TRUNCATE_LENGTH = 500
+DEFAULT_MESSAGE_LIMIT = 50
+
 setup_logging(log_level="WARNING", log_to_file=False, repo_root=Path.cwd())
 logger = logging.getLogger(__name__)
 
@@ -835,31 +839,79 @@ def cmd_token_usage(args):
 
 
 def cmd_context(args):
-    """Show current agent context messages."""
+    """Show context messages for a specific task via GET /tasks/{id}."""
     port = _resolve_port()
     fmt = getattr(args, "format", "table")
-    repo = getattr(args, "repo", None)
+    task_id = args.id
+    last = getattr(args, "last", None)
+    show_all = getattr(args, "all", False)
 
-    params = {}
-    if repo:
-        params["repo"] = repo
+    result = _agent_get(f"/tasks/{task_id}", port)
 
-    result = _agent_get_params("/context", port, params if params else None)
-    messages = result.get("messages", [])
-    estimated_tokens = result.get("estimated_tokens", 0)
+    # Validate task exists
+    if not result or "id" not in result:
+        print(f"ERROR: Task '{task_id}' not found.")
+        sys.exit(1)
+
+    messages = result.get("context_messages") or []
+    title = result.get("title", "(no title)")
+    total_messages = len(messages)
+
+    # Apply --last limit or default limit
+    if show_all:
+        # Show all messages, no limit
+        pass
+    elif last is not None:
+        # User-specified limit
+        if last <= 0:
+            print("ERROR: --last must be a positive integer.")
+            sys.exit(1)
+        messages = messages[-last:]
+    elif total_messages > DEFAULT_MESSAGE_LIMIT:
+        # Apply default limit and inform user
+        print(f"Showing last {DEFAULT_MESSAGE_LIMIT} of {total_messages} messages. Use --all for full context.\n")
+        messages = messages[-DEFAULT_MESSAGE_LIMIT:]
 
     if fmt == "json":
-        print(json.dumps(result, indent=2))
+        print(json.dumps({
+            "task_id": task_id,
+            "title": title,
+            "messages": messages,
+            "count": len(messages),
+            "total": total_messages,
+            "truncated": not show_all and (last is not None or total_messages > DEFAULT_MESSAGE_LIMIT),
+        }, indent=2))
         return
 
-    print(f"Context Messages ({len(messages)} messages, ~{estimated_tokens} tokens):\n")
+    print(f"Task [{task_id}]: {title}")
+    print(f"Context Messages ({len(messages)} messages):\n")
     for msg in messages:
         role = msg.get("role", "unknown")
         content = msg.get("content", "")
-        # Truncate long messages for display
-        if len(content) > 500:
-            content = content[:500] + "... [truncated]"
-        print(f"[{role}]:\n{content}\n")
+        # Handle both string content and block-based content
+        if isinstance(content, list):
+            # Block-based content (Anthropic format)
+            for block in content:
+                if isinstance(block, dict):
+                    block_type = block.get("type", "unknown")
+                    if block_type == "tool_use":
+                        tool_name = block.get("name", "unknown")
+                        tool_input = block.get("input", {})
+                        print(f"[{role}/{block_type}:{tool_name}]: {tool_input or '(no input)'}")
+                    else:
+                        block_content = block.get("text", block.get("thinking", ""))
+                        if block_content:
+                            preview = block_content[:CONTEXT_MESSAGE_TRUNCATE_LENGTH] + "..." if len(block_content) > CONTEXT_MESSAGE_TRUNCATE_LENGTH else block_content
+                            print(f"[{role}/{block_type}]: {preview}")
+                elif isinstance(block, str):
+                    # Handle string blocks
+                    preview = block[:CONTEXT_MESSAGE_TRUNCATE_LENGTH] + "..." if len(block) > CONTEXT_MESSAGE_TRUNCATE_LENGTH else block
+                    print(f"[{role}]: {preview}")
+        elif isinstance(content, str):
+            # String content (simpler format)
+            preview = content[:CONTEXT_MESSAGE_TRUNCATE_LENGTH] + "..." if len(content) > CONTEXT_MESSAGE_TRUNCATE_LENGTH else content
+            print(f"[{role}]: {preview}")
+        print()
 
 
 def cmd_health(args):
@@ -1501,6 +1553,13 @@ def build_parser() -> argparse.ArgumentParser:
     tdecision.add_argument("--extend-by", type=int, dest="extend_by", help="Turns to extend (for turn_limit_reached).")
     tdecision.set_defaults(func=cmd_tasks_decision)
 
+    tcontext = tasks_sub.add_parser("context", help="View context messages for a task.")
+    tcontext.add_argument("id", metavar="ID", help="Task ID or prefix.")
+    tcontext.add_argument("--last", type=int, metavar="N", help="Show only last N messages.")
+    tcontext.add_argument("--all", action="store_true", help="Show all messages (no limit).")
+    tcontext.add_argument("--format", choices=["table", "json"], default="table", help="Output format.")
+    tcontext.set_defaults(func=cmd_context)
+
     # --- decisions ---
     decisions_p = subparsers.add_parser("decisions", help="Manage decision types.")
     decisions_sub = decisions_p.add_subparsers(dest="decisions_command")
@@ -1589,12 +1648,6 @@ def build_parser() -> argparse.ArgumentParser:
     token_p = subparsers.add_parser("token-usage", help="Show token usage for remote providers.")
     token_p.add_argument("--format", choices=["table", "json"], default="table", help="Output format.")
     token_p.set_defaults(func=cmd_token_usage)
-
-    # --- context ---
-    ctx_p = subparsers.add_parser("context", help="Show current agent context messages.")
-    ctx_p.add_argument("--repo", metavar="NAME", help="Scope to a specific repo.")
-    ctx_p.add_argument("--format", choices=["table", "json"], default="table", help="Output format.")
-    ctx_p.set_defaults(func=cmd_context)
 
     # --- health ---
     subparsers.add_parser("health", help="Check API health.").set_defaults(func=cmd_health)
