@@ -238,7 +238,7 @@ You may also set this globally in Ollama's systemd service.
 - [x] Tool scoping per agent role ([#6](../../issues/6))
 - [x] Refactor task persistence ([#14](../../issues/14))
 - [x] Branch-per-task, merge management ([#8](../../issues/8))
-- [ ] LLM backend flexibility ([#10](../../issues/10))
+- [x] LLM backend flexibility ([#10](../../issues/10))
 - [x] Refactor: Update CLI to current API ([#16](../../issues/16))
 - [ ] Improved UI/UX for visibility and control ([#9](../../issues/9))
 - [ ] Documentation ([#17](../../issues/17))
