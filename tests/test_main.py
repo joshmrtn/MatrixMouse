@@ -33,7 +33,6 @@ from matrixmouse.main import (
     cmd_interject_workspace,
     cmd_interject_repo,
     cmd_interject_task,
-    cmd_answer,
     cmd_status,
     cmd_stop,
     cmd_kill,
@@ -215,7 +214,7 @@ class TestArgumentParser(unittest.TestCase):
         """Test tasks answer command parsing."""
         args = self.parser.parse_args(["tasks", "answer", "abc123"])
         self.assertEqual(args.tasks_subcmd, "answer")
-        self.assertEqual(args.task_id, "abc123")
+        self.assertEqual(args.id, "abc123")
         self.assertIsNone(args.message)
 
     def test_tasks_answer_with_message(self):
@@ -233,7 +232,7 @@ class TestArgumentParser(unittest.TestCase):
             "pr_approval_required", "approve"
         ])
         self.assertEqual(args.tasks_subcmd, "decision")
-        self.assertEqual(args.task_id, "abc123")
+        self.assertEqual(args.id, "abc123")
         self.assertEqual(args.decision_type, "pr_approval_required")
         self.assertEqual(args.choice, "approve")
 
@@ -290,21 +289,8 @@ class TestArgumentParser(unittest.TestCase):
             "interject", "task", "abc123", "Consider caching"
         ])
         self.assertEqual(args.interject_command, "task")
-        self.assertEqual(args.task_id, "abc123")
+        self.assertEqual(args.id, "abc123")
         self.assertEqual(args.message, "Consider caching")
-
-    def test_answer_legacy_command(self):
-        """Test legacy answer command parsing."""
-        args = self.parser.parse_args(["answer"])
-        self.assertEqual(args.command, "answer")
-        self.assertIsNone(args.message)
-
-    def test_answer_legacy_with_message(self):
-        """Test legacy answer with non-interactive message."""
-        args = self.parser.parse_args([
-            "answer", "--message", "Proceed with refactoring"
-        ])
-        self.assertEqual(args.message, "Proceed with refactoring")
 
     def test_status_command(self):
         """Test status command parsing."""
@@ -586,13 +572,13 @@ class TestAPICalls(unittest.TestCase):
 
     def test_tasks_answer_calls_api(self):
         """Test that tasks answer calls POST /tasks/{id}/answer."""
-        args = MagicMock(task_id="abc123", message="Use staging database")
-        
+        args = MagicMock(id="abc123", message="Use staging database")
+
         with patch("matrixmouse.main._agent_post") as mock_post:
             mock_post.return_value = {"ok": True, "unblocked": False}
             with patch("sys.stdout", StringIO()):
                 cmd_tasks_answer(args)
-            
+
             mock_post.assert_called_once_with(
                 "/tasks/abc123/answer",
                 {"message": "Use staging database"},
@@ -602,17 +588,17 @@ class TestAPICalls(unittest.TestCase):
     def test_tasks_decision_calls_api(self):
         """Test that tasks decision calls POST /tasks/{id}/decision."""
         args = MagicMock(
-            task_id="abc123",
+            id="abc123",
             decision_type="pr_approval_required",
             choice="approve",
             note=""
         )
-        
+
         with patch("matrixmouse.main._agent_post") as mock_post:
             mock_post.return_value = {"ok": True, "action": "approve"}
             with patch("sys.stdout", StringIO()):
                 cmd_tasks_decision(args)
-            
+
             mock_post.assert_called_once_with(
                 "/tasks/abc123/decision",
                 {"decision_type": "pr_approval_required", "choice": "approve"},
@@ -622,29 +608,29 @@ class TestAPICalls(unittest.TestCase):
     def test_tasks_decision_with_note_calls_api(self):
         """Test that tasks decision with note includes note in payload."""
         args = MagicMock(
-            task_id="abc123",
+            id="abc123",
             decision_type="pr_approval_required",
             choice="approve",
             note="Looks good"
         )
-        
+
         with patch("matrixmouse.main._agent_post") as mock_post:
             mock_post.return_value = {"ok": True, "action": "approve"}
             with patch("sys.stdout", StringIO()):
                 cmd_tasks_decision(args)
-            
+
             call_args = mock_post.call_args[0][1]
             self.assertEqual(call_args["note"], "Looks good")
 
     def test_interject_workspace_calls_api(self):
         """Test that interject workspace calls POST /interject/workspace."""
         args = MagicMock(message="Please prioritize security")
-        
+
         with patch("matrixmouse.main._agent_post") as mock_post:
             mock_post.return_value = {"ok": True, "manager_task_id": "xyz789"}
             with patch("sys.stdout", StringIO()):
                 cmd_interject_workspace(args)
-            
+
             mock_post.assert_called_once_with(
                 "/interject/workspace",
                 {"message": "Please prioritize security"},
@@ -654,12 +640,12 @@ class TestAPICalls(unittest.TestCase):
     def test_interject_repo_calls_api(self):
         """Test that interject repo calls POST /interject/repo/{repo}."""
         args = MagicMock(repo="my-repo", message="Focus on auth module")
-        
+
         with patch("matrixmouse.main._agent_post") as mock_post:
             mock_post.return_value = {"ok": True, "manager_task_id": "xyz789"}
             with patch("sys.stdout", StringIO()):
                 cmd_interject_repo(args)
-            
+
             mock_post.assert_called_once_with(
                 "/interject/repo/my-repo",
                 {"message": "Focus on auth module"},
@@ -668,13 +654,13 @@ class TestAPICalls(unittest.TestCase):
 
     def test_interject_task_calls_api(self):
         """Test that interject task calls POST /tasks/{id}/interject."""
-        args = MagicMock(task_id="abc123", message="Consider caching")
-        
+        args = MagicMock(id="abc123", message="Consider caching")
+
         with patch("matrixmouse.main._agent_post") as mock_post:
             mock_post.return_value = {"ok": True}
             with patch("sys.stdout", StringIO()):
                 cmd_interject_task(args)
-            
+
             mock_post.assert_called_once_with(
                 "/tasks/abc123/interject",
                 {"message": "Consider caching"},

@@ -977,51 +977,9 @@ def cmd_interject_repo(args):
 def cmd_interject_task(args):
     """Send a message to a specific task's agent."""
     port = _resolve_port()
-    result = _agent_post(f"/tasks/{args.task_id}/interject", {"message": args.message}, port)
+    result = _agent_post(f"/tasks/{args.id}/interject", {"message": args.message}, port)
     if result.get("ok"):
-        print(f"Message sent to task [{args.task_id}].")
-    else:
-        print(f"ERROR: {result.get('detail', 'unknown error')}")
-        sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# cmd_answer (legacy - answers global pending question)
-# ---------------------------------------------------------------------------
-
-def cmd_answer(args):
-    """Answer a pending clarification request from the agent."""
-    port = _resolve_port()
-    message = getattr(args, "message", None)
-
-    pending = _agent_get("/pending", port)
-    question = pending.get("pending")
-
-    if not question:
-        print("No pending clarification request from the agent.")
-        print("Use 'matrixmouse interject' to send an unsolicited message.")
-        return
-
-    if message is None:
-        # Interactive mode
-        print(f"Agent is asking:\n\n  {question}\n")
-        try:
-            reply = input("Your answer: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nAborted.")
-            return
-        if not reply:
-            print("Aborted — reply cannot be empty.")
-            return
-        message = reply
-
-    if not message.strip():
-        print("ERROR: Message cannot be empty.")
-        sys.exit(1)
-
-    result = _agent_post("/interject", {"message": message, "repo": None}, port)
-    if result.get("ok"):
-        print("Reply sent to agent.")
+        print(f"Message sent to task [{args.id}].")
     else:
         print(f"ERROR: {result.get('detail', 'unknown error')}")
         sys.exit(1)
@@ -1034,7 +992,7 @@ def cmd_answer(args):
 def cmd_tasks_answer(args):
     """Answer a clarification question for a specific task."""
     port = _resolve_port()
-    task_id = args.task_id
+    task_id = args.id
     message = getattr(args, "message", None)
 
     if message is None:
@@ -1089,7 +1047,7 @@ DECISION_TYPES = {
 def cmd_tasks_decision(args):
     """Submit a decision for a blocked task."""
     port = _resolve_port()
-    task_id = args.task_id
+    task_id = args.id
     decision_type = args.decision_type
     choice = args.choice
     note = getattr(args, "note", "")
@@ -1540,12 +1498,12 @@ def build_parser() -> argparse.ArgumentParser:
     tcancel.set_defaults(func=cmd_tasks_cancel)
 
     tanswer = tasks_sub.add_parser("answer", help="Answer a task's clarification question.")
-    tanswer.add_argument("task_id", metavar="TASK_ID")
+    tanswer.add_argument("id", metavar="ID", help="Task ID or prefix.")
     tanswer.add_argument("--message", metavar="MESSAGE", help="Answer message (non-interactive).")
     tanswer.set_defaults(func=cmd_tasks_answer)
 
     tdecision = tasks_sub.add_parser("decision", help="Submit a decision for a blocked task.")
-    tdecision.add_argument("task_id", metavar="TASK_ID")
+    tdecision.add_argument("id", metavar="ID", help="Task ID or prefix.")
     tdecision.add_argument("decision_type", metavar="TYPE",
                           help=f"Decision type. Run 'matrixmouse decisions list' for options.")
     tdecision.add_argument("choice", metavar="CHOICE", help="Choice value.")
@@ -1572,12 +1530,6 @@ def build_parser() -> argparse.ArgumentParser:
     inj_p = subparsers.add_parser("interject", help="Send messages to the agent.")
     inj_sub = inj_p.add_subparsers(dest="interject_command")
 
-    # Legacy interject (for backwards compatibility)
-    inj_legacy = inj_sub.add_parser("legacy", help=argparse.SUPPRESS)
-    inj_legacy.add_argument("message", metavar="MESSAGE")
-    inj_legacy.add_argument("--repo", metavar="NAME")
-    inj_legacy.set_defaults(func=cmd_interject)
-
     inj_ws = inj_sub.add_parser("workspace", help="Send workspace-scoped message to Manager.")
     inj_ws.add_argument("message", metavar="MESSAGE")
     inj_ws.set_defaults(func=cmd_interject_workspace)
@@ -1588,14 +1540,9 @@ def build_parser() -> argparse.ArgumentParser:
     inj_repo.set_defaults(func=cmd_interject_repo)
 
     inj_task = inj_sub.add_parser("task", help="Send message to a specific task.")
-    inj_task.add_argument("task_id", metavar="TASK_ID")
+    inj_task.add_argument("id", metavar="ID", help="Task ID or prefix.")
     inj_task.add_argument("message", metavar="MESSAGE")
     inj_task.set_defaults(func=cmd_interject_task)
-
-    # --- answer (legacy) ---
-    answer_p = subparsers.add_parser("answer", help="Answer a pending clarification (legacy).")
-    answer_p.add_argument("--message", metavar="MESSAGE", help="Answer message (non-interactive).")
-    answer_p.set_defaults(func=cmd_answer)
 
     # --- status ---
     subparsers.add_parser("status", help="Show current agent status.").set_defaults(func=cmd_status)

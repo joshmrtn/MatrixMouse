@@ -396,20 +396,6 @@ Send a message to a specific task's agent:
 matrixmouse interject task <task-id> "Consider using the cached response for better performance"
 ```
 
-### Answer Pending Clarification (Legacy)
-
-Answer a workspace-level pending clarification:
-
-```bash
-# Interactive
-matrixmouse answer
-
-# Non-interactive
-matrixmouse answer --message "Proceed with the refactoring"
-```
-
-For task-specific clarifications, use `matrixmouse tasks answer <task-id>` instead.
-
 ## Monitoring and Debugging
 
 ### View Blocked Tasks
