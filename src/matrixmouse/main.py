@@ -11,9 +11,8 @@ locally when the service is unreachable.
 
 Commands:
     add-repo    Clone or register a repo into the workspace.
-    tasks       View and manage the task queue (list/show/add/edit/cancel).
-    interject   Send a message to the running agent.
-    answer      Answer a pending clarification request from the agent.
+    tasks       View and manage the task queue (list/show/add/edit/cancel/answer/decision/context).
+    interject   Send messages to the agent (workspace/repo/task scopes).
     status      Show current agent status.
     stop        Soft stop — halt after the current tool call completes.
     kill        E-STOP — emergency shutdown, no automatic restart.
@@ -22,6 +21,10 @@ Commands:
     resume      Resume orchestration after a pause.
     upgrade     Upgrade MatrixMouse and rebuild the test runner image.
     config      Read or set configuration values.
+    decisions   List available decision types.
+    blocked     Show blocked and waiting tasks report.
+    token-usage Show token usage for remote providers.
+    health      Check API health.
 
 Service startup is handled by systemd, not by this CLI.
 The service is managed with:
@@ -204,36 +207,6 @@ def _agent_delete(endpoint: str, port: int) -> dict:
     except urllib.error.URLError as e:
         print(
             f"ERROR: Could not reach the MatrixMouse service at {url}\n"
-            f"Details: {e.reason}"
-        )
-        sys.exit(1)
-
-
-def _agent_get_params(endpoint: str, port: int, params: dict | None = None) -> dict:
-    """GET with query parameters."""
-    import urllib.request
-    import urllib.error
-    import urllib.parse
-
-    if params:
-        qs = urllib.parse.urlencode(params)
-        endpoint = f"{endpoint}?{qs}"
-    url = f"http://localhost:{port}{endpoint}"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        try:
-            body = json.loads(e.read())
-            detail = body.get("detail", str(e))
-        except Exception:
-            detail = str(e)
-        print(f"ERROR: {detail}")
-        sys.exit(1)
-    except urllib.error.URLError as e:
-        print(
-            f"ERROR: Could not reach the MatrixMouse service at {url}\n"
-            f"Is the service running?  sudo systemctl status matrixmouse\n"
             f"Details: {e.reason}"
         )
         sys.exit(1)
@@ -928,28 +901,7 @@ def cmd_health(args):
 
 
 # ---------------------------------------------------------------------------
-# cmd_interject (legacy - kept for backwards compatibility)
-# ---------------------------------------------------------------------------
-
-def cmd_interject(args):
-    """Send a message to the running agent (legacy endpoint)."""
-    port = _resolve_port()
-    payload = {"message": args.message}
-    repo = getattr(args, "repo", None)
-    if repo:
-        payload["repo"] = repo
-
-    result = _agent_post("/interject", payload, port)
-    if result.get("ok"):
-        scope = f"repo '{repo}'" if repo else "workspace"
-        print(f"Message sent to agent ({scope}).")
-    else:
-        print(f"ERROR: {result.get('detail', 'unknown error')}")
-        sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Scoped interject commands (new)
+# Scoped interject commands
 # ---------------------------------------------------------------------------
 
 def cmd_interject_workspace(args):
@@ -1683,7 +1635,6 @@ def cmd_interject_dispatch(args):
         "workspace": cmd_interject_workspace,
         "repo": cmd_interject_repo,
         "task": cmd_interject_task,
-        "legacy": cmd_interject,
     }
     if subcmd not in dispatch:
         print("Usage: matrixmouse interject <workspace|repo|task>")

@@ -40,6 +40,7 @@ from matrixmouse.main import (
     cmd_estop_reset,
     cmd_pause,
     cmd_resume,
+    cmd_upgrade,
     cmd_blocked,
     cmd_token_usage,
     cmd_context,
@@ -983,6 +984,521 @@ class TestAPICalls(unittest.TestCase):
                 8080
             )
 
+    # ------------------------------------------------------------------
+    # High Priority: Missing API call tests
+    # ------------------------------------------------------------------
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_tasks_add_calls_api(self):
+        """Test that tasks add calls POST /tasks with correct payload."""
+        args = MagicMock(
+            title="Test Task",
+            description="Test description",
+            repo=None,
+            target_files=None,
+            importance=0.5,
+            urgency=0.5
+        )
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {"id": "abc123", "title": "Test Task"}
+            with patch("sys.stdout", StringIO()):
+                cmd_tasks_add(args)
+
+            mock_post.assert_called_once_with(
+                "/tasks",
+                {
+                    "title": "Test Task",
+                    "description": "Test description",
+                    "repo": [],
+                    "target_files": [],
+                    "importance": 0.5,
+                    "urgency": 0.5
+                },
+                8080
+            )
+
+    def test_tasks_add_with_repo_calls_api(self):
+        """Test that tasks add with repo calls POST /tasks."""
+        args = MagicMock(
+            title="Test",
+            description="Desc",
+            repo="repo1,repo2",
+            target_files="file1.py,file2.py",
+            importance=0.8,
+            urgency=0.6
+        )
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {"id": "abc123", "title": "Test"}
+            with patch("sys.stdout", StringIO()):
+                cmd_tasks_add(args)
+
+            call_args = mock_post.call_args[0][1]
+            self.assertEqual(call_args["repo"], ["repo1", "repo2"])
+            self.assertEqual(call_args["target_files"], ["file1.py", "file2.py"])
+            self.assertEqual(call_args["importance"], 0.8)
+            self.assertEqual(call_args["urgency"], 0.6)
+
+    def test_tasks_edit_calls_api(self):
+        """Test that tasks edit calls PATCH /tasks/{id} with correct payload."""
+        args = MagicMock(
+            id="abc123",
+            title="New Title",
+            description=None,
+            importance=None,
+            urgency=None,
+            notes=None,
+            repo=None,
+            target_files=None
+        )
+
+        with patch("matrixmouse.main._agent_get"):
+            with patch("matrixmouse.main._agent_patch") as mock_patch:
+                mock_patch.return_value = {"id": "abc123"}
+                with patch("sys.stdout", StringIO()):
+                    cmd_tasks_edit(args)
+
+                mock_patch.assert_called_once_with(
+                    "/tasks/abc123", {"title": "New Title"}, 8080
+                )
+
+    def test_tasks_edit_multiple_flags_calls_api(self):
+        """Test that tasks edit with multiple flags calls PATCH correctly."""
+        args = MagicMock(
+            id="abc123",
+            title="New Title",
+            description="New desc",
+            importance=0.9,
+            urgency=0.7,
+            notes="Some notes",
+            repo="repo1",
+            target_files="file1.py"
+        )
+
+        with patch("matrixmouse.main._agent_get"):
+            with patch("matrixmouse.main._agent_patch") as mock_patch:
+                mock_patch.return_value = {"id": "abc123"}
+                with patch("sys.stdout", StringIO()):
+                    cmd_tasks_edit(args)
+
+                call_args = mock_patch.call_args[0][1]
+                self.assertEqual(call_args["title"], "New Title")
+                self.assertEqual(call_args["description"], "New desc")
+                self.assertEqual(call_args["importance"], 0.9)
+                self.assertEqual(call_args["urgency"], 0.7)
+                self.assertEqual(call_args["notes"], "Some notes")
+                self.assertEqual(call_args["repo"], ["repo1"])
+                self.assertEqual(call_args["target_files"], ["file1.py"])
+
+    # ------------------------------------------------------------------
+    # High Priority: cmd_upgrade tests
+    # ------------------------------------------------------------------
+
+    def test_upgrade_calls_api(self):
+        """Test that upgrade calls POST /upgrade."""
+        args = MagicMock()
+        args.yes = False
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {
+                "ok": True,
+                "results": {
+                    "package": {"ok": True, "output": "Upgraded"},
+                    "test_runner": {"ok": True, "rebuilt": True, "output": "Built"}
+                }
+            }
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="")
+                with patch("sys.stdout", StringIO()):
+                    cmd_upgrade(args)
+
+                mock_post.assert_called_once_with("/upgrade", {}, 8080)
+
+    def test_upgrade_with_package_failure(self):
+        """Test that upgrade handles package failure."""
+        args = MagicMock()
+        args.yes = False
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {
+                "ok": False,
+                "results": {
+                    "package": {"ok": False, "output": "Failed"},
+                    "test_runner": {"ok": True, "rebuilt": False, "reason": "unchanged"}
+                }
+            }
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="")
+                captured = StringIO()
+                with patch("sys.stdout", captured):
+                    with self.assertRaises(SystemExit):
+                        cmd_upgrade(args)
+
+                self.assertIn("FAILED", captured.getvalue())
+
+    def test_upgrade_with_sudo_password_prompt(self):
+        """Test that upgrade handles sudo password prompt scenario."""
+        args = MagicMock()
+        args.yes = False
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {
+                "ok": True,
+                "results": {
+                    "package": {"ok": True, "output": "Upgraded"},
+                    "test_runner": {"ok": True, "rebuilt": False, "reason": "unchanged"}
+                }
+            }
+            with patch("subprocess.run") as mock_run:
+                # First call (restart) succeeds
+                mock_run.return_value = MagicMock(returncode=0, stderr="")
+                with patch("matrixmouse.main._sudo_needs_password", return_value=True):
+                    captured = StringIO()
+                    with patch("sys.stdout", captured):
+                        cmd_upgrade(args)
+
+                    # Should warn about sudo password
+                    self.assertIn("sudo privileges", captured.getvalue())
+
+    # ------------------------------------------------------------------
+    # Medium Priority: Confirmation prompt tests
+    # ------------------------------------------------------------------
+
+    def test_repos_remove_prompts_without_yes_flag(self):
+        """Test that repos remove prompts for confirmation without --yes."""
+        args = MagicMock()
+        args.name = "my-repo"
+        args.yes = False
+
+        with patch("builtins.input", return_value="y"):
+            with patch("matrixmouse.main._agent_delete") as mock_delete:
+                mock_delete.return_value = {"ok": True}
+                with patch("sys.stdout", StringIO()):
+                    cmd_repos_remove(args)
+
+                mock_delete.assert_called_once_with("/repos/my-repo", 8080)
+
+    def test_repos_remove_aborts_on_negative_confirmation(self):
+        """Test that repos remove aborts on negative confirmation."""
+        args = MagicMock()
+        args.name = "my-repo"
+        args.yes = False
+
+        with patch("builtins.input", return_value="n"):
+            with patch("matrixmouse.main._agent_delete") as mock_delete:
+                captured = StringIO()
+                with patch("sys.stdout", captured):
+                    cmd_repos_remove(args)
+
+                mock_delete.assert_not_called()
+                self.assertIn("Aborted", captured.getvalue())
+
+    def test_tasks_cancel_prompts_without_yes_flag(self):
+        """Test that tasks cancel prompts for confirmation without --yes."""
+        args = MagicMock()
+        args.id = "abc123"
+        args.yes = False
+
+        with patch("matrixmouse.main._agent_get") as mock_get:
+            mock_get.return_value = {"id": "abc123", "title": "Test"}
+            with patch("builtins.input", return_value="y"):
+                with patch("matrixmouse.main._agent_delete") as mock_delete:
+                    mock_delete.return_value = {"ok": True}
+                    with patch("sys.stdout", StringIO()):
+                        cmd_tasks_cancel(args)
+
+                    mock_delete.assert_called_once_with("/tasks/abc123", 8080)
+
+    def test_tasks_cancel_aborts_on_negative_confirmation(self):
+        """Test that tasks cancel aborts on negative confirmation."""
+        args = MagicMock()
+        args.id = "abc123"
+        args.yes = False
+
+        with patch("matrixmouse.main._agent_get") as mock_get:
+            mock_get.return_value = {"id": "abc123", "title": "Test"}
+            with patch("builtins.input", return_value="n"):
+                with patch("matrixmouse.main._agent_delete") as mock_delete:
+                    captured = StringIO()
+                    with patch("sys.stdout", captured):
+                        cmd_tasks_cancel(args)
+
+                    mock_delete.assert_not_called()
+                    self.assertIn("Aborted", captured.getvalue())
+
+    def test_kill_prompts_without_yes_flag(self):
+        """Test that kill prompts for ESTOP confirmation without --yes."""
+        args = MagicMock()
+        args.yes = False
+
+        with patch("builtins.input", return_value="ESTOP"):
+            with patch("matrixmouse.main._agent_post") as mock_post:
+                mock_post.return_value = {"ok": True}
+                with patch("sys.stdout", StringIO()):
+                    cmd_kill(args)
+
+                mock_post.assert_called_once_with("/kill", {}, 8080)
+
+    def test_kill_aborts_on_wrong_confirmation(self):
+        """Test that kill aborts on wrong confirmation string."""
+        args = MagicMock()
+        args.yes = False
+
+        with patch("builtins.input", return_value="wrong"):
+            with patch("matrixmouse.main._agent_post") as mock_post:
+                captured = StringIO()
+                with patch("sys.stdout", captured):
+                    cmd_kill(args)
+
+                mock_post.assert_not_called()
+                self.assertIn("Aborted", captured.getvalue())
+
+    # ------------------------------------------------------------------
+    # Medium Priority: Value parsing tests for cmd_config_set
+    # ------------------------------------------------------------------
+
+    def test_config_set_parses_boolean_true(self):
+        """Test that config set parses 'true' as boolean True."""
+        args = MagicMock(key="some_flag", value="true", repo=None, commit=False)
+
+        with patch("matrixmouse.main._agent_patch") as mock_patch:
+            mock_patch.return_value = {"ok": True}
+            with patch("sys.stdout", StringIO()):
+                cmd_config_set(args)
+
+            call_args = mock_patch.call_args[0][1]
+            self.assertEqual(call_args["values"]["some_flag"], True)
+
+    def test_config_set_parses_boolean_false(self):
+        """Test that config set parses 'false' as boolean False."""
+        args = MagicMock(key="some_flag", value="false", repo=None, commit=False)
+
+        with patch("matrixmouse.main._agent_patch") as mock_patch:
+            mock_patch.return_value = {"ok": True}
+            with patch("sys.stdout", StringIO()):
+                cmd_config_set(args)
+
+            call_args = mock_patch.call_args[0][1]
+            self.assertEqual(call_args["values"]["some_flag"], False)
+
+    def test_config_set_parses_integer(self):
+        """Test that config set parses integer values."""
+        args = MagicMock(key="max_turns", value="50", repo=None, commit=False)
+
+        with patch("matrixmouse.main._agent_patch") as mock_patch:
+            mock_patch.return_value = {"ok": True}
+            with patch("sys.stdout", StringIO()):
+                cmd_config_set(args)
+
+            call_args = mock_patch.call_args[0][1]
+            self.assertEqual(call_args["values"]["max_turns"], 50)
+
+    def test_config_set_parses_float(self):
+        """Test that config set parses float values."""
+        args = MagicMock(key="threshold", value="0.75", repo=None, commit=False)
+
+        with patch("matrixmouse.main._agent_patch") as mock_patch:
+            mock_patch.return_value = {"ok": True}
+            with patch("sys.stdout", StringIO()):
+                cmd_config_set(args)
+
+            call_args = mock_patch.call_args[0][1]
+            self.assertEqual(call_args["values"]["threshold"], 0.75)
+
+    def test_config_set_keeps_string(self):
+        """Test that config set keeps non-numeric strings as strings."""
+        args = MagicMock(
+            key="coder_model",
+            value="ollama:qwen3.5:9b",
+            repo=None,
+            commit=False
+        )
+
+        with patch("matrixmouse.main._agent_patch") as mock_patch:
+            mock_patch.return_value = {"ok": True}
+            with patch("sys.stdout", StringIO()):
+                cmd_config_set(args)
+
+            call_args = mock_patch.call_args[0][1]
+            self.assertEqual(
+                call_args["values"]["coder_model"], "ollama:qwen3.5:9b"
+            )
+
+    # ------------------------------------------------------------------
+    # Medium Priority: Validation error tests for cmd_tasks_decision
+    # ------------------------------------------------------------------
+
+    def test_tasks_decision_rejects_invalid_decision_type(self):
+        """Test that tasks decision rejects invalid decision type."""
+        args = MagicMock(
+            id="abc123",
+            decision_type="invalid_type",
+            choice="approve",
+            note=""
+        )
+
+        captured = StringIO()
+        with patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit):
+                cmd_tasks_decision(args)
+
+        self.assertIn("ERROR", captured.getvalue())
+        self.assertIn("invalid_type", captured.getvalue())
+
+    def test_tasks_decision_rejects_invalid_choice(self):
+        """Test that tasks decision rejects invalid choice for valid type."""
+        args = MagicMock(
+            id="abc123",
+            decision_type="pr_approval_required",
+            choice="invalid_choice",
+            note=""
+        )
+
+        captured = StringIO()
+        with patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit):
+                cmd_tasks_decision(args)
+
+        self.assertIn("ERROR", captured.getvalue())
+        self.assertIn("invalid_choice", captured.getvalue())
+
+    def test_tasks_decision_with_extend_by(self):
+        """Test that tasks decision includes extend_by in metadata."""
+        args = MagicMock(
+            id="abc123",
+            decision_type="turn_limit_reached",
+            choice="extend",
+            note="",
+            extend_by=20
+        )
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {"ok": True, "action": "extend"}
+            with patch("sys.stdout", StringIO()):
+                cmd_tasks_decision(args)
+
+            call_args = mock_post.call_args[0][1]
+            self.assertEqual(call_args["metadata"], {"extend_by": 20})
+
+    # ------------------------------------------------------------------
+    # Medium Priority: Additional edge case tests
+    # ------------------------------------------------------------------
+
+    def test_tasks_add_empty_title_exits(self):
+        """Test that tasks add with empty title exits with error."""
+        args = MagicMock(
+            title="",
+            description="Desc",
+            repo=None,
+            target_files=None,
+            importance=0.5,
+            urgency=0.5
+        )
+
+        captured = StringIO()
+        with patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit):
+                cmd_tasks_add(args)
+
+        self.assertIn("ERROR", captured.getvalue())
+        self.assertIn("Title cannot be empty", captured.getvalue())
+
+    def test_tasks_answer_no_pending_question(self):
+        """Test that tasks answer handles missing pending question."""
+        args = MagicMock(id="abc123", message=None)
+
+        with patch("matrixmouse.main._agent_get") as mock_get:
+            mock_get.return_value = {"id": "abc123", "pending_question": ""}
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                cmd_tasks_answer(args)
+
+            self.assertIn("No pending question", captured.getvalue())
+
+    def test_tasks_answer_empty_message_exits(self):
+        """Test that tasks answer with empty message exits with error."""
+        args = MagicMock(id="abc123", message="")
+
+        captured = StringIO()
+        with patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit):
+                cmd_tasks_answer(args)
+
+        self.assertIn("ERROR", captured.getvalue())
+        self.assertIn("cannot be empty", captured.getvalue())
+
+    def test_context_empty_messages(self):
+        """Test context with empty messages list."""
+        args = MagicMock(id="abc123", last=None, all=False, format="table")
+
+        with patch("matrixmouse.main._agent_get") as mock_get:
+            mock_get.return_value = {
+                "id": "abc123",
+                "title": "Test task",
+                "context_messages": []
+            }
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                cmd_context(args)
+
+            output = captured.getvalue()
+            self.assertIn("0 messages", output)
+
+    def test_context_last_exceeds_count(self):
+        """Test context with --last larger than message count."""
+        args = MagicMock(id="abc123", last=100, all=False, format="table")
+
+        with patch("matrixmouse.main._agent_get") as mock_get:
+            mock_get.return_value = {
+                "id": "abc123",
+                "title": "Test",
+                "context_messages": [{"role": "user", "content": "msg"}] * 5
+            }
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                cmd_context(args)
+
+            # Should show all 5 messages without error
+            output = captured.getvalue()
+            self.assertIn("5 messages", output)
+
+    def test_health_unreachable(self):
+        """Test that health handles unreachable service."""
+        args = MagicMock()
+
+        with patch("matrixmouse.main._agent_get") as mock_get:
+            mock_get.side_effect = SystemExit(1)
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                with self.assertRaises(SystemExit):
+                    cmd_health(args)
+
+            self.assertIn("UNREACHABLE", captured.getvalue())
+
+    def test_interject_repo_error_response(self):
+        """Test that interject repo handles error response."""
+        args = MagicMock(repo="my-repo", message="Test")
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {"detail": "Repo not found"}
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                with self.assertRaises(SystemExit):
+                    cmd_interject_repo(args)
+
+            self.assertIn("ERROR", captured.getvalue())
+            self.assertIn("Repo not found", captured.getvalue())
+
+    def test_interject_task_error_response(self):
+        """Test that interject task handles error response."""
+        args = MagicMock(id="abc123", message="Test")
+
+        with patch("matrixmouse.main._agent_post") as mock_post:
+            mock_post.return_value = {"detail": "Task not found"}
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                with self.assertRaises(SystemExit):
+                    cmd_interject_task(args)
+
+            self.assertIn("ERROR", captured.getvalue())
+            self.assertIn("Task not found", captured.getvalue())
