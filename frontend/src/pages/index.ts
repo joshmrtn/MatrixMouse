@@ -34,7 +34,7 @@ export function renderRouter(
       new TasksPage().render(container);
       break;
 
-    case 'status':
+    case 'dashboard':
       new StatusPage().render(container);
       break;
 

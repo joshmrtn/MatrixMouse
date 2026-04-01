@@ -2,9 +2,15 @@
  * Unit tests for StatusPage component
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { StatusPage } from '../../../src/pages/StatusPage';
 import { setState, resetState } from '../../../src/state/store';
+import * as apiClient from '../../../src/api/client';
+
+// Mock the API client
+vi.mock('../../../src/api/client', () => ({
+  getTaskDependencies: vi.fn(),
+}));
 
 describe('StatusPage', () => {
   let page: StatusPage;
@@ -15,6 +21,7 @@ describe('StatusPage', () => {
     page = new StatusPage();
     container = document.createElement('div');
     document.body.appendChild(container);
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -143,7 +150,13 @@ describe('StatusPage', () => {
   });
 
   describe('blocked by dependencies section', () => {
-    it('displays tasks blocked by dependencies', () => {
+    it('displays tasks blocked by dependencies', async () => {
+      vi.mocked(apiClient.getTaskDependencies).mockResolvedValue({
+        task_id: 'task1',
+        dependencies: [],
+        count: 0,
+      });
+
       setState('blockedReport', {
         human: [],
         dependencies: [
@@ -153,11 +166,22 @@ describe('StatusPage', () => {
       });
 
       page.render(container);
+      // Wait for async rendering
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
       const taskLinks = container.querySelectorAll('#status-blocked-deps .status-task-link');
       expect(taskLinks.length).toBe(1);
     });
 
-    it('displays dependency information', () => {
+    it('displays blockers list with Waiting on label', async () => {
+      vi.mocked(apiClient.getTaskDependencies).mockResolvedValue({
+        task_id: 'task1',
+        dependencies: [
+          { id: 'abc123', title: 'Dependency Task', description: '', repo: [], role: 'coder', status: 'ready', branch: '', parent_task_id: null, depth: 0, importance: 0.5, urgency: 0.5, priority_score: 0.5, preemptable: true, preempt: false, created_at: '2024-01-01T00:00:00Z', last_modified: '2024-01-01T00:00:00Z', context_messages: [], pending_tool_calls: [], decomposition_confirmed_depth: 0, merge_resolution_decisions: [] },
+        ],
+        count: 1,
+      });
+
       setState('blockedReport', {
         human: [],
         dependencies: [
@@ -167,12 +191,62 @@ describe('StatusPage', () => {
       });
 
       page.render(container);
-      const depLink = container.querySelector('#status-blocked-deps .dependency-info .dependency-link');
-      expect(depLink).toBeTruthy();
-      expect(depLink?.textContent).toBe('abc123');
+      // Wait for async rendering
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const blockersLabel = container.querySelector('#status-blocked-deps .blockers-label');
+      expect(blockersLabel?.textContent).toBe('Waiting on:');
     });
 
-    it('makes dependency links clickable', () => {
+    it('displays blocker id and title', async () => {
+      vi.mocked(apiClient.getTaskDependencies).mockResolvedValue({
+        task_id: 'task1',
+        dependencies: [
+          { id: 'abc123', title: 'This is a task title', description: '', repo: [], role: 'coder', status: 'ready', branch: '', parent_task_id: null, depth: 0, importance: 0.5, urgency: 0.5, priority_score: 0.5, preemptable: true, preempt: false, created_at: '2024-01-01T00:00:00Z', last_modified: '2024-01-01T00:00:00Z', context_messages: [], pending_tool_calls: [], decomposition_confirmed_depth: 0, merge_resolution_decisions: [] },
+        ],
+        count: 1,
+      });
+
+      setState('blockedReport', {
+        human: [],
+        dependencies: [
+          { id: 'task1', title: 'Task 1', blocking_reason: 'Waiting on: abc123' },
+        ],
+        waiting: [],
+      });
+
+      page.render(container);
+      // Wait for async rendering
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const blockerLink = container.querySelector('#status-blocked-deps .blockers-list .dependency-link');
+      expect(blockerLink).toBeTruthy();
+      const text = blockerLink?.textContent?.replace(/\s+/g, ' ').trim();
+      expect(text).toContain('abc123');
+      expect(text).toContain('This is a task title');
+    });
+
+    it('shows empty message when no blocked tasks', () => {
+      setState('blockedReport', {
+        human: [],
+        dependencies: [],
+        waiting: [],
+      });
+
+      page.render(container);
+      const emptyMsg = container.querySelector('#status-blocked-deps .empty-message');
+      expect(emptyMsg).toBeTruthy();
+    });
+
+    it('makes dependency links clickable', async () => {
+      vi.mocked(apiClient.getTaskDependencies).mockResolvedValue({
+        task_id: 'task1',
+        dependencies: [
+          { id: 'dep1', title: 'Dependency', description: '', repo: [], role: 'coder', status: 'ready', branch: '', parent_task_id: null, depth: 0, importance: 0.5, urgency: 0.5, priority_score: 0.5, preemptable: true, preempt: false, created_at: '2024-01-01T00:00:00Z', last_modified: '2024-01-01T00:00:00Z', context_messages: [], pending_tool_calls: [], decomposition_confirmed_depth: 0, merge_resolution_decisions: [] },
+        ],
+        count: 1,
+      });
+
       setState('blockedReport', {
         human: [],
         dependencies: [
@@ -182,8 +256,12 @@ describe('StatusPage', () => {
       });
 
       page.render(container);
-      const depLink = container.querySelector('#status-blocked-deps .dependency-info .dependency-link') as HTMLAnchorElement;
+      // Wait for async rendering
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const depLink = container.querySelector('#status-blocked-deps .blockers-list .dependency-link') as HTMLAnchorElement;
       expect(depLink?.dataset.taskId).toBe('dep1');
+      expect(depLink?.getAttribute('href')).toBe('/task/dep1');
     });
   });
 

@@ -8,12 +8,17 @@
 
 import { getState, subscribe } from '../state';
 import { escapeHtml } from '../utils';
-import type { BlockedTaskEntry } from '../types';
+import { getTaskDependencies } from '../api/client';
+import { BlockerStateRenderer } from '../components/BlockerStateRenderer';
+import type { BlockedTaskEntry, BlockerState, BlockerLoadError } from '../types';
 
 export class StatusPage {
   private element: HTMLElement | null = null;
+  private blockerRenderer: BlockerStateRenderer;
 
   constructor() {
+    this.blockerRenderer = new BlockerStateRenderer();
+
     // Subscribe to state changes for real-time updates
     subscribe((state) => {
       if (state.blockedReport) {
@@ -54,7 +59,7 @@ export class StatusPage {
     `;
 
     this.element = container.querySelector('#status-page');
-    
+
     // Render sections immediately (in case state was set before render)
     this.renderSections();
   }
@@ -85,12 +90,12 @@ export class StatusPage {
     );
   }
 
-  private renderSection(
+  private async renderSection(
     sectionSelector: string,
     tasks: BlockedTaskEntry[],
     emptyMessage: string,
     showDependencyLinks = false
-  ): void {
+  ): Promise<void> {
     if (!this.element) return;
 
     const section = this.element.querySelector(sectionSelector);
@@ -104,9 +109,48 @@ export class StatusPage {
       return;
     }
 
-    contentEl.innerHTML = tasks
-      .map((task) => this.renderTaskItem(task, showDependencyLinks))
-      .join('');
+    // For dependencies section, show loading skeletons first, then fetch blocker details
+    if (showDependencyLinks) {
+      // Show loading state immediately
+      contentEl.innerHTML = tasks
+        .map((task) => this.renderTaskItemWithLoading(task))
+        .join('');
+
+      // Fetch blocker details in background
+      const tasksWithBlockers = await Promise.all(
+        tasks.map(async (task) => {
+          try {
+            const deps = await getTaskDependencies(task.id);
+            const blockers: BlockerState[] = deps.dependencies.map((d) => ({
+              type: 'task',
+              id: d.id,
+              title: d.title,
+            }));
+            return { ...task, blockers };
+          } catch (e) {
+            console.error(`Failed to fetch dependencies for task ${task.id}:`, e);
+            const errorBlocker: BlockerLoadError = {
+              type: 'error',
+              message: 'Failed to load dependencies',
+              retryable: true,
+            };
+            return { ...task, blockers: [errorBlocker], error: errorBlocker };
+          }
+        })
+      );
+
+      // Re-render with actual data
+      contentEl.innerHTML = tasksWithBlockers
+        .map((task) => this.renderTaskItem(task, true))
+        .join('');
+
+      // Set up retry handlers
+      this.setupRetryHandlers(contentEl, tasksWithBlockers);
+    } else {
+      contentEl.innerHTML = tasks
+        .map((task) => this.renderTaskItem(task, false))
+        .join('');
+    }
 
     // Set up dependency link clicks
     if (showDependencyLinks) {
@@ -124,7 +168,7 @@ export class StatusPage {
   }
 
   private renderTaskItem(
-    task: BlockedTaskEntry,
+    task: BlockedTaskEntry & { blockers?: BlockerState[] },
     showDependencyLinks = false
   ): string {
     const taskHtml = `
@@ -133,25 +177,96 @@ export class StatusPage {
           <span class="status-task-id">${escapeHtml(task.id)}</span>
           <span class="status-task-title">${escapeHtml(task.title)}</span>
         </a>
-        <div class="status-task-reason">${escapeHtml(task.blocking_reason)}</div>
-        ${this.renderDependencyLinks(task, showDependencyLinks)}
+        ${showDependencyLinks
+          ? this.renderBlockersList(task.blockers || [])
+          : `<div class="status-task-reason">${escapeHtml(task.blocking_reason)}</div>`
+        }
       </div>
     `;
     return taskHtml;
   }
 
-  private renderDependencyLinks(
-    task: BlockedTaskEntry,
-    showDependencyLinks: boolean
-  ): string {
-    if (!showDependencyLinks) return '';
+  private renderTaskItemWithLoading(task: BlockedTaskEntry): string {
+    return `
+      <div class="status-task-item">
+        <a href="/task/${escapeHtml(task.id)}" class="status-task-link" data-task-id="${escapeHtml(task.id)}">
+          <span class="status-task-id">${escapeHtml(task.id)}</span>
+          <span class="status-task-title">${escapeHtml(task.title)}</span>
+        </a>
+        <div class="blockers-list">
+          <div class="blockers-label">Waiting on:</div>
+          ${this.blockerRenderer.render({ type: 'loading' })}
+        </div>
+      </div>
+    `;
+  }
 
-    // Parse "Waiting on: task_id" format (task IDs are alphanumeric)
-    const match = task.blocking_reason.match(/Waiting on:\s*([a-zA-Z0-9]+)/i);
-    if (match) {
-      const depId = match[1].trim();
-      return `<div class="dependency-info">Waiting on: <a href="/task/${escapeHtml(depId)}" class="dependency-link" data-task-id="${escapeHtml(depId)}" title="View task ${escapeHtml(depId)}">${escapeHtml(depId)}</a></div>`;
-    }
-    return '';
+  private renderBlockersList(blockers: BlockerState[]): string {
+    if (!blockers || blockers.length === 0) return '';
+
+    const blockerItems = blockers
+      .map((blocker) => this.blockerRenderer.render(blocker))
+      .join('');
+
+    return `
+      <div class="blockers-list">
+        <div class="blockers-label">Waiting on:</div>
+        ${blockerItems}
+      </div>
+    `;
+  }
+
+  private setupRetryHandlers(
+    contentEl: Element,
+    tasksWithBlockers: (BlockedTaskEntry & { blockers?: BlockerState[]; error?: BlockerLoadError })[]
+  ): void {
+    // Set up retry button handlers
+    contentEl.querySelectorAll('.blocker-retry-btn').forEach((btn, index) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const task = tasksWithBlockers[index];
+        if (!task) return;
+
+        // Show loading state while retrying
+        const blockerEl = (btn as HTMLElement).closest('.blocker-error');
+        if (blockerEl) {
+          blockerEl.innerHTML = this.blockerRenderer.render({ type: 'loading' });
+        }
+
+        // Retry fetching dependencies
+        try {
+          const deps = await getTaskDependencies(task.id);
+          const blockers: BlockerState[] = deps.dependencies.map((d) => ({
+            type: 'task',
+            id: d.id,
+            title: d.title,
+          }));
+
+          // Re-render blockers list
+          const blockersList = blockerEl?.closest('.blockers-list');
+          if (blockersList) {
+            blockersList.innerHTML = `
+              <div class="blockers-label">Waiting on:</div>
+              ${this.renderBlockersList(blockers)}
+            `;
+          }
+        } catch (retryError) {
+          console.error(`Retry failed for task ${task.id}:`, retryError);
+          // Re-show error
+          if (blockerEl) {
+            blockerEl.innerHTML = this.blockerRenderer.render({
+              type: 'error',
+              message: 'Retry failed',
+              retryable: true,
+            });
+          }
+        }
+      });
+    });
+  }
+
+  private truncateTitle(title: string, maxLength = 120): string {
+    if (title.length <= maxLength) return title;
+    return title.slice(0, maxLength - 3) + '...';
   }
 }

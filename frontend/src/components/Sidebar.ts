@@ -62,7 +62,7 @@ export class Sidebar {
         <div id="sb-task-trees"></div>
       </div>
       <div id="sb-bottom">
-        <div class="sb-item ${state.currentPage === 'status' ? 'active' : ''}" data-tab="status">
+        <div class="sb-item ${state.currentPage === 'dashboard' ? 'active' : ''}" data-tab="dashboard">
           <span class="sb-icon">𝌠</span>
           <span class="sb-name">Status</span>
         </div>
@@ -80,8 +80,8 @@ export class Sidebar {
     this.reposEl = this.element.querySelector('#sb-repos');
     this.taskTreesEl = this.element.querySelector('#sb-task-trees');
 
-    // Setup navigation handlers
-    this.setupNavigationHandlers();
+    // Setup event delegation for all click handling
+    this.setupEventDelegation();
 
     // Render repos and task trees
     this.renderRepos();
@@ -110,51 +110,147 @@ export class Sidebar {
     return this.element?.classList.contains('collapsed') ?? false;
   }
 
-  private setupNavigationHandlers(): void {
+  /**
+   * Setup event delegation for all sidebar clicks.
+   * Single listener on sidebar root handles all interactions.
+   */
+  private setupEventDelegation(): void {
     if (!this.element) return;
 
-    // Scope clicks (including workspace)
-    this.element.querySelectorAll('.sb-item[data-scope]').forEach((item) => {
-      item.addEventListener('click', (e) => {
-        // Don't navigate if clicking the expand button
-        if ((e.target as HTMLElement).classList.contains('sb-repo-expand')) {
-          return;
-        }
-        const scope = (e.currentTarget as HTMLElement).dataset.scope;
-        if (scope) {
-          // Clear selected task when changing scope
-          setState('selectedTask', null);
-          setState('scope', scope);
-          setState('sidebarOpen', false);
-          window.history.pushState({}, '', `/channel/${scope}`);
-          window.dispatchEvent(new Event('popstate'));
-        }
-      });
-    });
+    this.element.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
 
-    // Workspace expand button
-    const workspaceExpand = this.element.querySelector('[data-scope="workspace"] .sb-repo-expand');
-    if (workspaceExpand) {
-      workspaceExpand.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const workspaceTree = this.element?.querySelector('#sb-task-tree-workspace');
-        if (workspaceTree) {
-          workspaceTree.classList.toggle('visible');
-          (workspaceExpand as HTMLElement).textContent = workspaceTree.classList.contains('visible') ? '▼' : '▶';
+      // === EXPAND BUTTONS (highest priority - prevent navigation) ===
+
+      // Task expand button
+      const taskExpand = target.closest('.sb-task-expand');
+      if (taskExpand) {
+        e.preventDefault();
+        const taskItem = target.closest('.sb-task-item') as HTMLElement;
+        const taskId = taskItem?.dataset.taskId;
+        if (taskId) {
+          toggleTaskExpansion(taskId);
+          this.renderRepos();
         }
-      });
+        return;
+      }
+
+      // Repo expand button (including workspace)
+      const repoExpand = target.closest('.sb-repo-expand');
+      if (repoExpand) {
+        e.preventDefault();
+        this.handleRepoExpand(repoExpand);
+        return;
+      }
+
+      // === NAVIGATION (lower priority) ===
+
+      // Task item navigation
+      const taskItem = target.closest('.sb-task-item');
+      if (taskItem) {
+        const taskId = taskItem.dataset.taskId;
+        if (taskId) {
+          this.navigateToTask(taskId);
+        }
+        return;
+      }
+
+      // Repo item navigation
+      const repoItem = target.closest('.sb-item[data-repo]');
+      if (repoItem) {
+        const repoName = (repoItem as HTMLElement).dataset.repo;
+        if (repoName) {
+          this.navigateToRepo(repoName);
+        }
+        return;
+      }
+
+      // Scope navigation (workspace)
+      const scopeItem = target.closest('.sb-item[data-scope]');
+      if (scopeItem) {
+        const scope = (scopeItem as HTMLElement).dataset.scope;
+        if (scope) {
+          this.navigateToChannel(scope);
+        }
+        return;
+      }
+
+      // Tab navigation
+      const tabItem = target.closest('.sb-item[data-tab]');
+      if (tabItem) {
+        const tab = (tabItem as HTMLElement).dataset.tab;
+        if (tab) {
+          this.navigateToTab(tab);
+        }
+        return;
+      }
+    });
+  }
+
+  /**
+   * Handle repo/workspace expand button click
+   */
+  private handleRepoExpand(expandBtn: Element): void {
+    // Check if it's the workspace expand button
+    const scopeItem = expandBtn.closest('.sb-item[data-scope]');
+    if (scopeItem) {
+      const workspaceTree = this.element?.querySelector('#sb-task-tree-workspace');
+      if (workspaceTree) {
+        workspaceTree.classList.toggle('visible');
+        (expandBtn as HTMLElement).textContent = workspaceTree.classList.contains('visible') ? '▼' : '▶';
+      }
+      return;
     }
 
-    // Tab clicks
-    this.element.querySelectorAll('.sb-item[data-tab]').forEach((item) => {
-      item.addEventListener('click', (e) => {
-        const tab = (e.currentTarget as HTMLElement).dataset.tab;
-        if (tab) {
-          window.history.pushState({}, '', `/${tab}`);
-          window.dispatchEvent(new Event('popstate'));
-        }
-      });
-    });
+    // Otherwise it's a repo expand button
+    const repoItem = expandBtn.closest('.sb-item[data-repo]') as HTMLElement;
+    const repoName = repoItem?.dataset.repo;
+    if (repoName) {
+      const treeEl = repoItem.nextElementSibling;
+      if (treeEl && treeEl.classList.contains('sb-task-tree')) {
+        treeEl.classList.toggle('visible');
+        (expandBtn as HTMLElement).textContent = treeEl.classList.contains('visible') ? '▼' : '▶';
+      }
+    }
+  }
+
+  /**
+   * Navigate to a task page
+   */
+  private navigateToTask(taskId: string): void {
+    setState('sidebarOpen', false);
+    window.history.pushState({}, '', `/task/${taskId}`);
+    window.dispatchEvent(new Event('popstate'));
+  }
+
+  /**
+   * Navigate to a repo channel
+   */
+  private navigateToRepo(repoName: string): void {
+    setState('selectedTask', null);
+    setState('scope', repoName);
+    setState('sidebarOpen', false);
+    window.history.pushState({}, '', `/channel/${repoName}`);
+    window.dispatchEvent(new Event('popstate'));
+  }
+
+  /**
+   * Navigate to a channel (workspace or repo)
+   */
+  private navigateToChannel(scope: string): void {
+    setState('selectedTask', null);
+    setState('scope', scope);
+    setState('sidebarOpen', false);
+    window.history.pushState({}, '', `/channel/${scope}`);
+    window.dispatchEvent(new Event('popstate'));
+  }
+
+  /**
+   * Navigate to a tab/page
+   */
+  private navigateToTab(tab: string): void {
+    window.history.pushState({}, '', `/${tab}`);
+    window.dispatchEvent(new Event('popstate'));
   }
 
   private onStateChange(state: ReturnType<typeof getState>): void {
@@ -303,77 +399,6 @@ export class Sidebar {
         (workspaceExpandBtnEl as HTMLElement).textContent = '▼';
       }
     }
-
-    // Add repo item clicks - navigate to repo channel
-    this.reposEl.querySelectorAll('.sb-item[data-repo]').forEach((item) => {
-      item.addEventListener('click', (e) => {
-        // Don't navigate if clicking the expand button
-        if ((e.target as HTMLElement).classList.contains('sb-repo-expand')) {
-          return;
-        }
-
-        const repoName = (item as HTMLElement).dataset.repo;
-        if (repoName) {
-          // Clear selected task when changing repo
-          setState('selectedTask', null);
-          setState('scope', repoName);
-          setState('sidebarOpen', false);
-          window.history.pushState({}, '', `/channel/${repoName}`);
-          window.dispatchEvent(new Event('popstate'));
-        }
-      });
-    });
-
-    // Add expand/collapse handlers for repos
-    this.reposEl.querySelectorAll('.sb-repo-expand').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const repoItem = (btn as HTMLElement).closest('.sb-item') as HTMLElement;
-        const repoName = repoItem?.dataset.repo;
-        if (repoName) {
-          // Find the task tree as the next sibling element
-          const treeEl = repoItem.nextElementSibling;
-          if (treeEl && treeEl.classList.contains('sb-task-tree')) {
-            treeEl.classList.toggle('visible');
-            btn.textContent = treeEl.classList.contains('visible') ? '▼' : '▶';
-          }
-        }
-      });
-    });
-
-    // Attach task click handlers to both repo and workspace task trees
-    this.attachTaskClickHandlers(this.reposEl);
-    if (workspaceTree) {
-      this.attachTaskClickHandlers(workspaceTree);
-    }
-  }
-
-  /**
-   * Attach click handlers to task items in a container.
-   * Handles both task expansion and navigation.
-   */
-  private attachTaskClickHandlers(container: Element): void {
-    container.querySelectorAll('.sb-task-item').forEach((item) => {
-      item.addEventListener('click', (e) => {
-        const target = e.target as HTMLElement;
-        if (target.classList.contains('sb-task-expand')) {
-          e.stopPropagation();
-          const taskId = (item as HTMLElement).dataset.taskId;
-          if (taskId) {
-            toggleTaskExpansion(taskId);
-            this.renderRepos();
-          }
-        } else {
-          const taskId = (item as HTMLElement).dataset.taskId;
-          if (taskId) {
-            // Navigate to task - don't clear selectedTask, let TaskPage handle it
-            setState('sidebarOpen', false);
-            window.history.pushState({}, '', `/task/${taskId}`);
-            window.dispatchEvent(new Event('popstate'));
-          }
-        }
-      });
-    });
   }
 
   private renderTaskTreeNodesForRepo(repoName: string): string {

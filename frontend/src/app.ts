@@ -120,8 +120,8 @@ export class App {
       params.id = parts[1];
     } else if (parts[0] === 'tasks') {
       page = 'tasks';
-    } else if (parts[0] === 'status') {
-      page = 'status';
+    } else if (parts[0] === 'dashboard') {
+      page = 'dashboard';
     } else if (parts[0] === 'settings') {
       page = 'settings';
     } else if (parts[0] === 'channel' && parts[1]) {

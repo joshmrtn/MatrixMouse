@@ -707,6 +707,152 @@
   text-decoration: none;
 }
 
+/* Blockers list for dependency section */
+.blockers-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding-left: var(--spacing-md);
+  margin-top: var(--spacing-xs);
+  width: 100%;
+  max-width: 100%;
+}
+
+.blockers-label {
+  font-size: 9px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.blockers-list .dependency-link {
+  display: block;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  color: var(--text);
+  text-decoration: none;
+  margin-right: 0;
+  margin-bottom: var(--spacing-xs);
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+  font-family: var(--font-mono);
+  /* Allow link to grow to show more title text */
+  width: 100%;
+}
+
+.blockers-list .dependency-link:hover {
+  border-color: var(--green2);
+  color: var(--green);
+  text-decoration: none;
+}
+
+.blocker-id {
+  font-family: var(--font-mono);
+  color: var(--text3);
+  font-size: 9px;
+  margin-right: var(--spacing-sm);
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.blocker-title {
+  color: var(--text);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  /* Let title take remaining space after ID, CSS handles final truncation */
+  max-width: calc(100% - 80px);
+}
+
+/* ============================================================================
+   Blocker Loading & Error States
+   ============================================================================ */
+
+/* Loading skeleton */
+.blocker-skeleton {
+  display: flex;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg2) 0%,
+    var(--bg3) 50%,
+    var(--bg2) 100%
+  );
+  background-size: 200% 100%;
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-rect {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-id {
+  width: 60px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.skeleton-title {
+  flex: 1;
+  height: 16px;
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Error state */
+.blocker-error {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background: var(--bg2);
+  border: 1px dashed var(--amber);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  color: var(--text2);
+}
+
+.blocker-error-icon {
+  flex-shrink: 0;
+}
+
+.blocker-error-message {
+  flex: 1;
+}
+
+.blocker-retry-btn {
+  background: var(--amber);
+  color: #000;
+  border: none;
+  padding: 2px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  transition: background var(--transition-fast);
+}
+
+.blocker-retry-btn:hover {
+  background: var(--amber2);
+}
+
 .dep-id {
   font-family: var(--font-mono);
   color: var(--text3);

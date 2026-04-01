@@ -101,6 +101,35 @@ export interface BlockedTaskEntry {
 }
 
 /**
+ * Blocker task with full details
+ */
+export interface BlockerTask {
+  id: string;
+  title: string;
+}
+
+/**
+ * Blocker load error state
+ */
+export interface BlockerLoadError {
+  type: 'error';
+  message: string;
+  retryable: boolean;
+}
+
+/**
+ * Blocker loading state
+ */
+export interface BlockerLoading {
+  type: 'loading';
+}
+
+/**
+ * Blocker display state - either a task, an error, or loading
+ */
+export type BlockerState = BlockerTask | BlockerLoadError | BlockerLoading;
+
+/**
  * Blocked task report from /blocked endpoint
  */
 export interface BlockedTaskReport {

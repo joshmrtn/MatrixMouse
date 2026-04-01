@@ -37,7 +37,7 @@ describe('Sidebar', () => {
 
     it('renders status tab with correct unicode', () => {
       const element = sidebar.render();
-      const statusTab = element.querySelector('[data-tab="status"] .sb-icon');
+      const statusTab = element.querySelector('[data-tab="dashboard"] .sb-icon');
       expect(statusTab?.textContent).toBe('𝌠');
     });
 
@@ -61,9 +61,9 @@ describe('Sidebar', () => {
     });
 
     it('highlights active tab', () => {
-      setState('currentPage', 'status');
+      setState('currentPage', 'dashboard');
       const element = sidebar.render();
-      const statusTab = element.querySelector('[data-tab="status"]');
+      const statusTab = element.querySelector('[data-tab="dashboard"]');
       expect(statusTab?.classList.contains('active')).toBe(true);
     });
 
@@ -262,14 +262,14 @@ describe('Sidebar', () => {
 
     it('handles tab click navigation', () => {
       const element = sidebar.render();
-      const statusTab = element.querySelector('[data-tab="status"]');
-      
+      const statusTab = element.querySelector('[data-tab="dashboard"]');
+
       const pushStateSpy = vi.spyOn(window.history, 'pushState');
       const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent');
 
       statusTab?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
-      expect(pushStateSpy).toHaveBeenCalledWith({}, '', '/status');
+      expect(pushStateSpy).toHaveBeenCalledWith({}, '', '/dashboard');
       expect(dispatchEventSpy).toHaveBeenCalledWith(expect.any(Event));
     });
 

@@ -32,10 +32,6 @@ export default defineConfig({
         target: 'http://localhost:8080',
         changeOrigin: true,
       },
-      '/status': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
-      },
       '/blocked': {
         target: 'http://localhost:8080',
         changeOrigin: true,
@@ -56,8 +52,43 @@ export default defineConfig({
         target: 'ws://localhost:8080',
         ws: true,
       },
+      '/stop': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/kill': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/estop': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/pending': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/token_usage': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/orchestrator': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      // Status API endpoint - needed for app.ts initial data load
+      '/status': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
     },
   },
+  // Handle SPA fallback for direct navigation
+  appType: 'spa',
   test: {
     globals: true,
     environment: 'jsdom',
