@@ -53,12 +53,12 @@ describe('App Routing Logic', () => {
       expect(params.id).toBe('abc123');
     });
 
-    it('parses /tasks path', () => {
-      const path = '/tasks';
+    it('parses /task-list path', () => {
+      const path = '/task-list';
       const parts = path.split('/').filter(Boolean);
 
       let page = 'channel';
-      if (parts[0] === 'tasks') {
+      if (parts[0] === 'task-list') {
         page = 'tasks';
       }
 

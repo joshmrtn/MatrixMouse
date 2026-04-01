@@ -153,8 +153,10 @@ export class TasksPage {
             <div class="task-title">${escapeHtml(task.title)}</div>
             <div class="task-repo">${escapeHtml(repoName)}</div>
           </div>
-          <div class="task-id">${escapeHtml(task.id)}</div>
-          <div class="task-status status-${escapeHtml(statusClass)}">${escapeHtml(formatStatus(task.status))}</div>
+          <div class="task-meta">
+            <div class="task-status status-${escapeHtml(statusClass)}">${escapeHtml(formatStatus(task.status))}</div>
+            <div class="task-id">${escapeHtml(task.id)}</div>
+          </div>
         </a>
       </div>
     `;

@@ -249,7 +249,11 @@ export class Sidebar {
    * Navigate to a tab/page
    */
   private navigateToTab(tab: string): void {
-    window.history.pushState({}, '', `/${tab}`);
+    if (tab === 'tasks') {
+      window.history.pushState({}, '', '/task-list');
+    } else {
+      window.history.pushState({}, '', `/${tab}`);
+    }
     window.dispatchEvent(new Event('popstate'));
   }
 

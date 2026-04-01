@@ -156,8 +156,8 @@ test.describe('Critical User Flows', () => {
 
   test('complete flow: Tasks → Filter → Select → Navigate to Status', async ({ page }) => {
     // Start at Tasks page
-    await page.goto('/tasks');
-    await expect(page).toHaveURL('/tasks');
+    await page.goto('/task-list');
+    await expect(page).toHaveURL('/task-list');
     
     // Filter by blocked
     const statusFilter = page.locator('#filter-status');
@@ -184,7 +184,7 @@ test.describe('Critical User Flows', () => {
 
   test('complete flow: Tasks → Settings → Change Config → Back to Tasks', async ({ page }) => {
     // Start at Tasks page
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     
     // Navigate to Settings
     await page.locator('[data-tab="settings"]').click();
@@ -202,7 +202,7 @@ test.describe('Critical User Flows', () => {
     
     // Navigate back to Tasks
     await page.locator('[data-tab="tasks"]').click();
-    await expect(page).toHaveURL('/tasks');
+    await expect(page).toHaveURL('/task-list');
     
     // Tasks should still be visible
     await expect(page.locator('.task-item')).toHaveCount(2);
@@ -218,7 +218,7 @@ test.describe('Critical User Flows', () => {
     
     // Navigate to Tasks
     await page.locator('[data-tab="tasks"]').click();
-    await expect(page).toHaveURL('/tasks');
+    await expect(page).toHaveURL('/task-list');
     
     // Navigate to Settings
     await page.locator('[data-tab="settings"]').click();
@@ -254,7 +254,7 @@ test.describe('Critical User Flows', () => {
     });
 
     // Go to Tasks page
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     
     // Click New button
     await page.locator('#add-task-btn').click();
@@ -268,7 +268,7 @@ test.describe('Critical User Flows', () => {
     await page.setViewportSize({ width: 375, height: 667 });
     
     // Start at Tasks
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     
     // Open hamburger menu
     await page.locator('#hamburger-menu').click();
@@ -322,7 +322,7 @@ test.describe('Error Handling Flows', () => {
       await route.fulfill({ status: 500, json: { detail: 'Internal server error' } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     
     // Should show empty state or error message
     await expect(page.locator('.empty-message')).toBeVisible();
@@ -334,7 +334,7 @@ test.describe('Error Handling Flows', () => {
       await route.abort('failed');
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     
     // Should not crash
     await expect(page.locator('#tasks-page')).toBeVisible();

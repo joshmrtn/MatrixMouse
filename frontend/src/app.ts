@@ -118,7 +118,7 @@ export class App {
     if (parts[0] === 'task' && parts[1]) {
       page = 'task';
       params.id = parts[1];
-    } else if (parts[0] === 'tasks') {
+    } else if (parts[0] === 'task-list') {
       page = 'tasks';
     } else if (parts[0] === 'dashboard') {
       page = 'dashboard';

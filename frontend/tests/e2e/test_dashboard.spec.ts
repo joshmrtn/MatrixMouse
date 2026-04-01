@@ -76,7 +76,7 @@ test.describe('Dashboard Page', () => {
       await page.click('[data-tab="tasks"]');
       await page.waitForTimeout(100);
 
-      expect(page.url()).toContain('/tasks');
+      expect(page.url()).toContain('/task-list');
       await expect(page.locator('#tasks-page')).toBeVisible();
     });
   });

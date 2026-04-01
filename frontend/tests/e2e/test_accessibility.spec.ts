@@ -143,7 +143,7 @@ test.describe('Accessibility - Tasks Page', () => {
   });
 
   test('should not have accessibility violations', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#tasks-page');
 
     const accessibilityScanResults = await new AxeBuilder({ page }).analyze();
@@ -151,7 +151,7 @@ test.describe('Accessibility - Tasks Page', () => {
   });
 
   test('should have accessible form controls', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     // Check filter labels
     const statusLabel = page.locator('label[for="filter-status"]');
@@ -166,7 +166,7 @@ test.describe('Accessibility - Tasks Page', () => {
   });
 
   test('should support keyboard navigation', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     // Tab through all interactive elements
     await page.keyboard.press('Tab');
@@ -179,7 +179,7 @@ test.describe('Accessibility - Tasks Page', () => {
   });
 
   test('should have accessible task list', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     const taskList = page.locator('#tasks-list');
     await expect(taskList).toHaveAttribute('role', 'list');
@@ -191,7 +191,7 @@ test.describe('Accessibility - Tasks Page', () => {
   });
 
   test('should have proper button labels', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     const addButton = page.locator('#add-task-btn');
     await expect(addButton).toBeVisible();
@@ -422,7 +422,7 @@ test.describe('Accessibility - Sidebar & Navigation', () => {
 
   test('should have accessible hamburger menu', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     const hamburger = page.locator('#hamburger-menu');
     await expect(hamburger).toHaveAttribute('aria-label');
@@ -432,7 +432,7 @@ test.describe('Accessibility - Sidebar & Navigation', () => {
   });
 
   test('should have accessible sidebar navigation', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     const navItems = page.locator('.sb-item');
     const count = await navItems.count();
@@ -446,7 +446,7 @@ test.describe('Accessibility - Sidebar & Navigation', () => {
   });
 
   test('should have proper landmark regions', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     // Should have main landmark
     const main = page.locator('main');
@@ -458,7 +458,7 @@ test.describe('Accessibility - Sidebar & Navigation', () => {
   });
 
   test('should have skip link for keyboard users', async ({ page }) => {
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     // Check for skip link (should be present for accessibility)
     const skipLink = page.locator('a[href="#main"], a[href="#main-content"]');
@@ -468,7 +468,7 @@ test.describe('Accessibility - Sidebar & Navigation', () => {
 
   test('should manage focus when sidebar opens/closes', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     // Open sidebar
     await page.click('#hamburger-menu');
@@ -501,7 +501,7 @@ test.describe('Accessibility - Mobile', () => {
       await route.fulfill({ status: 200, json: { status: 'ok' } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     const accessibilityScanResults = await new AxeBuilder({ page })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
@@ -523,7 +523,7 @@ test.describe('Accessibility - Mobile', () => {
       await route.fulfill({ status: 200, json: { status: 'ok' } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
 
     // Check tap target sizes
     const interactiveElements = page.locator('button, a, input, [role="button"]');

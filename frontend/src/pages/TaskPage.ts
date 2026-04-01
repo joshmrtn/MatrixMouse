@@ -132,7 +132,7 @@ export class TaskPage {
         },
         onTaskCancelled: () => {
           // Navigate back to tasks list
-          window.history.pushState({}, '', '/tasks');
+          window.history.pushState({}, '', '/task-list');
           window.dispatchEvent(new Event('popstate'));
         },
       });

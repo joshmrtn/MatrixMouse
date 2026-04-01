@@ -37,6 +37,8 @@ import logging
 import threading
 from typing import Any
 
+from fastapi import HTTPException
+
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,26 @@ def _register_routes(app, comms_module: Any) -> None:
     @app.get("/", response_class=HTMLResponse)
     async def index():
         """Serve the self-contained web UI."""
+        return HTMLResponse(build_html())
+
+    @app.get("/{path:path}")
+    async def spa_fallback(path: str):
+        """
+        Serve index.html for SPA routes (client-side routing).
+
+        This allows direct navigation and page refresh on any frontend route
+        like /task-list, /dashboard, /task/{id}, etc.
+
+        API routes are excluded and will return 404 from this handler.
+        """
+        API_PREFIXES = (
+            'tasks/', 'repos/', 'status', 'blocked',
+            'config', 'context', 'health', 'ws',
+            'stop', 'kill', 'estop', 'pending',
+            'token_usage', 'orchestrator', 'interject',
+        )
+        if any(path.startswith(p) for p in API_PREFIXES):
+            raise HTTPException(status_code=404)
         return HTMLResponse(build_html())
 
     @app.on_event("startup")

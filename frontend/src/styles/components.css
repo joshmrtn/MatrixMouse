@@ -154,7 +154,6 @@
 
 .status-running {
   background: var(--green);
-  box-shadow: 0 0 4px var(--green);
 }
 
 .status-blocked_by_task {
@@ -163,7 +162,6 @@
 
 .status-blocked_by_human {
   background: var(--amber);
-  box-shadow: 0 0 4px var(--amber);
 }
 
 .status-waiting {
@@ -662,10 +660,60 @@
 .meta-value.status-blocked_by_human,
 .meta-value.status-blocked_by_task {
   color: var(--amber);
+  border: 1px solid var(--amber);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
 
 .meta-value.status-running {
   color: var(--green);
+  border: 1px solid var(--green);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+.meta-value.status-waiting {
+  color: var(--blue);
+  border: 1px solid var(--blue);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+.meta-value.status-complete {
+  color: var(--text3);
+  border: 1px solid var(--text3);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  opacity: 0.7;
+}
+
+.meta-value.status-cancelled {
+  color: var(--red);
+  border: 1px solid var(--red);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  opacity: 0.7;
+}
+
+.meta-value.status-pending {
+  color: var(--text3);
+  border: 1px solid var(--text3);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+.meta-value.status-ready {
+  color: var(--text3);
+  border: 1px solid var(--text3);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
 
 #task-dependencies {
@@ -1121,7 +1169,7 @@
 
 .task-link {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto;
   gap: var(--spacing-md);
   align-items: center;
   padding: var(--spacing-sm) var(--spacing-md);
@@ -1159,21 +1207,30 @@
   white-space: nowrap;
 }
 
-.task-id {
-  font-family: var(--font-mono);
-  color: var(--text3);
-  font-size: 10px;
+.task-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   flex-shrink: 0;
+  width: 100px;
 }
 
 .task-status {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  min-width: 100px;
   font-weight: 600;
   background: none !important;
-  text-align: right;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.task-id {
+  font-family: var(--font-mono);
+  color: var(--text3);
+  font-size: 10px;
+  text-align: left;
+  white-space: nowrap;
 }
 
 .task-status.status-ready,

@@ -42,8 +42,129 @@ dev = [
     "pytest-cov>=7.1.0",
     "playwright>=1.50.0",
     "pyright>=1.1.0",
+    "poethepoet>=0.25.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+
+# ============================================================================
+# Poe the Poet - Task Runner
+# ============================================================================
+
+[tool.poe.tasks]
+
+# --- Build ---
+build-frontend = { shell = """
+set -e
+echo "🔨 Building frontend..."
+cd frontend
+npm run build
+cd ..
+echo "📦 Copying to src/matrixmouse/web/..."
+rm -rf src/matrixmouse/web/*
+cp -r frontend/dist/* src/matrixmouse/web/
+echo "✅ Frontend built successfully"
+""", help = "Build TypeScript frontend" }
+
+build-backend = { cmd = "uv build", help = "Build Python package" }
+build = { sequence = ["build-frontend", "build-backend"], help = "Build frontend + backend" }
+
+# --- Deploy ---
+deploy-install = { shell = """
+    uv pip install --upgrade .
+    echo ""
+    echo "✅ Deployment complete!"
+    echo ""
+    echo "Restart the service with:"
+    echo "  sudo systemctl restart matrixmouse"
+""" }
+
+deploy = { sequence = ["build", "deploy-install"], help = "Full build + install (development)" }
+
+# --- System Installation ---
+# For production/development system-wide installs (requires sudo)
+# Exactly matches the original force-upgrade.sh behavior
+force-install = { shell = """
+    echo "🛑 Stopping MatrixMouse service..."
+    sudo systemctl stop matrixmouse
+    
+    echo "📦 Reinstalling from source..."
+    SYSTEM_PYTHON="$(command -v python3.11)"
+    sudo UV_TOOL_DIR=/usr/local/share/uv/tools \\
+        uv tool install . \\
+        --python "$SYSTEM_PYTHON" \\
+        --force \\
+        --no-cache
+    
+    echo "🔧 Setting permissions..."
+    sudo chmod -R a+rX /usr/local/share/uv/tools/matrixmouse/
+    
+    echo "🚀 Restarting service..."
+    sudo systemctl restart matrixmouse
+    
+    echo ""
+    echo "✅ Force install complete!"
+    echo ""
+    echo "Following logs (Ctrl+C to exit)..."
+    echo ""
+    journalctl -u matrixmouse -f
+""", help = "Force reinstall system-wide (like old force-upgrade.sh)" }
+
+# --- Development ---
+dev-frontend = { shell = "cd frontend && npm run dev", help = "Start frontend dev server on :3000" }
+dev-backend = { cmd = "uv run matrixmouse-service", help = "Start backend service" }
+
+# Poe handles parallel execution natively!
+dev.parallel = [
+    "dev-frontend",
+    "dev-backend"
+]
+
+# --- Testing ---
+test-python = { cmd = "uv run pytest -v --tb=short", help = "Run Python tests" }
+test-python-cov = { cmd = "uv run pytest --cov=matrixmouse --cov-report=term-missing", help = "Run tests with coverage" }
+test-frontend = { shell = "cd frontend && npm run test --run", help = "Run frontend unit tests" }
+test-frontend-e2e = { shell = "cd frontend && npm run test:e2e", help = "Run frontend E2E tests" }
+test = { sequence = ["test-python", "test-frontend"], help = "Run all tests" }
+
+# --- Quality Checks ---
+lint-python = { cmd = "uv run ruff check src/ tests/", help = "Run Python linter" }
+lint-frontend = { shell = "cd frontend && npm run lint", help = "Run ESLint" }
+lint = { sequence = ["lint-python", "lint-frontend"], help = "Run all linters" }
+
+typecheck-python = { cmd = "uv run pyright", help = "Run Python type checker" }
+typecheck-frontend = { shell = "cd frontend && npm run typecheck", help = "Run TypeScript compiler" }
+typecheck = { sequence = ["typecheck-python", "typecheck-frontend"], help = "Run all type checks" }
+
+check = { sequence = ["lint", "typecheck", "test"], help = "Run all quality checks" }
+
+# --- Environment ---
+install = { cmd = "uv sync", help = "Sync Python dependencies" }
+install-frontend = { shell = "cd frontend && npm install", help = "Install frontend dependencies" }
+install-all = { sequence = ["install", "install-frontend"], help = "Install all dependencies" }
+
+clean = { shell = """
+    echo "🧹 Cleaning build artifacts..."
+    rm -rf dist/
+    rm -rf src/matrixmouse/web/*
+    rm -rf frontend/dist/
+    rm -rf frontend/node_modules/
+    rm -rf .venv/
+    rm -rf .pytest_cache/
+    rm -rf .coverage
+    rm -rf htmlcov/
+    find . -type d -name "__pycache__" -exec rm -rf {} +
+    find . -type d -name "*.egg-info" -exec rm -rf {} +
+    echo "✅ Clean complete"
+""", help = "Remove build artifacts" }
+
+fresh = { sequence = ["clean", "install-all"], help = "Clean and reinstall everything" }
+
+# --- Service Management ---
+start = { shell = "sudo systemctl start matrixmouse", help = "Start matrixmouse service" }
+stop = { shell = "sudo systemctl stop matrixmouse", help = "Stop matrixmouse service" }
+restart = { shell = "sudo systemctl restart matrixmouse", help = "Restart matrixmouse service" }
+status = { shell = "sudo systemctl status matrixmouse", help = "Check service status" }
+logs = { shell = "sudo journalctl -u matrixmouse -f", help = "View service logs (follow mode)" }

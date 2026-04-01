@@ -156,7 +156,7 @@ test.describe('Visual Regression - Desktop (1280x720)', () => {
       await route.fulfill({ status: 200, json: { tasks: mockTasks, count: 3 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#tasks-page');
     await expect(page).toHaveScreenshot('tasks-all-desktop.png', { fullPage: true });
   });
@@ -166,7 +166,7 @@ test.describe('Visual Regression - Desktop (1280x720)', () => {
       await route.fulfill({ status: 200, json: { tasks: mockTasks, count: 3 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#tasks-page');
     
     // Apply filter
@@ -290,7 +290,7 @@ test.describe('Visual Regression - Mobile (375x667)', () => {
       await route.fulfill({ status: 200, json: { tasks: mockTasks, count: 3 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#tasks-page');
     await expect(page).toHaveScreenshot('tasks-mobile.png', { fullPage: true });
   });
@@ -330,7 +330,7 @@ test.describe('Visual Regression - Mobile (375x667)', () => {
       await route.fulfill({ status: 200, json: { tasks: mockTasks, count: 3 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#hamburger-menu');
     
     // Open sidebar
@@ -365,7 +365,7 @@ test.describe('Visual Regression - Tablet (768x1024)', () => {
       await route.fulfill({ status: 200, json: { tasks: mockTasks, count: 3 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#tasks-page');
     await expect(page).toHaveScreenshot('tasks-tablet.png', { fullPage: true });
   });
@@ -382,7 +382,7 @@ test.describe('Visual Regression - Component States', () => {
       await route.fulfill({ status: 200, json: { tasks: [], count: 0 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('.empty-message');
     await expect(page).toHaveScreenshot('tasks-empty-state.png', { fullPage: true });
   });
@@ -404,7 +404,7 @@ test.describe('Visual Regression - Component States', () => {
       await route.fulfill({ status: 500, json: { detail: 'Internal server error' } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#tasks-page');
     await expect(page).toHaveScreenshot('tasks-error-state.png', { fullPage: true });
   });
@@ -414,7 +414,7 @@ test.describe('Visual Regression - Component States', () => {
       await route.fulfill({ status: 200, json: { tasks: mockTasks, count: 3 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('.task-item');
     
     // Hover over first task
@@ -453,7 +453,7 @@ test.describe('Visual Regression - Dark/Light Themes', () => {
       await route.fulfill({ status: 200, json: { tasks: mockTasks, count: 3 } });
     });
 
-    await page.goto('/tasks');
+    await page.goto('/task-list');
     await page.waitForSelector('#tasks-page');
     
     // Ensure light theme (default)

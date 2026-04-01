@@ -102,6 +102,34 @@ matrixmouse tasks add
 ```
 And navigate to the web UI to watch.
 
+### Building & Deployment
+
+MatrixMouse uses [Poe the Poet](https://poethepoet.natn.io/) for task automation. All build and deployment tasks are configured in `pyproject.toml`.
+
+```bash
+# Development (installs to current environment)
+uv run poe deploy
+
+# Production/System-wide upgrade (requires sudo, replaces force-upgrade.sh)
+uv run poe force-install
+
+# Build frontend and backend
+uv run poe build
+
+# Run development servers (frontend + backend in parallel)
+uv run poe dev
+
+# Run all tests
+uv run poe test
+
+# View all available tasks
+uv run poe --help
+```
+
+**Note:** First-time installation requires running `./install.sh`. The `force-install` task is for upgrades only.
+
+For detailed deployment instructions, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 
 ### Configuration
 
