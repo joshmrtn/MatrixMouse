@@ -42,6 +42,7 @@ class ProjectAnalyzer:
         calls: Dict of caller -> set of callees.
         called_by: Dict of callee -> set of callers.
         imports: Dict of filepath -> list of import strings.
+        classes: Alias for symbols (backward compatibility with graph.py).
     """
 
     def __init__(self) -> None:
@@ -56,6 +57,16 @@ class ProjectAnalyzer:
         self.calls: dict[str, set[str]] = {}
         self.called_by: dict[str, set[str]] = {}
         self.imports: dict[str, list[str]] = {}
+
+    @property
+    def classes(self) -> dict[str, dict]:
+        """
+        Alias for symbols (backward compatibility with graph.py).
+
+        graph.py used 'classes' as the field name; codemap uses 'symbols'.
+        This property allows existing code to continue working during migration.
+        """
+        return self.symbols
 
     def analyze_file(self, filepath: str) -> None:
         """

@@ -2,7 +2,7 @@
 matrixmouse/tools/code_tools.py
 
 Tools for inspecting the project's code structure using the AST graph
-built by graph.py.
+built by codemap.
 
 All tools in this module are read-only. They query the graph and read
 source files but never modify anything.
@@ -24,7 +24,7 @@ Do not add file writing, git, or navigation tools here.
 import logging
 from pathlib import Path
 
-from matrixmouse.graph import ProjectAnalyzer
+from matrixmouse.codemap import ProjectAnalyzer
 from matrixmouse.tools._safety import project_root
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ def configure(graph: ProjectAnalyzer) -> None:
     Safe to call again after the graph is updated (e.g. after a file write).
 
     Args:
-        graph: A populated ProjectAnalyzer instance from graph.py.
+        graph: A populated ProjectAnalyzer instance from codemap.
     """
     global _graph
     _graph = graph
