@@ -19,7 +19,3 @@ def reset_logging():
     # Clear any handlers that might have been added
     logging.getLogger().handlers = []
     yield
-
-
-# Enable Playwright for E2E tests
-pytest_plugins = ["playwright.sync_api"]

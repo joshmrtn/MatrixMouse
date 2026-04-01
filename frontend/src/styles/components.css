@@ -1212,7 +1212,8 @@
   flex-direction: column;
   gap: 2px;
   flex-shrink: 0;
-  width: 100px;
+  min-width: 100px;
+  max-width: 200px;
 }
 
 .task-status {

@@ -1,11 +1,11 @@
 """matrixmouse/test_server.py
 
-Test server for MatrixMouse frontend integration testing.
+Test server for MatrixMouse backend testing.
 
 This module provides a FULLY FUNCTIONAL MatrixMouse backend that:
 - Uses the REAL orchestrator, agent loop, router, context, memory, etc.
 - Uses in-memory repositories (no disk I/O for persistence)
-- Uses fake LLM backend (no network/Ollama required)  
+- Uses fake LLM backend (no network/Ollama required)
 - Uses mocked tools (no real filesystem/git operations)
 - Runs as a standard HTTP server with WebSocket support
 
@@ -27,12 +27,12 @@ Everything else is REAL:
 - All business logic
 
 Usage:
-    from matrixmouse.test_server import TestServer
-    
+    from matrixmouse.test_server import MatrixMouseTestServer
+
     with MatrixMouseTestServer() as server:
         # Real backend is running at server.base_url
         server.add_task(title="Test task", ...)
-        
+
         # Make HTTP requests
         import requests
         resp = requests.get(f"{server.base_url}/tasks")
@@ -65,121 +65,6 @@ from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.router import Router
 
 logger = logging.getLogger(__name__)
-
-
-def start_server_with_static_files(
-    config: MatrixMouseConfig,
-    paths: MatrixMousePaths,
-    static_root: str | None = None,
-) -> None:
-    """
-    Start web server with static file serving for E2E tests.
-    
-    Serves the frontend SPA while keeping API routes functional.
-    Uses a custom route that checks if the path is an API route first.
-    
-    Args:
-        config: MatrixMouse configuration
-        paths: MatrixMouse paths
-        static_root: Root directory for static files (frontend build)
-    """
-    import asyncio
-    import uvicorn
-    from matrixmouse.api import app
-    from matrixmouse import comms as comms_module
-    from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import FileResponse, JSONResponse
-    from starlette.routing import Route
-    import os
-    
-    port = config.server_port
-    
-    # Register comms listener
-    def _run() -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        broadcaster_queue: asyncio.Queue = asyncio.Queue()
-        
-        # Mount static files if static_root is provided
-        if static_root and os.path.exists(static_root):
-            # Mount static assets at /assets
-            app.mount("/assets", StaticFiles(directory=f"{static_root}/assets", html=False), name="static-assets")
-            
-            # Create a catch-all route for SPA that runs LAST
-            async def spa_fallback(request):
-                """Serve index.html for SPA routes that aren't API routes."""
-                path = request.url.path
-                
-                # Serve index.html for root and SPA routes
-                if path == '/' or path == '':
-                    index_path = os.path.join(static_root, "index.html")
-                    if os.path.exists(index_path):
-                        return FileResponse(index_path)
-                
-                # Exact SPA routes that should serve index.html
-                spa_routes = ['/tasks', '/status', '/settings', '/channel']
-                
-                # Check for exact SPA route matches
-                for route in spa_routes:
-                    if path == route or path.startswith(route + '/'):
-                        index_path = os.path.join(static_root, "index.html")
-                        if os.path.exists(index_path):
-                            return FileResponse(index_path)
-                
-                # Check for task detail route /task/{id}
-                if path.startswith('/task/'):
-                    index_path = os.path.join(static_root, "index.html")
-                    if os.path.exists(index_path):
-                        return FileResponse(index_path)
-                
-                # API routes return 404 JSON
-                return JSONResponse({"detail": "not found"}, status_code=404)
-            
-            # Add the catch-all route at the END of the route list
-            app.router.routes.append(Route("/{full_path:path}", spa_fallback))
-            
-            logger.info(f"Serving static files from {static_root}")
-        
-        def _register_comms_listener(
-            comms_module_local: Any,
-            queue: asyncio.Queue,
-            event_loop: asyncio.AbstractEventLoop,
-        ) -> None:
-            """Register comms listener for WebSocket events."""
-            def _on_event(event) -> None:
-                payload = json.dumps({
-                    "type": event.event_type,
-                    "data": event.data,
-                })
-                asyncio.run_coroutine_threadsafe(
-                    queue.put(payload),
-                    event_loop,
-                )
-            
-            manager = comms_module_local.get_manager()
-            if manager:
-                manager.register_listener(_on_event)
-        
-        _register_comms_listener(comms_module, broadcaster_queue, loop)
-        app.state.broadcaster_queue = broadcaster_queue
-        
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=port,
-            log_level="warning",
-            access_log=False,
-            loop="none",
-        )
-    
-    thread = threading.Thread(
-        target=_run,
-        daemon=True,
-        name="matrixmouse-server",
-    )
-    thread.start()
-    logger.info(f"Web server started on port {port} with static files")
 
 
 # ============================================================================
@@ -319,9 +204,6 @@ class MatrixMouseTestServer:
         # Create paths
         self.paths = self._create_paths()
 
-        # Find frontend dist directory for static file serving
-        self._static_root = self._find_frontend_dist()
-
         # Initialize REAL Orchestrator (this is the real deal!)
         self.orchestrator = Orchestrator(
             config=self.mm_config,
@@ -384,23 +266,6 @@ class MatrixMouseTestServer:
         # For 'fake' backend, host is None by default
         self.orchestrator._router._backend_cache[(None, "fake")] = self.llm_backend
 
-    def _find_frontend_dist(self) -> str | None:
-        """Find the frontend dist directory for static file serving."""
-        # Try relative to this file
-        current_file = Path(__file__).parent
-        possible_paths = [
-            current_file.parent.parent / "frontend" / "dist",
-            current_file.parent / "frontend" / "dist",
-            Path.cwd() / "frontend" / "dist",
-        ]
-        
-        for path in possible_paths:
-            if path.exists() and (path / "index.html").exists():
-                return str(path)
-        
-        logger.warning("Frontend dist directory not found. E2E tests will not have UI.")
-        return None
-
     def start(self) -> None:
         """Start the test server with real orchestrator loop."""
         logger.info(f"Starting test server on {self.config.host}:{self.config.port}")
@@ -427,13 +292,10 @@ class MatrixMouseTestServer:
             budget_tracker=None,
         )
 
-        # Start web server with static file serving (this is real!)
-        start_server_with_static_files(
-            self.mm_config,
-            self.paths,
-            static_root=self._static_root,
-        )
-        
+        # Start web server (API only, no frontend serving)
+        from matrixmouse.server import start_server
+        start_server(self.mm_config, self.paths)
+
         # Start orchestrator loop in background thread (this is REAL!)
         self._orchestrator_thread = threading.Thread(
             target=self._run_orchestrator,

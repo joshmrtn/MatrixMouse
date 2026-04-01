@@ -19,14 +19,17 @@ export function renderRouter(
   // Clear container
   container.innerHTML = '';
 
+  // Default params to empty object if undefined
+  const safeParams = params || {};
+
   switch (page) {
     case 'channel':
-      new ChannelPage(params.scope || 'workspace').render(container);
+      new ChannelPage(safeParams.scope || 'workspace').render(container);
       break;
 
     case 'task':
-      if (params.id) {
-        new TaskPage(params.id).render(container);
+      if (safeParams.id) {
+        new TaskPage(safeParams.id).render(container);
       }
       break;
 

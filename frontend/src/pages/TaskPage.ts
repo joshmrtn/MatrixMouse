@@ -60,7 +60,7 @@ export class TaskPage {
             <span class="meta-label">Status:</span>
             <span class="meta-value status-${escapeHtml(this.task.status)}">${formatStatus(this.task.status)}</span>
           </span>
-          <span class="meta-item">
+          <span class="meta-item" data-meta="role">
             <span class="meta-label">Role:</span>
             <span class="meta-value">${formatRole(this.task.role)}</span>
           </span>
@@ -229,20 +229,13 @@ export class TaskPage {
       statusEl.textContent = formatStatus(this.task.status);
     }
 
-    // Update role
-    const roleEl = this.element.querySelector('.meta-value');
-    if (roleEl) {
-      // Find the role meta item
-      const metaItems = this.element.querySelectorAll('.meta-item');
-      metaItems.forEach((item) => {
-        const label = item.querySelector('.meta-label');
-        if (label?.textContent === 'Role:') {
-          const value = item.querySelector('.meta-value');
-          if (value) {
-            value.textContent = formatRole(this.task!.role);
-          }
-        }
-      });
+    // Update role using stable data attribute selector
+    const roleMetaItem = this.element.querySelector('[data-meta="role"]');
+    if (roleMetaItem) {
+      const roleValue = roleMetaItem.querySelector('.meta-value');
+      if (roleValue) {
+        roleValue.textContent = formatRole(this.task.role);
+      }
     }
   }
 }

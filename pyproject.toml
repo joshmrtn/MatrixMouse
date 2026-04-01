@@ -40,7 +40,6 @@ matrixmouse-service = "matrixmouse._service:main"
 dev = [
     "pytest>=8.0",
     "pytest-cov>=7.1.0",
-    "playwright>=1.50.0",
     "pyright>=1.1.0",
     "poethepoet>=0.25.0",
 ]
@@ -48,6 +47,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "e2e: marks tests as end-to-end tests requiring server and browser (deselect with '-m \"not e2e\"')",
+    "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
+]
 
 # ============================================================================
 # Poe the Poet - Task Runner
@@ -123,11 +126,13 @@ dev.parallel = [
 ]
 
 # --- Testing ---
-test-python = { cmd = "uv run pytest -v --tb=short", help = "Run Python tests" }
+test-python = { cmd = "uv run pytest -v --tb=short -m 'not e2e'", help = "Run Python unit tests" }
 test-python-cov = { cmd = "uv run pytest --cov=matrixmouse --cov-report=term-missing", help = "Run tests with coverage" }
-test-frontend = { shell = "cd frontend && npm run test --run", help = "Run frontend unit tests" }
-test-frontend-e2e = { shell = "cd frontend && npm run test:e2e", help = "Run frontend E2E tests" }
-test = { sequence = ["test-python", "test-frontend"], help = "Run all tests" }
+test-python-all = { cmd = "uv run pytest -v --tb=short", help = "Run ALL Python tests" }
+test-frontend = { shell = "cd frontend && npm run test -- --run", help = "Run frontend unit tests (no watch mode)" }
+test-frontend-e2e = { shell = "cd frontend && npm run test:e2e", help = "Run frontend E2E tests (TypeScript)" }
+test = { sequence = ["test-python", "test-frontend"], help = "Run all unit tests" }
+test-all = { sequence = ["test-python-all", "test-frontend"], help = "Run all tests (Python + frontend unit)" }
 
 # --- Quality Checks ---
 lint-python = { cmd = "uv run ruff check src/ tests/", help = "Run Python linter" }
