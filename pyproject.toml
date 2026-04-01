@@ -20,6 +20,8 @@ dependencies = [
     "uvicorn[standard]>=0.41.0",
     "PyGithub>=2.0",
     "croniter>=6.2.2",
+    "tree-sitter>=0.22",
+    "tree-sitter-python>=0.22",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

@@ -24,6 +24,13 @@ from matrixmouse.codemap._types import LanguageExtractor, ExtractionResult
 from matrixmouse.codemap._analyzer import ProjectAnalyzer, analyze_project
 from matrixmouse.codemap._registry import register_extractor, _registry
 
+# Import codemap to trigger PythonExtractor registration
+from matrixmouse import codemap as _codemap  # noqa: F401
+
+
+# Path to fixtures directory
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
 
 # ---------------------------------------------------------------------------
 # Test extractors
@@ -80,8 +87,11 @@ class TwoFuncExtractor(LanguageExtractor):
 
 @pytest.fixture(autouse=True)
 def clear_registry() -> None:
-    """Clear the registry before and after each test."""
+    """Clear the registry before and after each test, then re-register PythonExtractor."""
     _registry.clear()
+    # Re-register PythonExtractor for this test
+    from matrixmouse.codemap.extractors.python import PythonExtractor
+    register_extractor(PythonExtractor())
     yield
     _registry.clear()
 
@@ -350,3 +360,107 @@ class TestAnalyzeProject:
 
         # Should only analyze main.empty
         assert len(analyzer.functions) == 0  # EmptyExtractor returns empty
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: ProjectAnalyzer + PythonExtractor
+# ---------------------------------------------------------------------------
+
+class TestAnalyzerWithPythonExtractor:
+    """
+    Integration tests for ProjectAnalyzer working with PythonExtractor.
+
+    These tests verify the full pipeline: file → PythonExtractor →
+    ProjectAnalyzer → graph data.
+    """
+
+    def test_analyze_file_simple_class(self, tmp_path: Path) -> None:
+        """analyze_file on simple_class.py populates functions and symbols."""
+        # PythonExtractor is auto-registered via codemap import
+        from matrixmouse.codemap.extractors.python import PythonExtractor
+
+        analyzer = ProjectAnalyzer()
+        fixture_path = FIXTURES_DIR / "simple_class.py"
+
+        analyzer.analyze_file(str(fixture_path))
+
+        assert "Animal" in analyzer.symbols
+        assert "Animal.__init__" in analyzer.functions
+        assert "Animal.speak" in analyzer.functions
+        assert "standalone" in analyzer.functions
+
+    def test_analyze_file_nested_functions(self, tmp_path: Path) -> None:
+        """analyze_file on nested_functions.py populates calls and called_by."""
+        analyzer = ProjectAnalyzer()
+        fixture_path = FIXTURES_DIR / "nested_functions.py"
+
+        analyzer.analyze_file(str(fixture_path))
+
+        assert "outer" in analyzer.calls
+        assert "inner" in analyzer.calls["outer"]
+        assert "helper" in analyzer.calls["outer"]
+        assert "outer" in analyzer.called_by["inner"]
+
+    def test_analyze_file_imports(self, tmp_path: Path) -> None:
+        """analyze_file on imports_only.py populates imports."""
+        analyzer = ProjectAnalyzer()
+        fixture_path = FIXTURES_DIR / "imports_only.py"
+
+        analyzer.analyze_file(str(fixture_path))
+
+        assert str(fixture_path) in analyzer.imports
+        imports = analyzer.imports[str(fixture_path)]
+        assert "os" in imports
+        assert "from collections import defaultdict" in imports
+
+    def test_update_file_removes_stale(self, tmp_path: Path) -> None:
+        """update_file removes stale entries and adds new ones."""
+        # Create a temp Python file
+        test_file = tmp_path / "test.py"
+        test_file.write_text("""
+def func1():
+    pass
+""")
+
+        analyzer = ProjectAnalyzer()
+        analyzer.analyze_file(str(test_file))
+
+        assert "func1" in analyzer.functions
+
+        # Update the file
+        test_file.write_text("""
+def func2():
+    pass
+""")
+
+        analyzer.update_file(str(test_file))
+
+        assert "func1" not in analyzer.functions
+        assert "func2" in analyzer.functions
+
+    def test_analyze_project_with_python_files(self, tmp_path: Path) -> None:
+        """analyze_project walks and analyzes Python files correctly."""
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "subdir").mkdir()
+
+        # Write Python files
+        (root / "main.py").write_text("""
+def main():
+    helper()
+
+def helper():
+    pass
+""")
+        (root / "subdir" / "utils.py").write_text("""
+class Utils:
+    def util_method(self):
+        pass
+""")
+
+        analyzer = analyze_project(str(root))
+
+        assert "main" in analyzer.functions
+        assert "helper" in analyzer.functions
+        assert "Utils" in analyzer.symbols
+        assert "Utils.util_method" in analyzer.functions
