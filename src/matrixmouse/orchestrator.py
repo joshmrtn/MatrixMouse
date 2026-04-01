@@ -1312,7 +1312,7 @@ class Orchestrator:
             RunResult with loop outcome and stuck detector.
         """
         task = ctx.task
-        from matrixmouse.tools import task_tools, tools_for_role_list
+        from matrixmouse.tools import task_tools, tools_for_role_list, code_tools, file_tools
         from matrixmouse.tools import comms_tools
         from matrixmouse.comms import poll_interjection, get_manager
         from matrixmouse import memory
@@ -1332,6 +1332,11 @@ class Orchestrator:
             self.queue, task.id, self.config,
             cwd=cwd, ws_state_repo=self._ws_state_repo
         )
+
+        # Configure code_tools and file_tools with the task's graph
+        if ctx.graph is not None:
+            code_tools.configure(ctx.graph)
+            file_tools.configure(ctx.graph)
 
         comms_tools.configure(self.config)
 

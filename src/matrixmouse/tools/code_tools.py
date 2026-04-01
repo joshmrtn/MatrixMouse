@@ -166,10 +166,21 @@ def get_function_list(filename: str) -> str:
     if not file_functions:
         # Try matching by basename in case the graph used a different root
         basename = Path(filename).name
-        file_functions = {
+        matches = {
             name: info for name, info in graph.functions.items()
             if Path(info.get("file", "")).name == basename
         }
+        
+        # Check for basename ambiguity
+        if matches:
+            matched_files = set(Path(info.get("file", "")).resolve() for info in matches.values())
+            if len(matched_files) > 1:
+                paths = "\n  ".join(sorted(str(p) for p in matched_files))
+                return (
+                    f"WARNING: '{basename}' matched multiple files — "
+                    f"use a more specific path:\n  {paths}"
+                )
+            file_functions = matches
 
     if not file_functions:
         return (
@@ -356,10 +367,22 @@ def get_imports(filename: str) -> str:
     if imports is None:
         # Fallback: try by basename
         basename = Path(filename).name
-        for path, imps in graph.imports.items():
-            if Path(path).name == basename:
-                imports = imps
-                break
+        matched_paths = [
+            path for path in graph.imports.keys()
+            if Path(path).name == basename
+        ]
+        
+        # Check for basename ambiguity
+        if matched_paths:
+            resolved_matches = set(Path(p).resolve() for p in matched_paths)
+            if len(resolved_matches) > 1:
+                paths = "\n  ".join(sorted(str(p) for p in resolved_matches))
+                return (
+                    f"WARNING: '{basename}' matched multiple files — "
+                    f"use a more specific path:\n  {paths}"
+                )
+            # Single match — use it
+            imports = graph.imports.get(matched_paths[0])
 
     if not imports:
         return f"No imports found for '{filename}'."
