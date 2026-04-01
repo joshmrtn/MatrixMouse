@@ -173,6 +173,27 @@ def make_loop_result(
     )
 
 
+def make_run_result(
+    exit_reason=LoopExitReason.COMPLETE,
+    decision_type="",
+    turns=5,
+    summary="done",
+    messages=None,
+) -> "RunResult":
+    """Create a RunResult for mocking _run_agent return value."""
+    from matrixmouse.orchestrator import RunResult
+    return RunResult(
+        loop_result=make_loop_result(
+            exit_reason=exit_reason,
+            decision_type=decision_type,
+            turns=turns,
+            summary=summary,
+            messages=messages,
+        ),
+        detector=MagicMock(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # _should_yield
 # ---------------------------------------------------------------------------
@@ -1822,4 +1843,190 @@ class TestBackendExhausted:
         result = orch._get_and_clear_exhausted_backends()
         # All backends should be recorded
         assert result == set(backends)
+
+
+# ---------------------------------------------------------------------------
+# TaskRunContext tests (Phase 3 — #18 TreeSitter Integration)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskRunContext:
+    """Tests for TaskRunContext dataclass and per-task graph construction."""
+
+    @pytest.fixture(autouse=True)
+    def ensure_python_extractor_registered(self) -> None:
+        """Ensure PythonExtractor is registered for these tests."""
+        from matrixmouse.codemap._registry import register_extractor, _registry
+        from matrixmouse.codemap.extractors.python import PythonExtractor
+        
+        # Register PythonExtractor if not already registered
+        if ".py" not in _registry:
+            register_extractor(PythonExtractor())
+
+    def test_task_run_context_has_graph_field(self, tmp_path: Path) -> None:
+        """TaskRunContext has task and graph fields."""
+        from matrixmouse.orchestrator import TaskRunContext
+        from matrixmouse.codemap import ProjectAnalyzer
+        from matrixmouse.task import Task, AgentRole
+
+        task = Task(
+            title="Test task",
+            description="Test description",
+            role=AgentRole.CODER,
+        )
+        graph = ProjectAnalyzer()
+        ctx = TaskRunContext(task=task, graph=graph)
+
+        assert ctx.task is task
+        assert ctx.graph is graph
+        assert isinstance(ctx.graph, ProjectAnalyzer)
+
+    def test_run_task_creates_task_run_context_with_graph(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        _run_task() constructs a TaskRunContext with a non-None graph field
+        when repo exists.
+        """
+        from matrixmouse.orchestrator import TaskRunContext
+        from matrixmouse.task import Task, AgentRole, TaskStatus
+        from matrixmouse.codemap import ProjectAnalyzer
+
+        # Create a minimal repo structure
+        repo_root = tmp_path / "test-repo"
+        repo_root.mkdir()
+        (repo_root / "test.py").write_text("def foo(): pass\n")
+
+        orch = make_orchestrator(tmp_path)
+        orch.paths.workspace_root = tmp_path
+
+        task = Task(
+            title="Test",
+            description="Test",
+            role=AgentRole.CODER,
+            repo=["test-repo"],
+            branch="main",
+        )
+        orch.queue.add(task)
+
+        # Mock _run_agent to capture the ctx
+        captured_ctx = None
+
+        def mock_run_agent(ctx, agent, messages):
+            nonlocal captured_ctx
+            captured_ctx = ctx
+            return make_run_result(LoopExitReason.COMPLETE, summary="done")
+
+        with patch.object(orch, "_run_agent", side_effect=mock_run_agent):
+            with patch("matrixmouse.orchestrator.agent_for_role"):
+                with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                        orch._run_task(task)
+
+        assert captured_ctx is not None
+        assert isinstance(captured_ctx, TaskRunContext)
+        assert captured_ctx.task is task
+        assert captured_ctx.graph is not None
+        assert isinstance(captured_ctx.graph, ProjectAnalyzer)
+
+    def test_sequential_task_runs_produce_independent_graphs(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Two sequential task runs produce independent ProjectAnalyzer instances
+        (not the same object).
+        """
+        from matrixmouse.orchestrator import TaskRunContext
+        from matrixmouse.task import Task, AgentRole, TaskStatus
+        from matrixmouse.codemap import ProjectAnalyzer
+
+        # Create two separate repo structures
+        repo1 = tmp_path / "repo1"
+        repo1.mkdir()
+        (repo1 / "file1.py").write_text("def func1(): pass\n")
+
+        repo2 = tmp_path / "repo2"
+        repo2.mkdir()
+        (repo2 / "file2.py").write_text("def func2(): pass\n")
+
+        orch = make_orchestrator(tmp_path)
+        orch.paths.workspace_root = tmp_path
+
+        task1 = Task(
+            title="Task 1",
+            description="Test 1",
+            role=AgentRole.CODER,
+            repo=["repo1"],
+            branch="main",
+        )
+        task2 = Task(
+            title="Task 2",
+            description="Test 2",
+            role=AgentRole.CODER,
+            repo=["repo2"],
+            branch="main",
+        )
+        orch.queue.add(task1)
+        orch.queue.add(task2)
+
+        captured_graphs = []
+
+        def mock_run_agent(ctx, agent, messages):
+            captured_graphs.append(ctx.graph)
+            return make_run_result(LoopExitReason.COMPLETE, summary="done")
+
+        with patch.object(orch, "_run_agent", side_effect=mock_run_agent):
+            with patch("matrixmouse.orchestrator.agent_for_role"):
+                with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                        orch._run_task(task1)
+                        orch._run_task(task2)
+
+        assert len(captured_graphs) == 2
+        assert captured_graphs[0] is not captured_graphs[1]
+        assert isinstance(captured_graphs[0], ProjectAnalyzer)
+        assert isinstance(captured_graphs[1], ProjectAnalyzer)
+
+        # Each graph should have different functions
+        assert "func1" in captured_graphs[0].functions
+        assert "func2" not in captured_graphs[0].functions
+        assert "func2" in captured_graphs[1].functions
+        assert "func1" not in captured_graphs[1].functions
+
+    def test_run_task_handles_missing_repo_gracefully(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        _run_task() creates TaskRunContext with None graph when repo doesn't exist.
+        """
+        from matrixmouse.orchestrator import TaskRunContext
+        from matrixmouse.task import Task, AgentRole
+
+        orch = make_orchestrator(tmp_path)
+        orch.paths.workspace_root = tmp_path
+
+        task = Task(
+            title="Test",
+            description="Test",
+            role=AgentRole.CODER,
+            repo=["nonexistent-repo"],
+            branch="main",
+        )
+        orch.queue.add(task)
+
+        captured_ctx = None
+
+        def mock_run_agent(ctx, agent, messages):
+            nonlocal captured_ctx
+            captured_ctx = ctx
+            return make_run_result(LoopExitReason.COMPLETE, summary="done")
+
+        with patch.object(orch, "_run_agent", side_effect=mock_run_agent):
+            with patch("matrixmouse.orchestrator.agent_for_role"):
+                # No branch checkout needed for nonexistent repo
+                orch._run_task(task)
+
+        assert captured_ctx is not None
+        assert isinstance(captured_ctx, TaskRunContext)
+        assert captured_ctx.graph is None
         
