@@ -42,7 +42,6 @@ class ProjectAnalyzer:
         calls: Dict of caller -> set of callees.
         called_by: Dict of callee -> set of callers.
         imports: Dict of filepath -> list of import strings.
-        classes: Alias for symbols (backward compatibility with graph.py).
     """
 
     def __init__(self) -> None:
@@ -57,16 +56,6 @@ class ProjectAnalyzer:
         self.calls: dict[str, set[str]] = {}
         self.called_by: dict[str, set[str]] = {}
         self.imports: dict[str, list[str]] = {}
-
-    @property
-    def classes(self) -> dict[str, dict]:
-        """
-        Alias for symbols (backward compatibility with graph.py).
-
-        graph.py used 'classes' as the field name; codemap uses 'symbols'.
-        This property allows existing code to continue working during migration.
-        """
-        return self.symbols
 
     def analyze_file(self, filepath: str) -> None:
         """
@@ -139,11 +128,12 @@ class ProjectAnalyzer:
         ]
         for name in stale_funcs:
             self.functions.pop(name, None)
+            # Remove from called_by (as callee) — iterate only affected callee sets
+            # Must do this BEFORE removing from calls
+            for callee in self.calls.get(name, set()):
+                self.called_by.get(callee, set()).discard(name)
             # Remove from calls (as caller)
             self.calls.pop(name, None)
-            # Remove from called_by (as callee) — iterate all sets
-            for callers in self.called_by.values():
-                callers.discard(name)
 
         # Remove symbols from this file
         stale_symbols = [
@@ -166,13 +156,13 @@ class ProjectAnalyzer:
             filepath: Absolute path to the analyzed file.
             result: ExtractionResult from the language extractor.
         """
-        # Merge functions
+        # Merge functions — shallow copy to prevent extractor dict reuse issues
         for name, info in result.functions.items():
-            self.functions[name] = info
+            self.functions[name] = info.copy()
 
-        # Merge symbols
+        # Merge symbols — shallow copy to prevent extractor dict reuse issues
         for name, info in result.symbols.items():
-            self.symbols[name] = info
+            self.symbols[name] = info.copy()
 
         # Merge calls
         for caller, callees in result.calls.items():
@@ -215,10 +205,9 @@ def analyze_project(root_dir: str) -> ProjectAnalyzer:
 
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
-            # Only analyze files with registered extractors
-            if get_extractor(filepath) is not None:
-                analyzer.analyze_file(filepath)
-                file_count += 1
+            # analyze_file() silently skips files with no registered extractor
+            analyzer.analyze_file(filepath)
+            file_count += 1
 
     logger.info(
         "Analyzed %d files. Found %d functions, %d symbols.",

@@ -24,6 +24,8 @@ Do not add file writing, git, or navigation tools here.
 import logging
 from pathlib import Path
 
+from matrixmouse.tools._safety import is_safe_path
+
 from matrixmouse.codemap import ProjectAnalyzer
 from matrixmouse.tools._safety import project_root
 
@@ -48,10 +50,14 @@ def configure(graph: ProjectAnalyzer) -> None:
         graph: A populated ProjectAnalyzer instance from codemap.
     """
     global _graph
+    # Break potential reference cycles in old graph before setting new one
+    if _graph is not None:
+        _graph.calls.clear()
+        _graph.called_by.clear()
     _graph = graph
     logger.info(
-        "Code tools configured. %d functions, %d classes available.",
-        len(graph.functions), len(graph.classes)
+        "Code tools configured. %d functions, %d symbols available.",
+        len(graph.functions), len(graph.symbols)
     )
 
 
@@ -113,8 +119,13 @@ def get_function_def(func_name: str) -> str:
     start_line = info["lineno"]
     end_line = info["end_lineno"]
 
+    # Validate path safety before reading
+    allowed, resolved = is_safe_path(filepath, write=False)
+    if not allowed:
+        return f"ERROR: Access denied — {resolved}"
+
     try:
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
             all_lines = f.readlines()
     except Exception as e:
         return f"ERROR: Could not read {filepath}: {e}"
@@ -157,6 +168,11 @@ def get_function_list(filename: str) -> str:
     except Exception as e:
         return f"ERROR: Could not resolve path {filename}: {e}"
 
+    # Validate path safety
+    allowed, resolved = is_safe_path(filename, write=False)
+    if not allowed:
+        return f"ERROR: Access denied — {resolved}"
+
     # Find all functions in this file
     file_functions = {
         name: info for name, info in graph.functions.items()
@@ -170,12 +186,12 @@ def get_function_list(filename: str) -> str:
             name: info for name, info in graph.functions.items()
             if Path(info.get("file", "")).name == basename
         }
-        
+
         # Check for basename ambiguity
         if matches:
-            matched_files = set(Path(info.get("file", "")).resolve() for info in matches.values())
+            matched_files = sorted(set(info.get("file", "") for info in matches.values()))
             if len(matched_files) > 1:
-                paths = "\n  ".join(sorted(str(p) for p in matched_files))
+                paths = "\n  ".join(matched_files)
                 return (
                     f"WARNING: '{basename}' matched multiple files — "
                     f"use a more specific path:\n  {paths}"
@@ -194,7 +210,7 @@ def get_function_list(filename: str) -> str:
     module_level: list = []
 
     for name, info in sorted(file_functions.items(), key=lambda x: x[1]["lineno"]):
-        cls = info.get("class")
+        cls = info.get("symbol")
         entry = f"  {'async ' if 'async' in name else ''}def {name.split('.')[-1]}({', '.join(info.get('args', []))})"
         entry += f"  # line {info['lineno']}"
         if info.get("docstring"):
@@ -214,7 +230,7 @@ def get_function_list(filename: str) -> str:
         lines.append("")
 
     for cls_name, methods in classes.items():
-        cls_info = graph.classes.get(cls_name, {})
+        cls_info = graph.symbols.get(cls_name, {})
         cls_line = cls_info.get("lineno", "?")
         lines.append(f"class {cls_name}:  # line {cls_line}")
         lines.extend(methods)
@@ -240,9 +256,9 @@ def get_class_summary(class_name: str) -> str:
     if graph is None:
         return "ERROR: Code tools not configured."
 
-    info = graph.classes.get(class_name)
+    info = graph.symbols.get(class_name)
     if info is None:
-        available = sorted(graph.classes.keys())
+        available = sorted(graph.symbols.keys())
         return (
             f"ERROR: Class '{class_name}' not found. "
             f"Known classes: {available}"
@@ -357,10 +373,16 @@ def get_imports(filename: str) -> str:
     if graph is None:
         return "ERROR: Code tools not configured."
 
+    # Resolve to absolute path for consistent matching
     try:
         resolved = str(Path(filename).resolve())
     except Exception as e:
         return f"ERROR: Could not resolve path {filename}: {e}"
+
+    # Validate path safety
+    allowed, resolved = is_safe_path(filename, write=False)
+    if not allowed:
+        return f"ERROR: Access denied — {resolved}"
 
     imports = graph.imports.get(resolved)
 
@@ -374,9 +396,9 @@ def get_imports(filename: str) -> str:
         
         # Check for basename ambiguity
         if matched_paths:
-            resolved_matches = set(Path(p).resolve() for p in matched_paths)
-            if len(resolved_matches) > 1:
-                paths = "\n  ".join(sorted(str(p) for p in resolved_matches))
+            matched_files = sorted(set(matched_paths))
+            if len(matched_files) > 1:
+                paths = "\n  ".join(matched_files)
                 return (
                     f"WARNING: '{basename}' matched multiple files — "
                     f"use a more specific path:\n  {paths}"

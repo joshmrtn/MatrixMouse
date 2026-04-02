@@ -39,6 +39,10 @@ def configure(graph: ProjectAnalyzer) -> None:
         graph: A populated ProjectAnalyzer instance from codemap.
     """
     global _graph
+    # Break potential reference cycles in old graph before setting new one
+    if _graph is not None:
+        _graph.calls.clear()
+        _graph.called_by.clear()
     _graph = graph
     logger.debug("File tools configured with ProjectAnalyzer.")
 

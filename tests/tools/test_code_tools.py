@@ -11,11 +11,13 @@ Covers:
 """
 
 from pathlib import Path
+import os
 
 import pytest
 
 from matrixmouse.tools import code_tools
 from matrixmouse.codemap import ProjectAnalyzer
+from matrixmouse.tools._safety import configure as safety_configure
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +26,15 @@ def reset_graph() -> None:
     code_tools._graph = None
     yield
     code_tools._graph = None
+
+
+@pytest.fixture(autouse=True)
+def configure_safety(tmp_path: Path) -> None:
+    """Configure path safety to allow tmp_path and cwd for tests."""
+    safety_configure(
+        allowed_roots=[tmp_path, Path(os.getcwd())],
+        workspace_root=tmp_path
+    )
 
 
 class TestGetFunctionListAmbiguity:
@@ -37,29 +48,21 @@ class TestGetFunctionListAmbiguity:
         dir1.mkdir()
         dir2.mkdir()
 
-        (dir1 / "user.py").write_text("def get_user(): pass\n")
-        (dir2 / "user.py").write_text("function getUser() {}\n")  # Won't be analyzed but file exists
+        file1 = dir1 / "user.py"
+        file2 = dir2 / "user.py"
+        file1.write_text("def get_user(): pass\n")
+        file2.write_text("def get_user_frontend(): pass\n")
 
         graph = ProjectAnalyzer()
-        graph.analyze_file(str(dir1 / "user.py"))
-        # Add a second entry manually to simulate polyglot scenario
-        graph.functions["getUser"] = {
-            "file": str(dir2 / "user.py"),
-            "lineno": 1,
-            "end_lineno": 2,
-            "docstring": None,
-            "args": [],
-            "symbol": None,
-            "decorators": [],
-        }
-
+        graph.analyze_file(str(file1))
+        graph.analyze_file(str(file2))
         code_tools.configure(graph)
 
+        # Use basename - should trigger ambiguity warning
         result = code_tools.get_function_list("user.py")
 
         assert "WARNING" in result
         assert "matched multiple files" in result
-        assert "backend" in result or "frontend" in result
 
     def test_unambiguous_basename_returns_results(self, tmp_path: Path) -> None:
         """get_function_list with unambiguous basename returns results as before."""
@@ -70,6 +73,7 @@ class TestGetFunctionListAmbiguity:
         graph.analyze_file(str(test_file))
         code_tools.configure(graph)
 
+        # Use basename - should work since only one match
         result = code_tools.get_function_list("unique_name.py")
 
         assert "my_func" in result

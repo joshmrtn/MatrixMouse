@@ -48,6 +48,7 @@ class TestSymbols:
         assert symbol["lineno"] == 6
         assert symbol["docstring"] == "An animal."
         assert set(symbol["methods"]) == {"__init__", "speak"}
+        # Note: spec does NOT require end_lineno or decorators for symbols
 
     def test_nested_symbols(self, extractor: PythonExtractor) -> None:
         """nested_symbols.py → both Outer and Inner symbols present."""
@@ -291,3 +292,87 @@ class TestNestedSymbols:
 
         assert "Inner.inner_method" in result.functions
         assert result.functions["Inner.inner_method"]["symbol"] == "Inner"
+
+
+class TestEdgeCasesExtended:
+    """Extended edge case tests."""
+
+    def test_empty_file(self, extractor: PythonExtractor) -> None:
+        """empty_file.py → returns empty ExtractionResult."""
+        source = read_fixture("empty_file.py")
+        result = extractor.extract("/test/empty_file.py", source)
+
+        assert result.functions == {}
+        assert result.symbols == {}
+        assert result.calls == {}
+        assert result.called_by == {}
+        assert result.imports == []
+
+    def test_comments_only(self, extractor: PythonExtractor) -> None:
+        """comments_only.py → returns empty ExtractionResult."""
+        source = read_fixture("comments_only.py")
+        result = extractor.extract("/test/comments_only.py", source)
+
+        assert result.functions == {}
+        assert result.symbols == {}
+        assert result.calls == {}
+        assert result.called_by == {}
+        assert result.imports == []
+
+    def test_lambdas_ignored(self, extractor: PythonExtractor) -> None:
+        """lambdas.py → lambdas are not extracted as functions."""
+        source = read_fixture("lambdas.py")
+        result = extractor.extract("/test/lambdas.py", source)
+
+        # Only regular_func and MyClass.method_with_lambda should be extracted
+        assert "regular_func" in result.functions
+        assert "MyClass.method_with_lambda" in result.functions
+        # Lambda expressions themselves should NOT be extracted as separate functions
+        # Check that no function name is just "lambda" or starts with "<lambda>"
+        for func_name in result.functions.keys():
+            assert func_name != "lambda"
+            assert not func_name.startswith("<lambda>")
+
+    def test_deep_nesting(self, extractor: PythonExtractor) -> None:
+        """deep_nesting.py → handles 4+ levels of nested classes."""
+        source = read_fixture("deep_nesting.py")
+        result = extractor.extract("/test/deep_nesting.py", source)
+
+        # All levels should be extracted
+        assert "Level1" in result.symbols
+        assert "Level2" in result.symbols
+        assert "Level3" in result.symbols
+        assert "Level4" in result.symbols
+
+        # Methods at each level
+        assert "Level1.level1_method" in result.functions
+        assert "Level2.level2_method" in result.functions
+        assert "Level3.level3_method" in result.functions
+        assert "Level4.deepest_method" in result.functions
+
+        # Deepest method should have correct symbol
+        assert result.functions["Level4.deepest_method"]["symbol"] == "Level4"
+
+    def test_symbol_metadata_fields(self, extractor: PythonExtractor) -> None:
+        """Symbols have spec-compliant metadata fields."""
+        source = read_fixture("simple_class.py")
+        result = extractor.extract("/test/simple_class.py", source)
+
+        assert "Animal" in result.symbols
+        symbol = result.symbols["Animal"]
+        # Spec §5.1 requires: file, lineno, docstring, kind, methods
+        assert "file" in symbol
+        assert "lineno" in symbol
+        assert "docstring" in symbol
+        assert "kind" in symbol
+        assert "methods" in symbol
+        # Spec does NOT require end_lineno or decorators for symbols
+
+    def test_extractor_exception_handling(self, extractor: PythonExtractor) -> None:
+        """Extractor never raises — returns empty result on any error."""
+        # Pass None-like source to trigger any potential errors
+        # This tests the defence-in-depth exception handling
+        result = extractor.extract("/test/fake.py", "")
+
+        # Should return empty result, not raise
+        assert isinstance(result, type(extractor.extract("/test/empty.py", "")))

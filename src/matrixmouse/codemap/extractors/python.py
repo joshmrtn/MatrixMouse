@@ -72,8 +72,8 @@ class PythonExtractor(LanguageExtractor):
 
         result = ExtractionResult()
 
-        # State during walk
-        self._walk(tree.root_node, filepath, result, current_symbol=None, current_function=None)
+        # Walk the AST using TreeCursor with explicit nesting stacks
+        self._walk(tree.root_node, filepath, result)
 
         return result
 
@@ -81,72 +81,203 @@ class PythonExtractor(LanguageExtractor):
         """
         Check if the tree contains any ERROR nodes.
 
+        Uses iterative DFS to avoid stack overflow on deeply nested ASTs.
+
         Args:
             node: Root node to check.
 
         Returns:
             True if any ERROR nodes found, False otherwise.
         """
-        if node.is_error or node.type == "ERROR":
-            return True
-        for child in node.children:
-            if self._has_error_nodes(child):
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current.is_error or current.type == "ERROR":
                 return True
+            stack.extend(current.children)
         return False
 
     def _walk(
         self,
-        node,
+        root_node,
+        filepath: str,
+        result: ExtractionResult,
+    ) -> None:
+        """
+        Walk the AST using TreeCursor, maintaining nesting state.
+
+        Uses the Tree-sitter cursor API to traverse the AST in document order,
+        maintaining explicit stacks for current_symbol and current_function as
+        it descends and ascends.
+
+        Args:
+            root_node: Root tree-sitter node to start traversal from.
+            filepath: File path for metadata.
+            result: ExtractionResult being populated.
+        """
+        cursor = root_node.walk()
+
+        # Explicit stacks for tracking nesting context
+        # Start with (None, None) for module-level
+        symbol_stack: list[str | None] = [None]
+        function_stack: list[str | None] = [None]
+
+        # Standard TreeCursor iterative traversal
+        while True:
+            node_type = cursor.node.type
+
+            # Push context when we encounter a class/function definition (before processing)
+            if node_type == "class_definition":
+                class_name = self._get_identifier(cursor.node)
+                if class_name:
+                    symbol_stack.append(class_name)
+                    function_stack.append(None)
+            elif node_type == "decorated_definition":
+                # Peek at child to determine what's being decorated
+                if cursor.goto_first_child():
+                    child_type = cursor.node.type
+                    cursor.goto_parent()
+                    if child_type == "class_definition":
+                        class_name = self._get_identifier(cursor.node)
+                        if class_name:
+                            symbol_stack.append(class_name)
+                            function_stack.append(None)
+                    elif child_type in ("function_definition", "async_function_definition"):
+                        func_name = self._get_identifier(cursor.node)
+                        if func_name:
+                            current_symbol = symbol_stack[-1]
+                            qualified = self._qualified_name(func_name, current_symbol)
+                            symbol_stack.append(current_symbol)
+                            function_stack.append(qualified)
+            elif node_type in ("function_definition", "async_function_definition"):
+                func_name = self._get_identifier(cursor.node)
+                if func_name:
+                    qualified = self._qualified_name(func_name, symbol_stack[-1])
+                    symbol_stack.append(symbol_stack[-1])
+                    function_stack.append(qualified)
+
+            # Process current node with current context
+            current_symbol = symbol_stack[-1]
+            current_function = function_stack[-1]
+            children_processed = self._process_node_at_cursor(
+                cursor, filepath, result, current_symbol, current_function
+            )
+
+            # Skip descending if children were already processed (e.g., decorated_definition)
+            if children_processed:
+                # Move to next sibling or ascend
+                while not cursor.goto_next_sibling():
+                    if not cursor.goto_parent():
+                        return
+                    # Pop context when leaving class/function/async_function definitions
+                    node_type = cursor.node.type
+                    if node_type in ("class_definition", "function_definition", "async_function_definition"):
+                        if len(symbol_stack) > 1:
+                            symbol_stack.pop()
+                        if len(function_stack) > 1:
+                            function_stack.pop()
+                    # Also pop for decorated_definition that contained class/function
+                    elif node_type == "decorated_definition":
+                        if cursor.goto_first_child():
+                            child_type = cursor.node.type
+                            cursor.goto_parent()
+                            if child_type in ("class_definition", "function_definition", "async_function_definition"):
+                                if len(symbol_stack) > 1:
+                                    symbol_stack.pop()
+                                if len(function_stack) > 1:
+                                    function_stack.pop()
+                continue
+
+            # Descend into children
+            if cursor.goto_first_child():
+                continue
+
+            # No children, try siblings
+            while not cursor.goto_next_sibling():
+                # No more siblings, ascend
+                if not cursor.goto_parent():
+                    # Reached root, done
+                    return
+                # Pop context only when leaving a class or function definition
+                node_type = cursor.node.type
+                if node_type in ("class_definition", "function_definition", "async_function_definition"):
+                    if len(symbol_stack) > 1:
+                        symbol_stack.pop()
+                    if len(function_stack) > 1:
+                        function_stack.pop()
+            # Now at next sibling - continue loop to process it
+
+    def _process_node_at_cursor(
+        self,
+        cursor: TreeCursor,
         filepath: str,
         result: ExtractionResult,
         current_symbol: str | None,
         current_function: str | None,
-    ) -> None:
+    ) -> bool:
         """
-        Walk the AST using cursor, maintaining nesting state.
+        Process the node at the current cursor position.
+
+        Handles decorated_definition, class_definition, function_definition,
+        call nodes, and import statements.
 
         Args:
-            node: Current tree-sitter node.
+            cursor: TreeCursor positioned at the node to process.
             filepath: File path for metadata.
             result: ExtractionResult being populated.
             current_symbol: Current enclosing class/symbol name.
             current_function: Current enclosing function name.
+
+        Returns:
+            True if children were already processed and should be skipped,
+            False if the main loop should descend into children.
         """
+        node = cursor.node
         node_type = node.type
 
-        # Handle decorated_definition — extract decorators, then process child
+        # Handle decorated_definition — extract decorators and process child directly
         if node_type == "decorated_definition":
             # Find the decorator nodes and the child definition
             decorators = []
-            for child in node.children:
-                if child.type == "decorator":
-                    dec_text = self._extract_decorator_text(child)
-                    if dec_text:
-                        decorators.append(dec_text)
-                elif child.type in ("function_definition", "async_function_definition", "class_definition"):
-                    # Process the child with decorators info
-                    self._process_definition(
-                        child, filepath, result, current_symbol, current_function, decorators
-                    )
-            return
+            child_node = None
+            if cursor.goto_first_child():
+                while True:
+                    child = cursor.node
+                    if child.type == "decorator":
+                        dec_text = self._extract_decorator_text(child)
+                        if dec_text:
+                            decorators.append(dec_text)
+                    elif child.type in ("function_definition", "async_function_definition", "class_definition"):
+                        child_node = child
+                    if not cursor.goto_next_sibling():
+                        break
+                cursor.goto_parent()
+
+            # Process the child with decorators
+            if child_node is not None:
+                self._process_definition(
+                    child_node, filepath, result, current_symbol, current_function, decorators
+                )
+            return True  # Children already processed
 
         # Handle class_definition
         if node_type == "class_definition":
             self._process_class_definition(node, filepath, result, current_symbol)
-            return
+            return False
 
         # Handle function_definition / async_function_definition
         if node_type in ("function_definition", "async_function_definition"):
             self._process_function_definition(
                 node, filepath, result, current_symbol, current_function, []
             )
-            return
+            return False
 
         # Handle call nodes — record call relationship
         if node_type == "call" and current_function is not None:
             callee = self._resolve_callee(node)
             if callee:
-                caller_key = self._qualified_name(current_function, current_symbol)
+                # current_function is already qualified (e.g., "C.method_a")
+                caller_key = current_function
                 if caller_key not in result.calls:
                     result.calls[caller_key] = set()
                 result.calls[caller_key].add(callee)
@@ -159,17 +290,15 @@ class PythonExtractor(LanguageExtractor):
             import_str = self._format_import(node)
             if import_str:
                 result.imports.append(import_str)
-            return
+            return False
 
         if node_type == "import_from_statement":
             import_str = self._format_import_from(node)
             if import_str:
                 result.imports.append(import_str)
-            return
+            return False
 
-        # Recurse into children
-        for child in node.children:
-            self._walk(child, filepath, result, current_symbol, current_function)
+        return False  # Default: main loop should descend into children
 
     def _process_definition(
         self,
@@ -180,9 +309,22 @@ class PythonExtractor(LanguageExtractor):
         current_function: str | None,
         decorators: list[str],
     ) -> None:
-        """Process a function or class definition node."""
+        """
+        Process a function or class definition node.
+
+        Delegates to _process_class_definition or _process_function_definition
+        based on node type.
+
+        Args:
+            node: class_definition or function_definition node.
+            filepath: File path for metadata.
+            result: ExtractionResult being populated.
+            current_symbol: Current enclosing class/symbol name.
+            current_function: Current enclosing function name.
+            decorators: List of decorator strings.
+        """
         if node.type == "class_definition":
-            self._process_class_definition(node, filepath, result, current_symbol)
+            self._process_class_definition(node, filepath, result, current_symbol, decorators)
         elif node.type in ("function_definition", "async_function_definition"):
             self._process_function_definition(
                 node, filepath, result, current_symbol, current_function, decorators
@@ -194,11 +336,20 @@ class PythonExtractor(LanguageExtractor):
         filepath: str,
         result: ExtractionResult,
         parent_symbol: str | None,
+        decorators: list[str] | None = None,
     ) -> None:
         """
         Process a class_definition node.
 
-        Records the symbol and recurses into its body to find methods.
+        Records the symbol and extracts method names. The main _walk loop
+        handles traversal into the class body.
+
+        Args:
+            node: class_definition node.
+            filepath: File path for metadata.
+            result: ExtractionResult being populated.
+            parent_symbol: Enclosing symbol name.
+            decorators: Optional list of decorator strings.
         """
         class_name = self._get_identifier(node)
         if not class_name:
@@ -210,7 +361,7 @@ class PythonExtractor(LanguageExtractor):
         # Extract docstring from body
         docstring = self._extract_docstring(node)
 
-        # Find methods by recursing into body
+        # Find methods by scanning body (not recursive traversal)
         methods = []
         body = self._get_child_by_type(node, "block")
         if body:
@@ -227,10 +378,7 @@ class PythonExtractor(LanguageExtractor):
             "kind": "class",
             "methods": methods,
         }
-
-        # Recurse into class body with updated current_symbol
-        for child in node.children:
-            self._walk(child, filepath, result, current_symbol=class_name, current_function=None)
+        # Main _walk loop handles traversal into class body
 
     def _process_function_definition(
         self,
@@ -269,10 +417,7 @@ class PythonExtractor(LanguageExtractor):
             "symbol": current_symbol,
             "decorators": decorators,
         }
-
-        # Recurse into function body with updated current_function
-        for child in node.children:
-            self._walk(child, filepath, result, current_symbol, current_function=func_name)
+        # Main _walk loop handles traversal into function body
 
     def _extract_decorator_text(self, decorator_node) -> str | None:
         """
@@ -369,7 +514,17 @@ class PythonExtractor(LanguageExtractor):
                 for grandchild in child.children:
                     if grandchild.type == "identifier":
                         args.append(grandchild.text.decode("utf-8"))
-            # Skip: *, **, /, default values, type annotations
+            elif child.type == "typed_default_parameter":
+                # Handle typed parameters with defaults like "x: int = 5"
+                for grandchild in child.children:
+                    if grandchild.type == "identifier":
+                        args.append(grandchild.text.decode("utf-8"))
+            elif child.type == "default_parameter":
+                # Handle parameters with defaults like "x = 5"
+                for grandchild in child.children:
+                    if grandchild.type == "identifier":
+                        args.append(grandchild.text.decode("utf-8"))
+            # Skip: *, **, /, type annotations (already handled above)
 
         return args
 
@@ -391,10 +546,15 @@ class PythonExtractor(LanguageExtractor):
             if child.type == "identifier":
                 return child.text.decode("utf-8")
             elif child.type == "attribute":
-                # foo.bar() -> return "bar"
+                # For attribute nodes like self.method(), we want the RIGHTMOST identifier
+                # (the method name), not the leftmost (the object).
+                # Iterate in reverse to find the last identifier.
+                identifiers = []
                 for grandchild in child.children:
                     if grandchild.type == "identifier":
-                        return grandchild.text.decode("utf-8")
+                        identifiers.append(grandchild.text.decode("utf-8"))
+                if identifiers:
+                    return identifiers[-1]  # Return the rightmost (method name)
             elif child.type not in ("(", ")", "[", "]"):
                 # Try to find identifier in other node types
                 return self._find_identifier_in_node(child)
@@ -405,18 +565,21 @@ class PythonExtractor(LanguageExtractor):
         """
         Find an identifier in a node by scanning children.
 
+        Uses iterative DFS to avoid stack overflow on deeply nested ASTs.
+
         Args:
             node: tree-sitter node to search.
 
         Returns:
             Identifier text if found, None otherwise.
         """
-        for child in node.children:
-            if child.type == "identifier":
-                return child.text.decode("utf-8")
-            result = self._find_identifier_in_node(child)
-            if result:
-                return result
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            for child in current.children:
+                if child.type == "identifier":
+                    return child.text.decode("utf-8")
+                stack.append(child)
         return None
 
     def _format_import(self, node) -> str | None:
@@ -435,6 +598,16 @@ class PythonExtractor(LanguageExtractor):
                 names.append(child.text.decode("utf-8"))
             elif child.type == "identifier":
                 names.append(child.text.decode("utf-8"))
+            elif child.type == "aliased_import":
+                # Handle "import numpy as np" format
+                aliased = []
+                for grandchild in child.children:
+                    if grandchild.type in ("dotted_name", "identifier"):
+                        aliased.append(grandchild.text.decode("utf-8"))
+                if len(aliased) == 2:
+                    names.append(f"{aliased[0]} as {aliased[1]}")
+                elif aliased:
+                    names.append(aliased[0])
 
         if names:
             return ", ".join(names)
@@ -464,8 +637,20 @@ class PythonExtractor(LanguageExtractor):
                     names.append(child.text.decode("utf-8"))
             elif child.type == "relative_import":
                 # Handle "from . import x" or "from ..module import x"
-                dots = sum(1 for c in child.children if c.type == ".")
-                module = "." * dots
+                # Count dots in import_prefix nodes
+                dots = 0
+                module_name = None
+                for c in child.children:
+                    if c.type == "import_prefix":
+                        # Count dots in the prefix (text is bytes)
+                        dots = c.text.decode("utf-8").count(".")
+                    elif c.type == "dotted_name":
+                        module_name = c.text.decode("utf-8")
+
+                if module_name:
+                    module = "." * dots + module_name
+                else:
+                    module = "." * dots
             elif child.type == "import" and child.text.decode("utf-8") == "import":
                 seen_import_keyword = True
             elif child.type == "wildcard_import":
@@ -475,10 +660,15 @@ class PythonExtractor(LanguageExtractor):
                 if seen_import_keyword:
                     names.append(child.text.decode("utf-8"))
             elif child.type == "aliased_import":
-                # "import x as y"
+                # Handle "from x import y as z" format
+                aliased = []
                 for grandchild in child.children:
-                    if grandchild.type == "identifier":
-                        names.append(grandchild.text.decode("utf-8"))
+                    if grandchild.type in ("dotted_name", "identifier"):
+                        aliased.append(grandchild.text.decode("utf-8"))
+                if len(aliased) == 2:
+                    names.append(f"{aliased[0]} as {aliased[1]}")
+                elif aliased:
+                    names.append(aliased[0])
 
         # Handle "from X import Y, Z" format
         if module is not None and names:

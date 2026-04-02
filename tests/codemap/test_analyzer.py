@@ -81,6 +81,14 @@ class TwoFuncExtractor(LanguageExtractor):
             )
 
 
+class RaisingExtractor(LanguageExtractor):
+    """Extractor that raises an exception — for testing exception handling."""
+    extensions: ClassVar[list[str]] = [".raises"]
+
+    def extract(self, filepath: str, source: str) -> ExtractionResult:
+        raise RuntimeError("Simulated extractor failure")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -146,6 +154,23 @@ class TestAnalyzeFileNoop:
         assert "Failed to read" in caplog.text
         assert "skipping" in caplog.text.lower()
 
+    def test_extractor_exception_logs_warning_no_raise(self, tmp_path: Path, caplog) -> None:
+        """analyze_file catches extractor exceptions, logs warning, and does not raise."""
+        register_extractor(RaisingExtractor())
+
+        analyzer = ProjectAnalyzer()
+        test_file = tmp_path / "test.raises"
+        test_file.write_text("content")
+
+        with caplog.at_level(logging.WARNING):
+            # Should not raise
+            analyzer.analyze_file(str(test_file))
+
+        assert "Extractor failed" in caplog.text
+        assert "skipping" in caplog.text.lower()
+        # Graph should remain empty
+        assert analyzer.functions == {}
+
 
 class TestRemoveFileContributions:
     """Tests for _remove_file_contributions()."""
@@ -206,6 +231,53 @@ class TestRemoveFileContributions:
             assert len(callers) == 0
         assert analyzer.imports == {}
 
+    def test_called_by_cleanup_correctness(self) -> None:
+        """_remove_file_contributions correctly cleans called_by for multiple callees."""
+        analyzer = ProjectAnalyzer()
+        filepath = "/test/file.py"
+
+        # Function that calls multiple other functions
+        analyzer.functions["func1"] = {"file": filepath, "lineno": 1}
+        analyzer.functions["func2"] = {"file": filepath, "lineno": 5}
+        analyzer.functions["external"] = {"file": "/other/file.py", "lineno": 1}
+
+        # func1 calls helper1 and helper2
+        # func2 calls helper2 and helper3
+        analyzer.calls["func1"] = {"helper1", "helper2"}
+        analyzer.calls["func2"] = {"helper2", "helper3"}
+        analyzer.calls["external"] = {"helper1"}
+
+        # called_by reverse index
+        analyzer.called_by["helper1"] = {"func1", "external"}
+        analyzer.called_by["helper2"] = {"func1", "func2"}
+        analyzer.called_by["helper3"] = {"func2"}
+
+        analyzer.imports[filepath] = ["import os"]
+
+        # Remove contributions from filepath
+        analyzer._remove_file_contributions(filepath)
+
+        # func1 and func2 removed, external remains
+        assert "func1" not in analyzer.functions
+        assert "func2" not in analyzer.functions
+        assert "external" in analyzer.functions
+
+        # calls for func1 and func2 removed
+        assert "func1" not in analyzer.calls
+        assert "func2" not in analyzer.calls
+        assert "external" in analyzer.calls
+
+        # called_by correctly cleaned:
+        # helper1 should only have external (func1 removed)
+        assert analyzer.called_by["helper1"] == {"external"}
+        # helper2 should be empty (both func1 and func2 removed)
+        assert analyzer.called_by["helper2"] == set()
+        # helper3 should be empty (func2 removed)
+        assert analyzer.called_by["helper3"] == set()
+
+        # imports for filepath removed
+        assert filepath not in analyzer.imports
+
 
 class TestMerge:
     """Tests for _merge()."""
@@ -251,6 +323,33 @@ class TestMerge:
         # Imports merged
         assert filepath in analyzer.imports
         assert "import os" in analyzer.imports[filepath]
+
+    def test_merge_copies_metadata_dicts(self) -> None:
+        """_merge copies metadata dicts to prevent extractor mutation issues."""
+        analyzer = ProjectAnalyzer()
+        filepath = "/test/file.py"
+
+        result = ExtractionResult(
+            functions={
+                "func": {"file": filepath, "lineno": 1, "docstring": "Original"}
+            },
+            symbols={
+                "Symbol": {"file": filepath, "lineno": 1, "kind": "class"}
+            },
+            calls={}, called_by={}, imports=[],
+        )
+
+        analyzer._merge(filepath, result)
+
+        # Mutate the original result
+        result.functions["func"]["lineno"] = 999
+        result.functions["func"]["docstring"] = "Mutated"
+        result.symbols["Symbol"]["lineno"] = 888
+
+        # Graph should be unchanged
+        assert analyzer.functions["func"]["lineno"] == 1
+        assert analyzer.functions["func"]["docstring"] == "Original"
+        assert analyzer.symbols["Symbol"]["lineno"] == 1
 
 
 class TestAnalyzeFileWithExtractor:
