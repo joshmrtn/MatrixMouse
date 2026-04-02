@@ -44,7 +44,7 @@ from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.repository.workspace_state_repository import (
     WorkspaceStateRepository,
-    SessionContext, 
+    SessionContext,
     SessionMode,
     BRANCH_SETUP_TOOLS,
     PLANNING_TOOLS,
@@ -58,6 +58,7 @@ from matrixmouse.tools.git_tools import ensure_branch_from_mirror, MIRROR_REMOTE
 from matrixmouse.tools._safety import reconfigure_for_task
 from matrixmouse.repository import SQLiteTaskRepository, SQLiteWorkspaceStateRepository
 from matrixmouse.task import PRState
+from matrixmouse.codemap import analyze_project, ProjectAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,26 @@ class RunResult:
     """Bundles loop outcome with stuck diagnostics for _run_task."""
     loop_result: LoopResult
     detector: StuckDetector
+
+
+# ---------------------------------------------------------------------------
+# TaskRunContext
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TaskRunContext:
+    """
+    Runtime context for a single task execution.
+
+    Created fresh on every task start and resume. Not stored on Task,
+    not persisted to SQLite, and not referenced after _run_task() returns.
+
+    Attributes:
+        task: The Task being executed.
+        graph: ProjectAnalyzer instance for the task's workspace.
+    """
+    task: Task
+    graph: "ProjectAnalyzer"
 
 
 # ---------------------------------------------------------------------------
@@ -1141,6 +1162,31 @@ class Orchestrator:
                     repo_root, task.id,
                 )
 
+        # --- Build ProjectAnalyzer for this task ---
+        # Graph is built fresh on every task start/resume after branch checkout.
+        # Not persisted, not shared — discarded when _run_task() returns.
+        repo_root = self.paths.workspace_root / task.repo[0] if task.repo else None
+        if repo_root and repo_root.exists():
+            try:
+                logger.debug("Building ProjectAnalyzer for %s...", repo_root.name)
+                graph = analyze_project(str(repo_root))
+                logger.debug(
+                    "  %s: %d functions, %d symbols",
+                    repo_root.name,
+                    len(graph.functions),
+                    len(graph.symbols),
+                )
+            except Exception as e:
+                logger.warning(
+                    "ProjectAnalyzer failed for %s: %s. Continuing without graph.",
+                    repo_root.name, e,
+                )
+                graph = None
+        else:
+            graph = None
+
+        ctx = TaskRunContext(task=task, graph=graph)  # type: ignore[arg-type]
+
 
         agent = agent_for_role(task.role)
 
@@ -1194,7 +1240,7 @@ class Orchestrator:
         reconfigure_for_task(task.repo, self.paths.workspace_root)
 
         try:
-            run_result = self._run_agent(task, agent, messages)
+            run_result = self._run_agent(ctx, agent, messages)
         except TokenBudgetExceededError as e:
             self._handle_budget_exhausted(task, e)
             return
@@ -1252,12 +1298,21 @@ class Orchestrator:
             return
 
     def _run_agent(
-        self, task: Task, agent, messages: list
+        self, ctx: TaskRunContext, agent, messages: list
     ) -> RunResult:
         """
         Construct and run the AgentLoop for a task.
+
+        Args:
+            ctx: TaskRunContext with task and graph.
+            agent: Agent instance for the task's role.
+            messages: Initial message history.
+
+        Returns:
+            RunResult with loop outcome and stuck detector.
         """
-        from matrixmouse.tools import task_tools, tools_for_role_list
+        task = ctx.task
+        from matrixmouse.tools import task_tools, tools_for_role_list, code_tools, file_tools
         from matrixmouse.tools import comms_tools
         from matrixmouse.comms import poll_interjection, get_manager
         from matrixmouse import memory
@@ -1277,6 +1332,11 @@ class Orchestrator:
             self.queue, task.id, self.config,
             cwd=cwd, ws_state_repo=self._ws_state_repo
         )
+
+        # Configure code_tools and file_tools with the task's graph
+        if ctx.graph is not None:
+            code_tools.configure(ctx.graph)
+            file_tools.configure(ctx.graph)
 
         comms_tools.configure(self.config)
 

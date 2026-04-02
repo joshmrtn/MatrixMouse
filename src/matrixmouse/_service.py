@@ -14,11 +14,10 @@ Startup sequence:
     7.  .env secrets file loaded
     8.  Safety module configured (workspace-wide, task-level reconfigured per task)
     9.  Model availability validated
-    10. AST graph built for registered repos
-    11. Memory and comms modules configured
-    12. Orchestrator instantiated, API state injected
-    13. Web server started (background thread)
-    14. Orchestrator.run() — blocks forever, woken by condition variable
+    10. Memory and comms modules configured
+    11. Orchestrator instantiated, API state injected
+    12. Web server started (background thread)
+    13. Orchestrator.run() — blocks forever, woken by condition variable
 
 Signals:
     SIGTERM / SIGINT — clean shutdown: stops loaded ollama models,
@@ -48,7 +47,6 @@ logger = logging.getLogger(__name__)
 # Remaining imports
 # ---------------------------------------------------------------------------
 from matrixmouse.config import load_config
-from matrixmouse.graph import analyze_project
 from matrixmouse import memory, comms
 from matrixmouse.orchestrator import Orchestrator
 from matrixmouse.server import start_server
@@ -411,28 +409,6 @@ def main() -> None:
         router = Router(_config)        # parse + local_only check
         router.ensure_all_models()     # pull/verify each model
 
-        # --- AST graphs for all registered repos ---
-        repo_paths = _load_registered_repos(workspace_root)
-        graphs = {}
-        for repo_path in repo_paths:
-            try:
-                logger.info("Building AST graph for %s...", repo_path.name)
-                graph = analyze_project(str(repo_path))
-                graphs[repo_path.name] = graph
-                logger.info(
-                    "  %s: %d functions, %d classes",
-                    repo_path.name,
-                    len(graph.functions),
-                    len(graph.classes),
-                )
-            except Exception as e:
-                logger.warning(
-                    "AST graph failed for %s: %s. Continuing.", repo_path.name, e
-                )
-
-        if graphs:
-            code_tools.configure(next(iter(graphs.values())))
-
         # --- Build paths object ---
         from matrixmouse.config import MatrixMousePaths
         paths = MatrixMousePaths(workspace_root=workspace_root)
@@ -467,7 +443,6 @@ def main() -> None:
             paths=paths,
             queue=queue,
             ws_state_repo=ws_state_repo,
-            graph=graphs,
             budget_tracker=budget_tracker,
         )
         orchestrator.configure_api()

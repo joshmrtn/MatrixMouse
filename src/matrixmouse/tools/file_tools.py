@@ -16,8 +16,35 @@ import logging
 from matrixmouse.tools._safety import is_safe_path
 
 from matrixmouse.tools import code_tools
+from matrixmouse.codemap import ProjectAnalyzer
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Module state — set via configure() at task start
+# ---------------------------------------------------------------------------
+
+_graph: ProjectAnalyzer | None = None
+
+
+def configure(graph: ProjectAnalyzer) -> None:
+    """
+    Initialise file tools with the task's ProjectAnalyzer.
+
+    Called at task start by the orchestrator with the task's graph.
+    Safe to call again after the graph is updated.
+
+    Args:
+        graph: A populated ProjectAnalyzer instance from codemap.
+    """
+    global _graph
+    # Break potential reference cycles in old graph before setting new one
+    if _graph is not None:
+        _graph.calls.clear()
+        _graph.called_by.clear()
+    _graph = graph
+    logger.debug("File tools configured with ProjectAnalyzer.")
 
 
 def read_file(filename: str) -> str:
@@ -97,9 +124,9 @@ def str_replace(filename: str, old_str: str, new_str: str) -> str:
     except Exception as e:
         return f"ERROR writing {filename}: {e}"
 
-    # Update AST graph for this file
-    if code_tools._graph is not None:
-        code_tools._graph.update_file(result)
+    # Update graph for this file
+    if _graph is not None:
+        _graph.update_file(result)
 
     logger.info("str_replace: %s — replaced 1 occurrence.", filename)
     return "OK: Replacement made successfully."
@@ -133,9 +160,9 @@ def append_to_file(filename: str, content: str) -> str:
     except Exception as e:
         return f"ERROR appending to {filename}: {e}"
 
-    # Update AST graph for this file
-    if code_tools._graph is not None:
-        code_tools._graph.update_file(result)
+    # Update graph for this file
+    if _graph is not None:
+        _graph.update_file(result)
 
     logger.info("append_to_file: %s", filename)
     return f"OK: Content appended to {filename} successfully."
