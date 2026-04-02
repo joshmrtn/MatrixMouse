@@ -1,4 +1,4 @@
-import type { Task, Repo, BlockedTaskReport, DecisionConfig } from './task';
+import type { Task, Repo, BlockedTaskReport, DecisionConfig, ContextMessage } from './task';
 
 /**
  * API response wrappers
@@ -64,4 +64,30 @@ export interface ConfigResponse {
 
 export interface ConfigPatchRequest {
   values: Record<string, unknown>;
+}
+
+/**
+ * Context/conversation API response
+ */
+export interface ContextResponse {
+  messages: ContextMessage[];
+  count: number;
+  estimated_tokens: number;
+}
+
+/**
+ * Pending clarification question response
+ */
+export interface PendingResponse {
+  pending: string | null;
+}
+
+/**
+ * Interjection API response
+ */
+export interface InterjectionResponse {
+  ok: boolean;
+  manager_task_id?: string;
+  repo?: string;
+  task_id?: string;
 }

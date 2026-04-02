@@ -208,13 +208,17 @@
 }
 
 #clarification-banner {
-  display: flex;
+  display: none;
   flex-direction: column;
   gap: var(--spacing-sm);
   padding: var(--spacing-md);
   background: var(--bg2);
   border-bottom: 2px solid var(--amber);
   flex-shrink: 0;
+}
+
+#clarification-banner.active {
+  display: flex;
 }
 
 .clar-q {
@@ -389,6 +393,16 @@
   max-width: 95%;
 }
 
+.message-bubble.tool {
+  align-self: flex-start;
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--border2);
+  max-width: 90%;
+}
+
 .message-role {
   font-size: 9px;
   color: var(--text3);
@@ -399,6 +413,61 @@
 
 .message-content {
   color: var(--text);
+}
+
+/* Loading and Error States */
+.loading-state {
+  padding: var(--spacing-lg);
+  text-align: center;
+  color: var(--text3);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.empty-message {
+  padding: var(--spacing-lg);
+  text-align: center;
+  color: var(--text3);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.error-message {
+  padding: var(--spacing-md);
+  text-align: center;
+  color: var(--text2);
+  font-size: 11px;
+}
+
+.error-message > div:first-child {
+  font-weight: 500;
+  margin-bottom: var(--spacing-xs);
+}
+
+.error-detail {
+  color: var(--text3);
+  font-size: 10px;
+  margin-bottom: var(--spacing-sm);
+  font-family: var(--font-mono);
+}
+
+.retry-btn {
+  background: var(--amber);
+  color: #000;
+  border: none;
+  padding: var(--spacing-xs) var(--spacing-md);
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+
+.retry-btn:hover {
+  background: var(--amber2);
 }
 
 .message-content h1,
@@ -991,6 +1060,11 @@
 #channel-input button:active {
   background: var(--green);
   color: #000;
+}
+
+#channel-input button.sending {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ============================================================================

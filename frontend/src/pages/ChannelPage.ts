@@ -1,9 +1,17 @@
 /**
  * Channel Page Component
  * Shows conversation for workspace or repo scope with interjection support
+ *
+ * Features:
+ * - Displays conversation history from /context endpoint
+ * - Sends interjections to workspace or repo channels
+ * - Shows clarification questions with answer input
+ * - Loading and error states
+ * - Markdown rendering for assistant messages
  */
 
 import { getContext, interjectWorkspace, interjectRepo, getPending } from '../api';
+import { wsManager } from '../api/websocket';
 import { renderMarkdown, escapeHtml } from '../utils';
 import type { ContextMessage } from '../types';
 
@@ -13,28 +21,43 @@ export class ChannelPage {
   private inputEl: HTMLInputElement | null = null;
   private sendBtn: HTMLElement | null = null;
   private scope: string;
-  private pendingQuestion: string | null = null;
+  private isLoading: boolean = false;
+  private isSending: boolean = false;  // Track sending state
+  private scrollPending: boolean = false;  // Throttle scroll updates
+  private error: string | null = null;
+  private abortController = new AbortController();
+  private messageIds = new Set<string>();
+  private pendingCheckFailures = 0;
+  private readonly MAX_MESSAGE_IDS = 1000;  // LRU cache limit (~100KB memory footprint for typical messages)
 
   constructor(scope: string) {
     this.scope = scope;
   }
 
   async render(container: HTMLElement): Promise<void> {
+    // Reinitialize AbortController on each render to support re-render after destroy
+    this.abortController = new AbortController();
+    
     container.innerHTML = `
       <div id="channel-page">
         <div id="channel-header">
           <span>Channel: ${escapeHtml(this.scope)}</span>
         </div>
-        <div id="clarification-banner" style="display:none;">
+
+        <div id="clarification-banner">
           <div class="clar-q">🔔 Awaiting your answer...</div>
           <div class="clar-row">
             <input id="clar-input" type="text" placeholder="Type your answer..." />
             <button id="clar-answer-btn">Answer</button>
           </div>
         </div>
+
         <div id="conversation">
-          <div id="conversation-log"></div>
+          <div id="conversation-log">
+            <div class="loading-state">Loading conversation...</div>
+          </div>
         </div>
+
         <div id="channel-input">
           <input type="text" placeholder="Message ${escapeHtml(this.scope)}..." />
           <button>Send</button>
@@ -50,92 +73,233 @@ export class ChannelPage {
     // Setup event listeners
     this.setupEventListeners();
 
+    // Setup WebSocket handlers for real-time updates
+    this.setupWebSocketHandlers();
+
     // Load conversation and pending question
     await this.loadConversation();
     await this.checkPendingQuestion();
   }
 
+  /**
+   * Clean up event listeners and resources
+   * Call this when navigating away from the page
+   */
+  destroy(): void {
+    this.abortController.abort();
+    this.element = null;
+    this.logEl = null;
+    this.inputEl = null;
+    this.sendBtn = null;
+    this.messageIds.clear();
+    
+    // Clean up WebSocket handlers
+    wsManager.offToken(this.handleToken);
+    wsManager.offContent(this.handleContent);
+    wsManager.offToolCall(this.handleToolCall);
+    wsManager.offToolResult(this.handleToolResult);
+  }
+
   private setupEventListeners(): void {
     if (!this.element) return;
 
+    const { signal } = this.abortController;
+
     // Send interjection on button click
-    this.sendBtn?.addEventListener('click', () => this.sendInterjection());
+    this.sendBtn?.addEventListener('click', () => this.sendInterjection(), { signal });
 
     // Send interjection on Enter key
     this.inputEl?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         this.sendInterjection();
       }
-    });
+    }, { signal });
 
     // Clarification answer on button click
     const clarInput = this.element.querySelector('#clar-input') as HTMLInputElement;
     const clarBtn = this.element.querySelector('#clar-answer-btn');
     clarBtn?.addEventListener('click', () => {
       if (clarInput) this.sendClarificationAnswer(clarInput.value);
-    });
+    }, { signal });
 
     // Clarification answer on Enter key
     clarInput?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && clarInput.value.trim()) {
         this.sendClarificationAnswer(clarInput.value);
       }
-    });
+    }, { signal });
   }
 
+  private setupWebSocketHandlers(): void {
+    // Register WebSocket handlers for real-time streaming
+    wsManager.onToken(this.handleToken);
+    wsManager.onContent(this.handleContent);
+    wsManager.onToolCall(this.handleToolCall);
+    wsManager.onToolResult(this.handleToolResult);
+  }
+
+  // WebSocket event handlers
+  private handleToken = (data: { text: string }): void => {
+    // Intentionally empty: token-by-token streaming is handled via content events
+    // Keep this handler registered for API completeness and future token-streaming implementation
+  };
+
+  private handleContent = (data: { text: string }): void => {
+    try {
+      // Validate event data structure from backend
+      if (!this.logEl || !data?.text || typeof data.text !== 'string') return;
+      this.addMessage({ role: 'assistant', content: data.text });
+    } catch (error) {
+      console.error('[ChannelPage] handleContent failed:', error);
+    }
+  };
+
+  private handleToolCall = (data: { name: string; arguments: Record<string, unknown> }): void => {
+    try {
+      // Validate event data structure from backend
+      if (!this.logEl || !data?.name || typeof data.name !== 'string') return;
+      if (!data.arguments || typeof data.arguments !== 'object') return;
+      this.addMessage({
+        role: 'tool_call',
+        content: `${data.name}(${JSON.stringify(data.arguments)})`,
+      });
+    } catch (error) {
+      console.error('[ChannelPage] handleToolCall failed:', error);
+    }
+  };
+
+  private handleToolResult = (data: { result: string }): void => {
+    try {
+      // Validate event data structure from backend
+      if (!this.logEl || !data?.result || typeof data.result !== 'string') return;
+      this.addMessage({ role: 'tool_result', content: data.result });
+    } catch (error) {
+      console.error('[ChannelPage] handleToolResult failed:', error);
+    }
+  };
+
   private async loadConversation(): Promise<void> {
-    if (!this.logEl) return;
+    if (!this.logEl || this.isLoading) return;  // Guard against concurrent calls
+
+    this.isLoading = true;
+    this.renderLoadingState();
 
     try {
       const data = await getContext(this.scope === 'workspace' ? undefined : this.scope);
+      
+      // Check if component was destroyed during async operation
+      if (this.abortController.signal.aborted) return;
+      
       const messages = data.messages || [];
 
+      this.isLoading = false;
+      this.error = null;  // Clear any previous error
+
       if (messages.length === 0) {
-        this.logEl.innerHTML = '<div style="padding:14px;color:var(--text3)">No conversation yet.</div>';
+        this.renderEmptyState();
         return;
       }
 
-      this.logEl.innerHTML = messages
-        .filter(msg => msg.role !== 'system') // Filter out system messages for cleaner view
-        .map(msg => this.renderMessage(msg))
-        .join('');
-
+      this.renderMessages(messages);
       this.scrollToBottom();
     } catch (error) {
+      this.isLoading = false;
+      this.error = error instanceof Error ? error.message : 'Unknown error';
       console.error('[ChannelPage] Failed to load conversation:', error);
-      this.logEl.innerHTML = '<div style="padding:14px;color:var(--text3)">Failed to load conversation.</div>';
+      this.renderErrorState(this.error);
     }
   }
 
   private async checkPendingQuestion(): Promise<void> {
     try {
       const data = await getPending();
+      this.pendingCheckFailures = 0;  // Reset on success
+      
+      // Validate response structure
+      if (!data || typeof data.pending === 'undefined') {
+        console.error('[ChannelPage] Invalid pending response');
+        return;
+      }
+      
       if (data.pending) {
-        this.pendingQuestion = data.pending;
         this.showClarificationBanner(data.pending);
       }
     } catch (error) {
-      // No pending question or error - that's ok
+      this.pendingCheckFailures++;
+      // Only log first 3 failures to avoid spam
+      if (this.pendingCheckFailures <= 3) {
+        console.error('[ChannelPage] Failed to check pending question:', error);
+      }
     }
+  }
+
+  private renderLoadingState(): void {
+    if (!this.logEl) return;
+    this.logEl.innerHTML = '<div class="loading-state">Loading conversation...</div>';
+  }
+
+  private renderEmptyState(): void {
+    if (!this.logEl) return;
+    this.logEl.innerHTML = '<div class="empty-message">No conversation yet.</div>';
+  }
+
+  private renderErrorState(message: string): void {
+    if (!this.logEl) return;
+    this.logEl.innerHTML = `
+      <div class="error-message">
+        <div>⚠️ Failed to load conversation</div>
+        <div class="error-detail">Please try again</div>
+        <button class="retry-btn" id="retry-load">Retry</button>
+      </div>
+    `;
+
+    const retryBtn = this.logEl.querySelector('#retry-load');
+    retryBtn?.addEventListener('click', () => this.loadConversation(), { 
+      signal: this.abortController.signal 
+    });
+  }
+
+  private renderMessages(messages: ContextMessage[]): void {
+    if (!this.logEl) return;
+
+    // Filter out system messages for cleaner view and empty messages
+    const visibleMessages = messages.filter(msg => {
+      if (msg.role === 'system') return false;
+      if (!msg.content || !msg.content.trim()) return false;
+      return true;
+    });
+
+    if (visibleMessages.length === 0) {
+      this.renderEmptyState();
+      return;
+    }
+
+    this.logEl.innerHTML = visibleMessages
+      .map(msg => this.renderMessage(msg))
+      .join('');
   }
 
   private renderMessage(msg: ContextMessage): string {
     const role = msg.role || 'unknown';
     const content = msg.content || '';
 
-    if (!content.trim()) return '';
-
     const bubbleClass =
       role === 'user'
         ? 'message-bubble user'
         : role === 'assistant'
           ? 'message-bubble assistant'
-          : 'message-bubble system';
+          : role === 'tool_call' || role === 'tool_result'
+            ? 'message-bubble tool'
+            : 'message-bubble system';
 
+    // Escape HTML for user messages to prevent XSS
+    // Assistant messages use markdown rendering (which now escapes HTML internally)
     const renderedContent =
-      role === 'tool_call' || role === 'tool_result'
-        ? `<pre style="margin:0;white-space:pre-wrap;">${escapeHtml(content)}</pre>`
-        : renderMarkdown(content);
+      role === 'user'
+        ? escapeHtml(content)  // Plain text, no markdown
+        : role === 'tool_call' || role === 'tool_result'
+          ? `<pre style="margin:0;white-space:pre-wrap;">${escapeHtml(content)}</pre>`
+          : renderMarkdown(content);  // Assistant messages with markdown
 
     return `
       <div class="${bubbleClass}">
@@ -146,59 +310,114 @@ export class ChannelPage {
   }
 
   private async sendInterjection(): Promise<void> {
-    if (!this.inputEl) return;
+    if (!this.inputEl || this.isSending) return;
 
     const message = this.inputEl.value.trim();
     if (!message) return;
 
-    // Clear input immediately
+    // Set sending state
+    this.isSending = true;
+    this.updateSendButtonState();
+
+    // Clear input immediately (optimistic UI)
     this.inputEl.value = '';
 
     // Add user message to conversation optimistically
     this.addMessage({ role: 'user', content: message });
 
     try {
-      if (this.scope === 'workspace') {
-        await interjectWorkspace(message);
-      } else {
-        await interjectRepo(this.scope, message);
-      }
+      await this.sendToChannel(message);
     } catch (error) {
       console.error('[ChannelPage] Failed to send interjection:', error);
-      this.addMessage({ role: 'system', content: `Error: ${error}` });
+      this.addMessage({ role: 'system', content: this.formatErrorMessage(error, 'Error') });
+    } finally {
+      // Clear sending state
+      this.isSending = false;
+      this.updateSendButtonState();
     }
   }
 
-  private sendClarificationAnswer(answer: string): void {
+  /**
+   * Send message to workspace or repo channel based on scope
+   */
+  private async sendToChannel(message: string): Promise<void> {
+    if (this.scope === 'workspace') {
+      await interjectWorkspace(message);
+    } else {
+      await interjectRepo(this.scope, message);
+    }
+  }
+
+  /**
+   * Format error message for display
+   */
+  private formatErrorMessage(error: unknown, prefix = 'Error'): string {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    return `${prefix}: ${msg}`;
+  }
+
+  private updateSendButtonState(): void {
+    if (this.sendBtn) {
+      this.sendBtn.textContent = this.isSending ? 'Sending...' : 'Send';
+      this.sendBtn.disabled = this.isSending;
+      this.sendBtn.classList.toggle('sending', this.isSending);
+    }
+  }
+
+  private async sendClarificationAnswer(answer: string): Promise<void> {
     if (!answer.trim()) return;
 
-    // Hide banner
-    this.hideClarificationBanner();
-
-    // Add answer as user message
-    this.addMessage({ role: 'user', content: answer });
-
-    // Send to backend
-    if (this.scope === 'workspace') {
-      interjectWorkspace(answer).catch(console.error);
-    } else {
-      interjectRepo(this.scope, answer).catch(console.error);
-    }
-
-    // Clear input
+    // Store answer for potential recovery
     const clarInput = this.element?.querySelector('#clar-input') as HTMLInputElement;
-    if (clarInput) clarInput.value = '';
+    const originalValue = clarInput?.value || '';
+
+    try {
+      // Send to backend first
+      await this.sendToChannel(answer);
+
+      // Only clear input and hide banner on success
+      if (clarInput) clarInput.value = '';
+      this.hideClarificationBanner();
+      this.addMessage({ role: 'user', content: answer });
+    } catch (error) {
+      console.error('[ChannelPage] Failed to send clarification answer:', error);
+      this.addMessage({ role: 'system', content: this.formatErrorMessage(error, 'Failed to send answer') });
+
+      // Restore input value on failure (only if component still exists)
+      if (clarInput && this.element) {
+        clarInput.value = originalValue;
+        clarInput.focus();
+      }
+    }
   }
 
   private addMessage(msg: ContextMessage): void {
     if (!this.logEl) return;
 
+    // Deduplicate messages by role + content + tool_call_id (use :: delimiter to prevent collisions)
+    // Including tool_call_id prevents deduplicating distinct tool calls with same content
+    const msgId = `${msg.role}::${msg.content}::${msg.tool_call_id || ''}`;
+    if (this.messageIds.has(msgId)) return;
+
+    this.messageIds.add(msgId);
+
+    // Prevent unbounded growth of messageIds set (LRU eviction)
+    if (this.messageIds.size > this.MAX_MESSAGE_IDS) {
+      const firstKey = this.messageIds.keys().next().value;
+      if (firstKey) this.messageIds.delete(firstKey);
+    }
+
     // Remove "no conversation" placeholder if present
-    const placeholder = this.logEl.querySelector('[style*="color:var(--text3)"]');
+    const placeholder = this.logEl.querySelector('.empty-message');
     if (placeholder) placeholder.remove();
 
+    // Remove loading state if present
+    const loading = this.logEl.querySelector('.loading-state');
+    if (loading) loading.remove();
+
+    const messageHtml = this.renderMessage(msg);
     const messageEl = document.createElement('div');
-    messageEl.innerHTML = this.renderMessage(msg);
+    messageEl.innerHTML = messageHtml;
     const child = messageEl.firstElementChild;
     if (child) {
       this.logEl.appendChild(child);
@@ -214,7 +433,7 @@ export class ChannelPage {
     const input = this.element.querySelector('#clar-input') as HTMLInputElement;
 
     if (banner && questionEl && input) {
-      banner.style.display = 'flex';
+      banner.classList.add('active');
       questionEl.textContent = `🔔 ${question}`;
       input.value = '';
       input.focus();
@@ -226,14 +445,19 @@ export class ChannelPage {
 
     const banner = this.element.querySelector('#clarification-banner');
     if (banner) {
-      banner.style.display = 'none';
+      banner.classList.remove('active');
     }
-    this.pendingQuestion = null;
   }
 
   private scrollToBottom(): void {
-    if (this.logEl) {
-      this.logEl.scrollTop = this.logEl.scrollHeight;
+    if (this.logEl && !this.scrollPending) {
+      this.scrollPending = true;
+      requestAnimationFrame(() => {
+        if (this.logEl) {
+          this.logEl.scrollTop = this.logEl.scrollHeight;
+        }
+        this.scrollPending = false;
+      });
     }
   }
 }

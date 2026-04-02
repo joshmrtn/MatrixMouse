@@ -11,6 +11,9 @@ import type {
   TokenData,
   ThinkingData,
   ContentData,
+  ToolCallData,
+  ToolResultData,
+  ContextMessage,
 } from '../types';
 
 /**
@@ -30,6 +33,9 @@ export class WebSocketManager {
   private tokenHandlers = new Set<EventHandler<TokenData>>();
   private thinkingHandlers = new Set<EventHandler<ThinkingData>>();
   private contentHandlers = new Set<EventHandler<ContentData>>();
+  private toolCallHandlers = new Set<EventHandler<ToolCallData>>();
+  private toolResultHandlers = new Set<EventHandler<ToolResultData>>();
+  private messageReceivedHandlers = new Set<EventHandler<{ message: ContextMessage; scope?: string }>>();
 
   /**
    * Connect to WebSocket server
@@ -100,6 +106,24 @@ export class WebSocketManager {
           handler(event.data as ContentData)
         );
         break;
+
+      case 'tool_call':
+        this.toolCallHandlers.forEach((handler) =>
+          handler(event.data as ToolCallData)
+        );
+        break;
+
+      case 'tool_result':
+        this.toolResultHandlers.forEach((handler) =>
+          handler(event.data as ToolResultData)
+        );
+        break;
+
+      case 'message_received':
+        this.messageReceivedHandlers.forEach((handler) =>
+          handler(event.data as { message: ContextMessage; scope?: string })
+        );
+        break;
     }
 
     // Call generic handlers for this event type
@@ -151,6 +175,13 @@ export class WebSocketManager {
   }
 
   /**
+   * Unregister token stream handler
+   */
+  offToken(handler: EventHandler<TokenData>): void {
+    this.tokenHandlers.delete(handler);
+  }
+
+  /**
    * Register thinking stream handler
    */
   onThinking(handler: EventHandler<ThinkingData>): void {
@@ -158,10 +189,66 @@ export class WebSocketManager {
   }
 
   /**
+   * Unregister thinking stream handler
+   */
+  offThinking(handler: EventHandler<ThinkingData>): void {
+    this.thinkingHandlers.delete(handler);
+  }
+
+  /**
    * Register content handler
    */
   onContent(handler: EventHandler<ContentData>): void {
     this.contentHandlers.add(handler);
+  }
+
+  /**
+   * Unregister content handler
+   */
+  offContent(handler: EventHandler<ContentData>): void {
+    this.contentHandlers.delete(handler);
+  }
+
+  /**
+   * Register tool call handler
+   */
+  onToolCall(handler: EventHandler<ToolCallData>): void {
+    this.toolCallHandlers.add(handler);
+  }
+
+  /**
+   * Unregister tool call handler
+   */
+  offToolCall(handler: EventHandler<ToolCallData>): void {
+    this.toolCallHandlers.delete(handler);
+  }
+
+  /**
+   * Register tool result handler
+   */
+  onToolResult(handler: EventHandler<ToolResultData>): void {
+    this.toolResultHandlers.add(handler);
+  }
+
+  /**
+   * Unregister tool result handler
+   */
+  offToolResult(handler: EventHandler<ToolResultData>): void {
+    this.toolResultHandlers.delete(handler);
+  }
+
+  /**
+   * Register message received handler (for conversation updates)
+   */
+  onMessageReceived(handler: EventHandler<{ message: ContextMessage; scope?: string }>): void {
+    this.messageReceivedHandlers.add(handler);
+  }
+
+  /**
+   * Unregister message received handler
+   */
+  offMessageReceived(handler: EventHandler<{ message: ContextMessage; scope?: string }>): void {
+    this.messageReceivedHandlers.delete(handler);
   }
 
   /**

@@ -1,6 +1,9 @@
 /**
  * Markdown renderer for agent content
  * Handles: fenced code blocks, inline code, headers, bold, italic, lists
+ * 
+ * Security: Escapes all HTML first, then processes markdown syntax.
+ * This prevents XSS attacks via prompt injection.
  */
 
 /**
@@ -23,14 +26,23 @@ export function renderMarkdown(raw: string): string {
 
   let s = raw;
 
-  // 1. Fenced code blocks
+  // 1. Fenced code blocks - extract and escape BEFORE main processing
   s = s.replace(/```([^\n`]*)\n([\s\S]*?)```/g, (_, lang, code) => {
     const cls = lang.trim() ? ` class="lang-${escapeHtml(lang.trim())}"` : '';
     return stash(`<pre><code${cls}>${escapeHtml(code.trimEnd())}</code></pre>`);
   });
 
-  // 2. Inline code
+  // 2. Inline code - extract and escape BEFORE main processing
   s = s.replace(/`([^`\n]+)`/g, (_, code) => stash(`<code>${escapeHtml(code)}</code>`));
+
+  // 3. NOW escape all remaining text (headers, lists, bold, italic content)
+  // Split by placeholders to avoid escaping them
+  const parts = s.split(/(\x00\d+\x00)/g);
+  s = parts.map((part, i) => {
+    // Don't escape placeholders
+    if (part.match(/^\x00\d+\x00$/)) return part;
+    return escapeHtml(part);
+  }).join('');
 
   // Process line by line for block elements
   const lines = s.split('\n');
