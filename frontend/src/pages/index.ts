@@ -7,6 +7,7 @@ import { TaskPage } from './TaskPage';
 import { TasksPage } from './TasksPage';
 import { StatusPage } from './StatusPage';
 import { SettingsPage } from './SettingsPage';
+import { CreateTaskPage } from './CreateTaskPage';
 
 /**
  * Render the appropriate page based on route
@@ -35,6 +36,10 @@ export function renderRouter(
 
     case 'tasks':
       new TasksPage().render(container);
+      break;
+
+    case 'task-new':  // NEW route for task creation form
+      new CreateTaskPage().render(container);
       break;
 
     case 'dashboard':

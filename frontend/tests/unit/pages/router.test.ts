@@ -11,6 +11,7 @@ import { TaskPage } from '../../../src/pages/TaskPage';
 import { TasksPage } from '../../../src/pages/TasksPage';
 import { StatusPage } from '../../../src/pages/StatusPage';
 import { SettingsPage } from '../../../src/pages/SettingsPage';
+import { CreateTaskPage } from '../../../src/pages/CreateTaskPage';
 
 // Mock page classes
 vi.mock('../../../src/pages/ChannelPage');
@@ -18,6 +19,7 @@ vi.mock('../../../src/pages/TaskPage');
 vi.mock('../../../src/pages/TasksPage');
 vi.mock('../../../src/pages/StatusPage');
 vi.mock('../../../src/pages/SettingsPage');
+vi.mock('../../../src/pages/CreateTaskPage');
 
 describe('Pages Router', () => {
   let container: HTMLElement;
@@ -53,6 +55,13 @@ describe('Pages Router', () => {
       renderRouter('tasks', {}, container);
       expect(TasksPage).toHaveBeenCalled();
       const mockInstance = vi.mocked(TasksPage).mock.results[0].value;
+      expect(mockInstance.render).toHaveBeenCalledWith(container);
+    });
+
+    it('renders CreateTaskPage for task-new route', () => {
+      renderRouter('task-new', {}, container);
+      expect(CreateTaskPage).toHaveBeenCalled();
+      const mockInstance = vi.mocked(CreateTaskPage).mock.results[0].value;
       expect(mockInstance.render).toHaveBeenCalledWith(container);
     });
 

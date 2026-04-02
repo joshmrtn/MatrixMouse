@@ -1610,3 +1610,280 @@
     gap: var(--spacing-xs);
   }
 }
+
+/* ============================================================================
+   Create Task Form Component
+   ============================================================================ */
+
+.create-task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1rem;
+}
+
+.create-task-form .form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.create-task-form .form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+.create-task-form label {
+  font-weight: 600;
+  color: var(--text-primary, #333);
+  font-size: 0.9rem;
+}
+
+.create-task-form label .required {
+  color: var(--error-color, #dc3545);
+}
+
+.create-task-form input[type="text"],
+.create-task-form input[type="number"],
+.create-task-form textarea,
+.create-task-form select {
+  padding: 0.75rem;
+  border: 1px solid var(--border-color, #ccc);
+  border-radius: 4px;
+  font-size: 1rem;
+  font-family: inherit;
+  background: #fff;
+  color: var(--text-primary, #333);
+}
+
+.create-task-form input[type="text"]:focus,
+.create-task-form input[type="number"]:focus,
+.create-task-form textarea:focus,
+.create-task-form select:focus {
+  outline: none;
+  border-color: var(--primary-color, #007bff);
+  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+}
+
+.create-task-form input.invalid,
+.create-task-form textarea.invalid,
+.create-task-form select.invalid {
+  border-color: var(--error-color, #dc3545);
+}
+
+.create-task-form textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.create-task-form .field-error {
+  color: var(--error-color, #dc3545);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.create-task-form .field-hint {
+  color: var(--text-muted, #6c757d);
+  font-size: 0.875rem;
+  font-style: italic;
+}
+
+/* Repo Multi-Select */
+.create-task-form .repo-multi-select {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border-color, #ccc);
+  border-radius: 4px;
+  min-height: 48px;
+  background: #fff;
+}
+
+.create-task-form .repo-select {
+  flex: 1;
+  min-width: 200px;
+  border: none;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.create-task-form .repo-select:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.create-task-form .selected-repos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.create-task-form .repo-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  background-color: var(--primary-color, #007bff);
+  color: white;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.create-task-form .repo-tag button {
+  background: none;
+  border: none;
+  color: white;
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 0;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.create-task-form .repo-tag button:hover {
+  opacity: 0.8;
+}
+
+/* Form Actions */
+.create-task-form .form-actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color, #ccc);
+}
+
+.create-task-form .btn-submit {
+  padding: 0.75rem 2rem;
+  background-color: var(--primary-color, #007bff);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-width: 140px;
+}
+
+.create-task-form .btn-submit:hover {
+  background-color: var(--primary-hover, #0056b3);
+}
+
+.create-task-form .btn-submit:disabled {
+  background-color: var(--text-muted, #6c757d);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* Loading Spinner */
+.create-task-form .btn-spinner {
+  display: none;
+}
+
+.create-task-form .spinner {
+  animation: spin 1s linear infinite;
+  will-change: transform; /* GPU acceleration hint */
+}
+
+.create-task-form .spinner-circle {
+  stroke: currentColor;
+  stroke-dasharray: 50;
+  stroke-dashoffset: 10;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Keyboard hint */
+.create-task-form .keyboard-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted, #6c757d);
+  margin-left: auto;
+  align-self: center;
+  font-style: italic;
+}
+
+.create-task-form .btn-cancel {
+  padding: 0.75rem 2rem;
+  background-color: transparent;
+  color: var(--text-primary, #333);
+  border: 1px solid var(--border-color, #ccc);
+  border-radius: 4px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.create-task-form .btn-cancel:hover {
+  background-color: var(--bg-secondary, #f8f9fa);
+}
+
+/* Form Message */
+.create-task-form .form-message {
+  padding: 0.75rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin-top: 1rem;
+}
+
+.create-task-form .form-message.success {
+  background-color: var(--success-bg, #d4edda);
+  color: var(--success-color, #155724);
+  border: 1px solid var(--success-border, #c3e6cb);
+}
+
+.create-task-form .form-message.error {
+  background-color: var(--error-bg, #f8d7da);
+  color: var(--error-color, #721c24);
+  border: 1px solid var(--error-border, #f5c6cb);
+}
+
+.create-task-form .form-message.info {
+  background-color: var(--info-bg, #d1ecf1);
+  color: var(--info-color, #0c5460);
+  border: 1px solid var(--info-border, #bee5eb);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .create-task-form {
+    padding: 0.5rem;
+  }
+
+  .create-task-form .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .create-task-form .form-actions {
+    flex-direction: column;
+  }
+
+  .create-task-form .btn-submit,
+  .create-task-form .btn-cancel {
+    width: 100%;
+  }
+
+  .create-task-form .repo-multi-select {
+    flex-direction: column;
+  }
+
+  .create-task-form .repo-select {
+    width: 100%;
+  }
+}

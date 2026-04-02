@@ -77,7 +77,7 @@ export class TasksPage {
     });
 
     addBtn?.addEventListener('click', () => {
-      window.history.pushState({}, '', '/tasks/new');
+      window.history.pushState({}, '', '/task-new');  // Updated to /task-new to avoid API collision
       window.dispatchEvent(new Event('popstate'));
     });
 

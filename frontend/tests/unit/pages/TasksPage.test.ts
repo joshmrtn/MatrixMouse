@@ -444,17 +444,22 @@ describe('TasksPage', () => {
   });
 
   describe('add new task', () => {
-    it('navigates to add task form when clicked', () => {
+    it('navigates to add task form when clicked', async () => {
+      page = new TasksPage();
       page.render(container);
+
       const addBtn = container.querySelector('#add-task-btn');
-      
+
       const pushStateSpy = vi.spyOn(window.history, 'pushState');
       const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent');
 
       addBtn?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
-      expect(pushStateSpy).toHaveBeenCalledWith({}, '', '/tasks/new');
+      expect(pushStateSpy).toHaveBeenCalledWith({}, '', '/task-new');
       expect(dispatchEventSpy).toHaveBeenCalledWith(expect.any(Event));
+
+      pushStateSpy.mockRestore();
+      dispatchEventSpy.mockRestore();
     });
   });
 });
