@@ -1,7 +1,8 @@
 /**
  * Playwright Configuration for MatrixMouse E2E Tests
- * 
+ *
  * Uses Xvfb for headless testing in Linux environments.
+ * Automatically starts the mock test server for testing.
  */
 
 import { defineConfig, devices } from '@playwright/test';
@@ -16,6 +17,15 @@ export default defineConfig({
     ['html', { outputFolder: 'playwright-report' }],
     ['list'],
   ],
+  // Start the mock test server before running tests
+  webServer: {
+    command: 'cd .. && uv run python -m matrixmouse.test_server',
+    url: 'http://localhost:8765',
+    reuseExistingServer: true,
+    timeout: 60000,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  },
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:8765',
     trace: 'on-first-retry',

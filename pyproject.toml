@@ -130,7 +130,8 @@ test-python = { cmd = "uv run pytest -v --tb=short -m 'not e2e'", help = "Run Py
 test-python-cov = { cmd = "uv run pytest --cov=matrixmouse --cov-report=term-missing", help = "Run tests with coverage" }
 test-python-all = { cmd = "uv run pytest -v --tb=short", help = "Run ALL Python tests" }
 test-frontend = { shell = "cd frontend && npm run test -- --run", help = "Run frontend unit tests (no watch mode)" }
-test-frontend-e2e = { shell = "cd frontend && npm run test:e2e", help = "Run frontend E2E tests (TypeScript)" }
+test-frontend-e2e = { sequence = ["build-frontend", { shell = "cd frontend && npx playwright test", help = "Run frontend E2E tests (TypeScript)"}], help = "Build frontend + run E2E tests" }
+test-frontend-e2e-settings = { sequence = ["build-frontend", { shell = "cd frontend && npx playwright test test_settings_page.spec.ts", help = "Run SettingsPage E2E tests"}], help = "Build frontend + run SettingsPage E2E tests" }
 test = { sequence = ["test-python", "test-frontend"], help = "Run all unit tests" }
 test-all = { sequence = ["test-python-all", "test-frontend"], help = "Run all tests (Python + frontend unit)" }
 

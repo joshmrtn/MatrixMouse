@@ -36,6 +36,22 @@ Usage:
         # Make HTTP requests
         import requests
         resp = requests.get(f"{server.base_url}/tasks")
+
+---
+
+## Frontend E2E Testing
+
+For frontend E2E tests (Playwright), use `create_frontend_test_app()` which provides
+a simpler mock server with static responses:
+
+    from matrixmouse.test_server import create_frontend_test_app
+    import uvicorn
+    
+    app = create_frontend_test_app()
+    uvicorn.run(app, host="localhost", port=8765)
+
+This is lighter weight and designed specifically for frontend testing where
+you don't need the orchestrator running.
 """
 
 from __future__ import annotations
@@ -47,7 +63,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 import requests
 
@@ -611,20 +627,377 @@ def create_test_scenario(
     config = MatrixMouseTestServerConfig(port=port)
     server = MatrixMouseTestServer(config)
     server.start()
-    
+
     # Add repos
     if repos:
         for repo in repos:
             server.add_repo(**repo)
-    
+
     # Add tasks
     if tasks:
         for task_data in tasks:
             server.add_task(**task_data)
-    
+
     # Add dependencies
     if dependencies:
         for blocking_id, blocked_id in dependencies:
             server.add_dependency(blocking_id, blocked_id)
-    
+
     return server
+
+
+# ============================================================================
+# Frontend E2E Test Server
+# ============================================================================
+
+def create_frontend_test_app() -> FastAPI:
+    """Create a simple FastAPI app for frontend E2E testing.
+    
+    This provides mocked API endpoints with static responses for testing
+    the frontend without running the full orchestrator.
+    
+    Unlike MatrixMouseTestServer, this does NOT run the orchestrator or
+    agent loop - it just returns static mock data. Use this for Playwright
+    E2E tests where you only need to test the frontend UI.
+    
+    Usage:
+        from matrixmouse.test_server import create_frontend_test_app
+        import uvicorn
+        
+        app = create_frontend_test_app()
+        uvicorn.run(app, host="localhost", port=8765)
+    """
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse, HTMLResponse
+    from fastapi.staticfiles import StaticFiles
+    from pathlib import Path
+    
+    app = FastAPI(title="MatrixMouse Frontend Test Server")
+    
+    # Enable CORS for Playwright tests
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Mock data
+    mock_config = {
+        "coder_model": "ollama:qwen3.5:4b",
+        "manager_model": "ollama:qwen3.5:9b",
+        "critic_model": "ollama:qwen3.5:9b",
+        "writer_model": "ollama:qwen3.5:4b",
+        "summarizer_model": "ollama:qwen3.5:2b",
+        "agent_git_name": "MatrixMouse Bot",
+        "agent_git_email": "matrixmouse@example.com",
+        "server_port": 8080,
+        "log_level": "INFO",
+        "coder_cascade": [
+            "ollama:qwen3.5:2b",
+            "ollama:qwen3.5:4b",
+            "ollama:qwen3.5:9b"
+        ],
+    }
+    
+    mock_repos = [
+        {
+            "name": "main-repo",
+            "remote": "https://github.com/test/main.git",
+            "local_path": "/test/main",
+            "added": "2024-01-01"
+        },
+        {
+            "name": "test-repo",
+            "remote": "https://github.com/test/test.git",
+            "local_path": "/test/test",
+            "added": "2024-01-01"
+        }
+    ]
+    
+    mock_repo_config = {
+        "local": {"coder_model": "ollama:custom:1b"},
+        "committed": {},
+        "merged": {"coder_model": "ollama:custom:1b"}
+    }
+    
+    mock_tasks = [
+        {
+            "id": "task001",
+            "title": "Test Task 1",
+            "status": "ready",
+            "role": "coder",
+            "repo": ["main-repo"],
+            "description": "A test task",
+            "branch": "task/task001",
+            "created_at": "2024-01-01T00:00:00Z",
+            "importance": 0.5,
+            "urgency": 0.5,
+        },
+        {
+            "id": "task002",
+            "title": "Test Task 2",
+            "status": "blocked_by_human",
+            "role": "coder",
+            "repo": ["main-repo"],
+            "description": "Another test task",
+            "branch": "task/task002",
+            "created_at": "2024-01-01T00:00:00Z",
+            "importance": 0.7,
+            "urgency": 0.8,
+        }
+    ]
+    
+    # Track API call counts for testing concurrent operations
+    api_call_counts: Dict[str, int] = {}
+    
+    # =========================================================================
+    # Static Files - Serve the built frontend
+    # =========================================================================
+
+    # Find web directory - it's at src/matrixmouse/web/
+    web_dir = Path(__file__).parent / "web"
+    if web_dir.exists():
+        # Mount assets directory
+        app.mount("/assets", StaticFiles(directory=str(web_dir / "assets")), name="assets")
+
+    # =========================================================================
+    # Health & Status Endpoints
+    # =========================================================================
+
+    @app.get("/health")
+    async def health():
+        return {"ok": True, "status": "test_server"}
+
+    @app.get("/status")
+    async def get_status():
+        return {
+            "idle": True,
+            "stopped": False,
+            "blocked": False,
+            "task": None,
+            "phase": "IDLE",
+            "model": "test",
+            "turns": 0
+        }
+
+    # =========================================================================
+    # Config Endpoints
+    # =========================================================================
+
+    @app.get("/config")
+    async def get_config():
+        return mock_config
+
+    @app.patch("/config")
+    async def update_config(body: dict):
+        # Track call count for testing
+        api_call_counts["config_patch"] = api_call_counts.get("config_patch", 0) + 1
+
+        # Update mock config with provided values
+        if "values" in body:
+            mock_config.update(body["values"])
+
+        # Note: This mock always returns all keys sent, unlike the real API
+        # which may reject certain keys silently. The frontend's local state
+        # update logic isn't tested against partial failures here.
+        updated_keys = list(body.get("values", {}).keys())
+        return {"ok": True, "updated": updated_keys}
+
+    @app.get("/config/repos/{repo_name}")
+    async def get_repo_config(repo_name: str):
+        return mock_repo_config
+
+    @app.patch("/config/repos/{repo_name}")
+    async def update_repo_config(repo_name: str, body: dict):
+        api_call_counts[f"repo_config_patch_{repo_name}"] = \
+            api_call_counts.get(f"repo_config_patch_{repo_name}", 0) + 1
+
+        if "values" in body:
+            mock_repo_config["merged"].update(body["values"])
+            mock_repo_config["local"].update(body["values"])
+
+        updated_keys = list(body.get("values", {}).keys())
+        return {"ok": True, "updated": updated_keys}
+
+    # =========================================================================
+    # Repository Endpoints
+    # =========================================================================
+
+    @app.get("/repos")
+    async def get_repos():
+        return {"repos": mock_repos}
+
+    # =========================================================================
+    # Task Endpoints
+    # =========================================================================
+
+    @app.get("/tasks")
+    async def list_tasks(status: str | None = None, repo: str | None = None, all: bool = False):
+        tasks = mock_tasks.copy()
+
+        if status:
+            tasks = [t for t in tasks if t["status"] == status]
+        if repo:
+            tasks = [t for t in tasks if repo in t.get("repo", [])]
+        if not all:
+            tasks = [t for t in tasks if t["status"] not in ("complete", "cancelled")]
+
+        return {"tasks": tasks, "count": len(tasks)}
+
+    @app.get("/tasks/{task_id}")
+    async def get_task(task_id: str):
+        for task in mock_tasks:
+            if task["id"] == task_id or task["id"].startswith(task_id):
+                return task
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Task '{task_id}' not found"}
+        )
+
+    @app.get("/tasks/{task_id}/dependencies")
+    async def get_task_dependencies(task_id: str):
+        return {
+            "task_id": task_id,
+            "dependencies": [],
+            "count": 0
+        }
+
+    @app.get("/blocked")
+    async def get_blocked():
+        blocked_tasks = [t for t in mock_tasks if t["status"] == "blocked_by_human"]
+        return {
+            "report": {
+                "blocked_by_human": blocked_tasks,
+                "blocked_by_task": [],
+                "waiting": []
+            }
+        }
+
+    @app.get("/pending")
+    async def get_pending():
+        return {"pending": None}
+
+    # =========================================================================
+    # Test Control Endpoints
+    # =========================================================================
+
+    @app.get("/test/reset")
+    async def reset_test_state():
+        """Reset all mock data and call counts."""
+        # Reset mock config to original values (clear first to remove any added keys)
+        mock_config.clear()
+        mock_config.update({
+            "coder_model": "ollama:qwen3.5:4b",
+            "manager_model": "ollama:qwen3.5:9b",
+            "critic_model": "ollama:qwen3.5:9b",
+            "writer_model": "ollama:qwen3.5:4b",
+            "summarizer_model": "ollama:qwen3.5:2b",
+            "agent_git_name": "MatrixMouse Bot",
+            "agent_git_email": "matrixmouse@example.com",
+            "server_port": 8080,
+            "log_level": "INFO",
+            "coder_cascade": [
+                "ollama:qwen3.5:2b",
+                "ollama:qwen3.5:4b",
+                "ollama:qwen3.5:9b"
+            ],
+        })
+        # Reset repo config
+        mock_repo_config["local"] = {"coder_model": "ollama:custom:1b"}
+        mock_repo_config["committed"] = {}
+        mock_repo_config["merged"] = {"coder_model": "ollama:custom:1b"}
+        # Reset repos to original values
+        mock_repos.clear()
+        mock_repos.extend([
+            {
+                "name": "main-repo",
+                "remote": "https://github.com/test/main.git",
+                "local_path": "/test/main",
+                "added": "2024-01-01"
+            },
+            {
+                "name": "test-repo",
+                "remote": "https://github.com/test/test.git",
+                "local_path": "/test/test",
+                "added": "2024-01-01"
+            }
+        ])
+        # Reset tasks to original values
+        mock_tasks.clear()
+        mock_tasks.extend([
+            {
+                "id": "task001",
+                "title": "Test Task 1",
+                "status": "ready",
+                "role": "coder",
+                "repo": ["main-repo"],
+                "description": "A test task",
+                "branch": "task/task001",
+                "created_at": "2024-01-01T00:00:00Z",
+                "importance": 0.5,
+                "urgency": 0.5,
+            },
+            {
+                "id": "task002",
+                "title": "Test Task 2",
+                "status": "blocked_by_human",
+                "role": "coder",
+                "repo": ["main-repo"],
+                "description": "Another test task",
+                "branch": "task/task002",
+                "created_at": "2024-01-01T00:00:00Z",
+                "importance": 0.7,
+                "urgency": 0.8,
+            }
+        ])
+        # Clear call counts
+        api_call_counts.clear()
+        return {"ok": True, "message": "Test state reset"}
+
+    @app.get("/test/call_counts")
+    async def get_call_counts():
+        """Get API call counts for testing concurrent operations."""
+        return api_call_counts
+
+    # =========================================================================
+    # SPA Fallback - Serve index.html for all unknown routes (MUST BE LAST)
+    # =========================================================================
+
+    @app.get("/{path:path}")
+    async def spa_fallback(path: str):
+        """Serve index.html for SPA routing."""
+        if web_dir.exists():
+            index_path = web_dir / "index.html"
+            if index_path.exists():
+                return HTMLResponse(content=index_path.read_text())
+        return HTMLResponse(content="<html><body>Frontend not built</body></html>")
+
+    return app
+
+
+# =============================================================================
+# Main - Run the frontend test server by default
+# =============================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    app = create_frontend_test_app()
+    
+    print("🧪 Starting MatrixMouse Test Server for E2E Tests...")
+    print("📡 Base URL: http://localhost:8765")
+    print("📁 Serving frontend from: src/matrixmouse/web/")
+    print("")
+    print("Run E2E tests with:")
+    print("  cd frontend && npx playwright test")
+    print("")
+    
+    uvicorn.run(
+        app,
+        host="localhost",
+        port=8765,
+        log_level="warning"
+    )

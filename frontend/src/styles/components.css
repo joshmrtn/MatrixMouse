@@ -1478,6 +1478,16 @@
   background: var(--green2);
 }
 
+.form-actions .btn-save:disabled {
+  opacity: 0.7;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
 .form-actions .btn-cancel {
   border-color: var(--red2);
   color: var(--red);
@@ -1551,6 +1561,46 @@
   border-radius: var(--radius-sm);
   font-size: 11px;
   margin-bottom: var(--spacing-md);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+#settings-message .message-text {
+  flex: 1;
+}
+
+#settings-message .message-close {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 var(--spacing-xs);
+  opacity: 0.7;
+  transition: opacity var(--transition-fast);
+}
+
+#settings-message .message-close:hover {
+  opacity: 1;
+}
+
+#settings-message .retry-btn {
+  background: var(--green);
+  color: #000;
+  border: none;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: all var(--transition-fast);
+}
+
+#settings-message .retry-btn:hover {
+  background: var(--green2);
 }
 
 #settings-message.success {
@@ -1575,11 +1625,100 @@
   max-width: 300px;
 }
 
+/* Validation error styles */
+.config-field .input-error {
+  border-color: var(--red);
+  background: var(--red2);
+}
+
+.field-error {
+  color: var(--red);
+  font-size: 10px;
+  margin-top: var(--spacing-xs);
+  font-family: var(--font-ui);
+}
+
 .repo-config-loaded {
   padding: var(--spacing-sm);
   color: var(--green);
   font-size: 11px;
   margin-top: var(--spacing-sm);
+}
+
+.unsaved-changes-indicator {
+  display: none;
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--amber);
+  color: #000;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-md);
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.keyboard-shortcut-hint {
+  font-size: 9px;
+  color: var(--text3);
+  margin-bottom: var(--spacing-md);
+  text-align: right;
+}
+
+.keyboard-shortcut-hint kbd {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.refresh-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--border);
+}
+
+.refresh-config-btn {
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.refresh-config-btn:hover:not(:disabled) {
+  background: var(--bg2);
+  border-color: var(--green2);
+  color: var(--green);
+}
+
+.refresh-config-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Mobile responsive */
@@ -1595,6 +1734,7 @@
   .config-field input,
   .config-field select {
     max-width: 100%;
+    min-height: 44px; /* Touch-friendly target size */
   }
 
   .form-actions {
