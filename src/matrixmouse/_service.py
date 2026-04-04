@@ -409,6 +409,7 @@ def main() -> None:
             )
 
         # --- Model validation ---
+        budget_tracker = None  # Will be constructed below, passed to Router after
         router = Router(_config)        # parse + local_only check
         router.ensure_all_models()     # pull/verify each model
 
@@ -438,15 +439,34 @@ def main() -> None:
             _config.openai_tokens_per_day,
         )
 
+        # --- Backend Availability Cache ---
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+        availability_cache = BackendAvailabilityCache(
+            ws_state_repo=ws_state_repo,
+            initial_cooldown_seconds=_config.backend_cooldown_initial_seconds,
+            max_cooldown_seconds=_config.backend_cooldown_max_seconds,
+        )
+        logger.info(
+            "Backend availability cache initialised: "
+            "initial=%ds, max=%ds",
+            _config.backend_cooldown_initial_seconds,
+            _config.backend_cooldown_max_seconds,
+        )
+
+        # --- Rebuild router with budget_tracker (backends need it) ---
+        # Router was already constructed above for validation, but backends
+        # need the budget_tracker for token accounting. Rebuild it now.
+        router = Router(_config, budget_tracker=budget_tracker)
+
         # --- Orchestrator ---
         queue = SQLiteTaskRepository(paths.db_file)
-        ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
         orchestrator = Orchestrator(
             config=_config,
             paths=paths,
             queue=queue,
             ws_state_repo=ws_state_repo,
             budget_tracker=budget_tracker,
+            availability_cache=availability_cache,
         )
         orchestrator.configure_api()
 

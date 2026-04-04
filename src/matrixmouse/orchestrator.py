@@ -37,7 +37,9 @@ from typing import Optional, TYPE_CHECKING
 from matrixmouse.agents import agent_for_role
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
-from matrixmouse.inference.base import TokenBudgetExceededError
+from matrixmouse.inference.base import (
+    TokenBudgetExceededError, BackendConnectionError, SummarizationUnavailableError,
+)
 from matrixmouse.inference.token_budget import TokenBudgetTracker
 if TYPE_CHECKING:
     from matrixmouse.inference.availability import BackendAvailabilityCache
@@ -1143,6 +1145,182 @@ class Orchestrator:
 
         return None
 
+    def _handle_all_backends_exhausted(self, task: Task) -> None:
+        """Handle the case where no cascade entry is available for a task.
+
+        Calculates wait_until as the earliest of:
+            - Budget retry_after values across all remote cascade entries
+            - Cooldown expiry times from the availability cache
+
+        If no wait_until can be determined (e.g. all-local cascade where
+        no cooldown data exists, or no budget tracker and no availability
+        cache): task returns to READY rather than WAITING. WAITING implies
+        a known retry time. Without one, READY + the scheduler's condition
+        variable idle handling provides natural backoff without creating a
+        busy loop or blocking the task indefinitely.
+
+        wait_reason is set to:
+            - budget:{provider} if budget is the limiting factor
+            - backend_unavailable:{provider} if cooldown is the limiting factor
+
+        Args:
+            task: The task to handle.
+        """
+        cascade = self._router.cascade_for_role(task.role)
+        if not cascade:
+            self.queue.mark_ready(task.id)
+            return
+
+        # Collect budget retry_after values for remote entries
+        budget_wait_times: list[datetime] = []
+        budget_provider: str | None = None
+
+        for model_string in cascade:
+            parsed = self._router.parse_model_string(model_string)
+            if parsed.is_remote and self._budget_tracker is not None:
+                retry_after = self._budget_tracker.get_retry_after(
+                    provider=parsed.backend,
+                    model=parsed.model,
+                )
+                if retry_after is not None:
+                    budget_wait_times.append(retry_after)
+                    if budget_provider is None:
+                        budget_provider = parsed.backend
+
+        # Collect cooldown expiry times
+        cooldown_wait_time: datetime | None = None
+        cooldown_provider: str | None = None
+
+        if self._availability_cache is not None:
+            backends_in_cascade = set()
+            for model_string in cascade:
+                parsed = self._router.parse_model_string(model_string)
+                backends_in_cascade.add(parsed.backend)
+
+            earliest = self._availability_cache.earliest_available_at(
+                list(backends_in_cascade)
+            )
+            if earliest is not None:
+                cooldown_wait_time = datetime.fromisoformat(earliest)
+                # Determine which provider the cooldown belongs to
+                for model_string in cascade:
+                    parsed = self._router.parse_model_string(model_string)
+                    if not self._availability_cache.is_available(parsed.backend):
+                        cooldown_provider = parsed.backend
+                        break
+
+        # Determine overall wait_until and wait_reason
+        wait_times = [t for t in budget_wait_times]
+        if cooldown_wait_time is not None:
+            wait_times.append(cooldown_wait_time)
+
+        if not wait_times:
+            # No wait time determinable → READY (avoids busy loop)
+            logger.warning(
+                "Task [%s]: all backends exhausted but no wait time "
+                "determinable — marking READY (no busy loop).", task.id,
+            )
+            self.queue.mark_ready(task.id)
+            return
+
+        wait_until = min(wait_times)
+
+        # Determine wait_reason: budget beats cooldown
+        if budget_wait_times and min(budget_wait_times) <= wait_until:
+            wait_reason = f"budget:{budget_provider}"
+        else:
+            wait_reason = f"backend_unavailable:{cooldown_provider}"
+
+        # Set WAITING status
+        task.wait_until = wait_until.isoformat()
+        task.wait_reason = wait_reason
+        task.status = TaskStatus.WAITING
+        self.queue.update(task)
+        logger.info(
+            "Task [%s]: all backends exhausted. WAITING until %s (reason: %s).",
+            task.id, wait_until.isoformat(), wait_reason,
+        )
+
+    def _run_task_with_model(self, task: Task, model: str) -> None:
+        """Re-enter task execution with a pre-selected model.
+
+        Used by the stuck escalation path to run the next cascade tier
+        without triggering the availability-based cascade walk, which would
+        reset to tier 0. Does not repeat git checkout or graph build — the
+        task is already set up from the outer _run_task call.
+
+        Args:
+            task:  The task to run.
+            model: The pre-resolved model string to use.
+        """
+        from matrixmouse.agents import agent_for_role
+
+        agent = agent_for_role(task.role)
+        messages = self._load_or_build_messages(task, agent)
+
+        self._update_status(
+            role=task.role.value,
+            model=model,
+            turns=0,
+            context_messages=messages,
+        )
+
+        try:
+            run_result = self._run_agent(
+                TaskRunContext(task=task, graph=self.graph),  # type: ignore[arg-type]
+                agent,
+                messages,
+                model=model,
+            )
+        except TokenBudgetExceededError as e:
+            self._handle_budget_exhausted(task, e)
+            return
+
+        result   = run_result.loop_result
+        detector = run_result.detector
+
+        # --- Yield ---
+        if result.exit_reason == LoopExitReason.YIELD:
+            self.queue.mark_ready(task.id)
+            return
+
+        # --- Complete ---
+        if result.exit_reason == LoopExitReason.COMPLETE:
+            self._handle_complete(task, result)
+            return
+
+        # --- Escalate (nested — no further escalation) ---
+        if result.exit_reason == LoopExitReason.ESCALATE:
+            # TODO(#15): current_cascade_index should live on Task, not be
+            # derived from resolved_model at runtime. Per-task tracking
+            # needed for multi-worker correctness and correct
+            # stuck-escalation persistence across context switches.
+            # Availability fallback always re-resolves from index 0
+            # (transient, try preferred again next cycle). Stuck escalation
+            # must persist (diagnostic, smaller model already proved
+            # insufficient). These require different state: availability
+            # uses BackendAvailabilityCache, stuck needs
+            # Task.current_cascade_index.
+            logger.warning(
+                "Task [%s]: stuck again at escalation tier %s. "
+                "Requesting human intervention.",
+                task.id, model,
+            )
+            self._request_human_intervention(
+                task, result,
+                reason="Stuck at escalation tier, still unable to make progress.",
+            )
+            return
+
+        # --- Decision / Error ---
+        if result.exit_reason == LoopExitReason.DECISION:
+            self._handle_decision(task, result)
+            return
+
+        self._request_human_intervention(
+            task, result, reason="Unrecoverable error in escalated task run."
+        )
+
     def _run_task(self, task: Task) -> None:
         """
         Run a single task to completion, yield, or block.
@@ -1311,12 +1489,45 @@ class Orchestrator:
 
         try:
             run_result = self._run_agent(ctx, agent, messages, model=resolved_model)
-        except TokenBudgetExceededError as e:
-            self._handle_budget_exhausted(task, e)
+        except SummarizationUnavailableError as e:
+            # Summarizer backend unavailable during context compression.
+            # Record failure on the summarizer backend, log, and yield.
+            if self._availability_cache is not None:
+                summarizer_cascade = self._router.summarizer_cascade()
+                if summarizer_cascade:
+                    parsed = self._router.parse_model_string(summarizer_cascade[0])
+                    self._availability_cache.record_failure(parsed.backend)
+            logger.warning(
+                "Task [%s]: summarisation unavailable (%s). "
+                "Marking READY for retry.", task.id, e,
+            )
+            self.queue.mark_ready(task.id)
             return
-        
+        except BackendConnectionError as e:
+            # Connection failure mid-loop — record failure and yield.
+            if self._availability_cache is not None:
+                parsed = self._router.parse_model_string(resolved_model)
+                self._availability_cache.record_failure(parsed.backend)
+            logger.warning(
+                "Task [%s]: backend connection error (%s). Marking READY.",
+                task.id, e,
+            )
+            self.queue.mark_ready(task.id)
+            return
+        except TokenBudgetExceededError as e:
+            # Budget exhausted mid-loop (burst over the upfront check).
+            self._mark_backend_exhausted(e.provider)
+            self.queue.mark_ready(task.id)
+            return
+
         result   = run_result.loop_result
         detector = run_result.detector
+
+        # --- Success: clear availability failure state ---
+        if result.exit_reason == LoopExitReason.COMPLETE:
+            if self._availability_cache is not None:
+                parsed = self._router.parse_model_string(resolved_model)
+                self._availability_cache.record_success(parsed.backend)
 
         # --- Yield (time slice expired or preemption) ---
         if result.exit_reason == LoopExitReason.YIELD:
@@ -1330,20 +1541,31 @@ class Orchestrator:
             return
 
         # --- Escalate (Coder cascade) ---
-        # TODO: make iterative for concurrency when multi-threaded model is applied
         if result.exit_reason == LoopExitReason.ESCALATE:
             if task.role == AgentRole.CODER:
-                escalated, new_model = self._router.escalate(detector)
-                if escalated:
-                    logger.info(
-                        "Task [%s] escalating to %s.", task.id, new_model,
-                    )
+                cascade = self._router.cascade_for_role(AgentRole.CODER)
+                # TODO(#15): current_cascade_index should live on Task, not be
+                # derived from resolved_model at runtime. Per-task tracking
+                # needed for multi-worker correctness and correct
+                # stuck-escalation persistence across context switches.
+                # Availability fallback always re-resolves from index 0
+                # (transient, try preferred again next cycle). Stuck escalation
+                # must persist (diagnostic, smaller model already proved
+                # insufficient). These require different state: availability
+                # uses BackendAvailabilityCache, stuck needs
+                # Task.current_cascade_index.
+                try:
+                    current_index = cascade.index(resolved_model)
+                except ValueError:
+                    current_index = 0
+                if current_index < len(cascade) - 1:
+                    next_model = cascade[current_index + 1]
                     handoff_messages = self._router.build_handoff(
                         detector, result.messages
                     )
                     task.context_messages = handoff_messages
                     self.queue.update(task)
-                    self._run_task(task)
+                    self._run_task_with_model(task, next_model)
                     return
             logger.warning(
                 "Task [%s] at cascade ceiling or non-escalatable role — "
@@ -1351,7 +1573,7 @@ class Orchestrator:
             )
             self._request_human_intervention(
                 task, result,
-                reason="At top of model cascade, still stuck.",
+                reason="At cascade ceiling, still stuck.",
             )
             return
 
