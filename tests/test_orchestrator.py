@@ -141,8 +141,18 @@ def make_orchestrator(tmp_path: Path, **config_kwargs) -> Orchestrator:
     mock_router.parsed_model_for_role.return_value = MagicMock(model="test-model")
     mock_router.backend_for_role.return_value      = MagicMock()
     mock_router.get_backend.return_value           = MagicMock()
+    mock_router.cascade_for_role.return_value      = ["ollama:test-model"]
+    mock_router.get_backend_for_model.return_value = MagicMock()
     mock_router.stream_for_role.return_value       = False
     mock_router.think_for_role.return_value        = False
+
+    def _fake_parse(model_str):
+        pm = MagicMock()
+        pm.backend = "ollama"
+        pm.model = "test-model"
+        pm.is_remote = False
+        return pm
+    mock_router.parse_model_string = _fake_parse
 
     with patch("matrixmouse.orchestrator.Router", return_value=mock_router):
         orch = Orchestrator(
@@ -1912,7 +1922,7 @@ class TestTaskRunContext:
         # Mock _run_agent to capture the ctx
         captured_ctx = None
 
-        def mock_run_agent(ctx, agent, messages):
+        def mock_run_agent(ctx, agent, messages, model=None):
             nonlocal captured_ctx
             captured_ctx = ctx
             return make_run_result(LoopExitReason.COMPLETE, summary="done")
@@ -1971,7 +1981,7 @@ class TestTaskRunContext:
 
         captured_graphs = []
 
-        def mock_run_agent(ctx, agent, messages):
+        def mock_run_agent(ctx, agent, messages, model=None):
             captured_graphs.append(ctx.graph)
             return make_run_result(LoopExitReason.COMPLETE, summary="done")
 
@@ -2016,7 +2026,7 @@ class TestTaskRunContext:
 
         captured_ctx = None
 
-        def mock_run_agent(ctx, agent, messages):
+        def mock_run_agent(ctx, agent, messages, model=None):
             nonlocal captured_ctx
             captured_ctx = ctx
             return make_run_result(LoopExitReason.COMPLETE, summary="done")
@@ -2029,4 +2039,273 @@ class TestTaskRunContext:
         assert captured_ctx is not None
         assert isinstance(captured_ctx, TaskRunContext)
         assert captured_ctx.graph is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3B — Cascade resolution (Issue #32)
+# ---------------------------------------------------------------------------
+
+class TestResolveModelForTask:
+    """Tests for Orchestrator._resolve_model_for_task()."""
+
+    def _make_orch_for_resolve(self, tmp_path):
+        """Create orchestrator with real-ish cascade resolution."""
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        config = make_config()
+        config.coder_cascade = ["ollama:coder1", "ollama:coder2"]
+        config.manager_cascade = ["ollama:manager1"]
+        config.writer_cascade = ["ollama:writer1"]
+        config.critic_cascade = ["ollama:critic1"]
+        config.merge_resolution_cascade = ["ollama:merge1"]
+        config.summarizer_cascade = ["ollama:summarizer1"]
+
+        paths = MagicMock()
+        paths.workspace_root = tmp_path
+
+        queue = InMemoryTaskRepository()
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+
+        mock_router = MagicMock()
+        mock_router.cascade_for_role.return_value = ["ollama:coder1", "ollama:coder2"]
+
+        mock_router.stream_for_role.return_value = False
+        mock_router.think_for_role.return_value = False
+
+        # parse_model_string mock
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = model_str.split(":")[0] if ":" in model_str else "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = pm.backend in ("anthropic", "openai")
+            return pm
+
+        mock_router.get_backend_for_model.return_value = MagicMock()
+
+        with patch("matrixmouse.orchestrator.Router", return_value=mock_router):
+            orch = Orchestrator(
+                config=config,
+                paths=paths,
+                queue=queue,
+                ws_state_repo=ws_state_repo,
+            )
+        orch._router = mock_router
+        orch._router.parse_model_string = fake_parse
+        return orch, mock_router
+
+    def test_resolve_model_picks_first_available(self):
+        """Cascade [A, B, C], all pass → A."""
+        tmp = Path("/tmp/test_orch_3b_1")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "ollama:coder1"
+
+    def test_resolve_model_skips_budget_exhausted_remote(self):
+        """A raises TokenBudgetExceededError in check_budget → B."""
+        tmp = Path("/tmp/test_orch_3b_2")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        from matrixmouse.inference.base import TokenBudgetExceededError
+        from matrixmouse.inference.token_budget import TokenBudgetTracker
+
+        # Set up a budget tracker that blocks the first model
+        mock_tracker = MagicMock()
+        def check_budget_fn(provider, model):
+            if provider == "anthropic" and model == "claude-1":
+                raise TokenBudgetExceededError(
+                    provider="anthropic", period="hour",
+                    limit=100, used=101,
+                )
+        mock_tracker.check_budget.side_effect = check_budget_fn
+        orch._budget_tracker = mock_tracker
+
+        mock_router.cascade_for_role.return_value = [
+            "anthropic:claude-1", "anthropic:claude-2"
+        ]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = True
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "anthropic:claude-2"
+
+    def test_resolve_model_skips_cooldown_backend(self):
+        """A's backend in cooldown → B (different backend)."""
+        tmp = Path("/tmp/test_orch_3b_3")
+        tmp.mkdir(exist_ok=True)
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("anthropic")
+        orch._availability_cache = cache
+
+        mock_router.cascade_for_role.return_value = [
+            "anthropic:claude-1", "openai:gpt-4o"
+        ]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            parts = model_str.split(":")
+            pm.backend = parts[0]
+            pm.model = parts[-1]
+            pm.is_remote = True
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+        # No budget tracker → budget check skipped
+        orch._budget_tracker = None
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "openai:gpt-4o"
+
+    def test_resolve_model_local_backend_skips_budget_check(self):
+        """Local backend is not passed to check_budget even when
+        budget_tracker is set; confirm via mock."""
+        tmp = Path("/tmp/test_orch_3b_4")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        mock_tracker = MagicMock()
+        orch._budget_tracker = mock_tracker
+
+        mock_router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+
+        # Budget tracker should NOT be called for local backends
+        mock_tracker.check_budget.assert_not_called()
+
+    def test_resolve_model_all_exhausted_returns_none(self):
+        """All fail → None."""
+        tmp = Path("/tmp/test_orch_3b_5")
+        tmp.mkdir(exist_ok=True)
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("anthropic")
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        mock_router.cascade_for_role.return_value = ["anthropic:claude-1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = True
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result is None
+
+    def test_resolve_model_single_entry_cascade_passes(self):
+        """Single entry cascade, available → returns it."""
+        tmp = Path("/tmp/test_orch_3b_6")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        mock_router.cascade_for_role.return_value = ["ollama:only-model"]
+        orch._budget_tracker = None
+        orch._availability_cache = None
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "ollama:only-model"
+
+    def test_resolve_model_single_entry_cascade_fails_returns_none(self):
+        """Single entry cascade, backend in cooldown → None."""
+        tmp = Path("/tmp/test_orch_3b_7")
+        tmp.mkdir(exist_ok=True)
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("ollama")
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        mock_router.cascade_for_role.return_value = ["ollama:only-model"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result is None
         

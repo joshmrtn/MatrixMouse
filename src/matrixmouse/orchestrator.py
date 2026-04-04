@@ -32,13 +32,15 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from matrixmouse.agents import agent_for_role
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
 from matrixmouse.inference.base import TokenBudgetExceededError
 from matrixmouse.inference.token_budget import TokenBudgetTracker
+if TYPE_CHECKING:
+    from matrixmouse.inference.availability import BackendAvailabilityCache
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.repository.task_repository import TaskRepository
 from matrixmouse.repository.workspace_state_repository import (
@@ -495,6 +497,7 @@ class Orchestrator:
         ws_state_repo: WorkspaceStateRepository,
         graph=None,
         budget_tracker: TokenBudgetTracker | None = None,
+        availability_cache: "BackendAvailabilityCache | None" = None,
     ):
         self.config = config
         self.paths = paths
@@ -502,8 +505,9 @@ class Orchestrator:
 
         self.queue = queue
         self._ws_state_repo = ws_state_repo
-        self._router = Router(config)
+        self._router = Router(config, budget_tracker=budget_tracker)
         self._budget_tracker = budget_tracker
+        self._availability_cache = availability_cache
 
         self._exhausted_backends: set[str] = set()
         self._exhausted_backends_lock = threading.Lock()
@@ -1084,6 +1088,61 @@ class Orchestrator:
     # Task execution
     # -----------------------------------------------------------------------
 
+    def _resolve_model_for_task(self, task: Task) -> str | None:
+        """Walk the cascade for the task's role, returning the first usable model.
+
+        For each entry:
+            1. Parse the model string.
+            2. If remote and budget_tracker is set, check budget — skip if
+               exhausted. Local backends (ollama, llamacpp) have no token
+               budget; ``parsed.is_remote`` gates this check explicitly.
+            3. If availability_cache is set, check if the backend is available
+               — skip if in cooldown.
+            4. Return the first passing model string.
+
+        Returns None if all entries are exhausted.
+
+        Args:
+            task: The task to resolve a model for.
+
+        Returns:
+            First available model string, or None.
+        """
+        from matrixmouse.inference.base import TokenBudgetExceededError
+
+        cascade = self._router.cascade_for_role(task.role)
+
+        for model_string in cascade:
+            parsed = self._router.parse_model_string(model_string)
+
+            # Budget check — local backends have no token budget.
+            # `parsed.is_remote` gates this: ollama/llamacpp are always local
+            # and never hit the provider budget, even when budget_tracker is set.
+            if parsed.is_remote and self._budget_tracker is not None:
+                try:
+                    self._budget_tracker.check_budget(
+                        provider=parsed.backend,
+                        model=parsed.model,
+                    )
+                except TokenBudgetExceededError:
+                    logger.debug(
+                        "Skipping model %s — budget exhausted.", model_string,
+                    )
+                    continue
+
+            # Availability check
+            if self._availability_cache is not None:
+                if not self._availability_cache.is_available(parsed.backend):
+                    logger.debug(
+                        "Skipping model %s — backend '%s' in cooldown.",
+                        model_string, parsed.backend,
+                    )
+                    continue
+
+            return model_string
+
+        return None
+
     def _run_task(self, task: Task) -> None:
         """
         Run a single task to completion, yield, or block.
@@ -1095,25 +1154,33 @@ class Orchestrator:
         to do next based on task status after return.
         """
 
-        # --- Upfront budget check ---
-        # If the backend for this task is known-exhausted this cycle, move
-        # the task to WAITING immediately without doing any git or agent work.
-        # The backend calculates the precise wait_until from the usage window.
-        # Uses cascade[0] (most-preferred model) at this stage — full cascade
-        # walk comes in Phase 3.
-        if self._budget_tracker is not None:
-            cascade = self._router.cascade_for_role(task.role)
-            if cascade:
-                parsed = parse_model_string(cascade[0])
-                if parsed.is_remote:
-                    try:
-                        self._budget_tracker.check_budget(
-                            provider=parsed.backend,
-                            model=parsed.model,
-                        )
-                    except TokenBudgetExceededError as e:
-                        self._handle_budget_exhausted(task, e)
-                        return
+        # --- Model resolution ---
+        # Resolve model from cascade at this stage — full cascade walk.
+        # If no model is available, handle exhaustion and return.
+        resolved_model = self._resolve_model_for_task(task)
+        if resolved_model is None:
+            # No cascade entry available — fall back to old budget check
+            # for backward compatibility during transition. Full
+            # _handle_all_backends_exhausted comes in Phase 3C.
+            if self._budget_tracker is not None:
+                cascade = self._router.cascade_for_role(task.role)
+                if cascade:
+                    parsed = parse_model_string(cascade[0])
+                    if parsed.is_remote:
+                        try:
+                            self._budget_tracker.check_budget(
+                                provider=parsed.backend,
+                                model=parsed.model,
+                            )
+                        except TokenBudgetExceededError as e:
+                            self._handle_budget_exhausted(task, e)
+                            return
+            logger.warning(
+                "Task [%s]: no model available from cascade. "
+                "Marking READY.", task.id,
+            )
+            self.queue.mark_ready(task.id)
+            return
 
         if task.branch and task.repo:
             repo_root = self.paths.workspace_root / task.repo[0]
@@ -1233,10 +1300,6 @@ class Orchestrator:
 
         messages = self._load_or_build_messages(task, agent)
 
-        # Resolve model from cascade[0] — full cascade walk in Phase 3
-        cascade = self._router.cascade_for_role(task.role)
-        resolved_model = cascade[0] if cascade else ""
-
         self._update_status(
             role=task.role.value,
             model=resolved_model,
@@ -1247,7 +1310,7 @@ class Orchestrator:
         reconfigure_for_task(task.repo, self.paths.workspace_root)
 
         try:
-            run_result = self._run_agent(ctx, agent, messages)
+            run_result = self._run_agent(ctx, agent, messages, model=resolved_model)
         except TokenBudgetExceededError as e:
             self._handle_budget_exhausted(task, e)
             return
@@ -1305,7 +1368,7 @@ class Orchestrator:
             return
 
     def _run_agent(
-        self, ctx: TaskRunContext, agent, messages: list
+        self, ctx: TaskRunContext, agent, messages: list, model: str
     ) -> RunResult:
         """
         Construct and run the AgentLoop for a task.
@@ -1314,6 +1377,7 @@ class Orchestrator:
             ctx: TaskRunContext with task and graph.
             agent: Agent instance for the task's role.
             messages: Initial message history.
+            model: The resolved model string to use for inference.
 
         Returns:
             RunResult with loop outcome and stuck detector.
@@ -1384,11 +1448,8 @@ class Orchestrator:
                 queue=self.queue,
             )
 
-        # Select model — uses cascade[0] for all roles at this stage.
-        # MERGE role uses its cascade (which defaults to coder_cascade[-1]).
-        # Full cascade walk comes in Phase 3.
-        cascade = self._router.cascade_for_role(task.role)
-        model = cascade[0] if cascade else ""
+        # Model is already resolved and passed in — no need to re-resolve.
+        # `model` parameter contains the cascade-resolved model string.
 
         wip_commit_fn = None
         if cwd is not None and task.branch:
@@ -1463,7 +1524,7 @@ class Orchestrator:
 
         detector = StuckDetector(role=task.role)
 
-        # Resolve working model from the resolved cascade entry
+        # Resolve working model and backend from the passed model string
         working_parsed = parse_model_string(model)
         working_backend = self._router.get_backend_for_model(model)
 
@@ -1495,6 +1556,7 @@ class Orchestrator:
 
         loop = AgentLoop(
             model=working_parsed.model,
+            backend=working_backend,
             messages=messages,
             tools=tools,
             allowed_tools=agent.allowed_tools,
@@ -1512,7 +1574,6 @@ class Orchestrator:
             think=self._router.think_for_role(task.role),
             current_repo=current_repo,
             task_turn_limit=task.turn_limit,
-            backend=working_backend,
         )
 
         # If the task has pending tool calls from an interrupted turn
