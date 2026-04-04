@@ -177,13 +177,26 @@ class TokenBudgetExceededError(LLMBackendError):
         self.limit = limit
         self.used = used
         self.retry_after = retry_after
-        
+
         message = (
             f"{provider} {period} token budget exhausted: {used}/{limit} tokens used"
         )
         if retry_after is not None:
             message += f". Retry after {retry_after.isoformat()}"
         super().__init__(message)
+
+
+class SummarizationUnavailableError(LLMBackendError):
+    """Raised when no summarizer backend is available to compress context.
+
+    This is a hard failure, not a graceful degradation. A task that cannot
+    summarise its context will become permanently stuck as the context window
+    fills. The orchestrator catches this and yields the task to READY so the
+    scheduler retries when a summarizer backend becomes available again.
+
+    Callers must not catch and swallow this exception. It must propagate to
+    the orchestrator.
+    """
 
 
 # ---------------------------------------------------------------------------
