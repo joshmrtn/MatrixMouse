@@ -63,25 +63,69 @@ class MatrixMouseConfig(BaseSettings):
         default=True,
         description="Prevent non-local LLM inference if True, allows if False."
     )
-    coder_model: str = Field(
-        default="http://localhost:11434:ollama:qwen3.5:2b",
-        description="Model for code generation and implementation tasks.",
+    manager_cascade: list[str] = Field(
+        default=[],
+        description=(
+            "Ordered model preference list for the Manager role. Most-preferred first. "
+            "Manager prefers the most capable model — list largest/most capable first, "
+            "smaller fallbacks after. Falls back down the list on provider unavailability."
+        ),
     )
-    writer_model: str = Field(
-        default="http://localhost:11434:ollama:qwen3.5:2b",
-        description="Model for prose generation tasks. (Not for source code).",
+    critic_cascade: list[str] = Field(
+        default=[],
+        description=(
+            "Ordered model preference list for the Critic role. Most-preferred first. "
+            "Prefer strong reasoning models. Falls back on unavailability."
+        ),
     )
-    manager_model: str = Field(
-        default="http://localhost:11434:ollama:qwen3.5:2b",
-        description="Model for planning, design, and architectural decisions.",
+    writer_cascade: list[str] = Field(
+        default=[],
+        description=(
+            "Ordered model preference list for the Writer role. Most-preferred first. "
+            "Falls back on unavailability."
+        ),
     )
-    critic_model: str = Field(
-        default="http://localhost:11434:ollama:qwen3.5:2b",
-        description="Model for critique, review, and stuck detection.",
+    coder_cascade: list[str] = Field(
+        default=[],
+        description=(
+            "Ordered model preference list for the Coder role. Most-preferred first. "
+            "Coder prefers the smallest/cheapest model that can do the work — list "
+            "smallest first, escalate to larger on stuck OR provider unavailability."
+        ),
     )
-    summarizer_model: str = Field(
-        default="http://localhost:11434:ollama:qwen3.5:2b",
-        description="Model for context summarisation. Should be small and fast.",
+    merge_resolution_cascade: list[str] = Field(
+        default=[],
+        description=(
+            "Ordered model preference list for merge conflict resolution. "
+            "Most-preferred first. Defaults to [coder_cascade[-1]] if not set. "
+            "Falls back on unavailability."
+        ),
+    )
+    summarizer_cascade: list[str] = Field(
+        default=[],
+        description=(
+            "Ordered model preference list for context summarisation. Most-preferred "
+            "first. Required — startup fails if empty. If all entries are unavailable "
+            "at runtime, SummarizationUnavailableError is raised and the task yields "
+            "for retry rather than silently skipping compression. A task that cannot "
+            "summarise context will become permanently stuck as the context window fills. "
+            "Prefer a small/fast local model to avoid burning remote token budget on "
+            "housekeeping."
+        ),
+    )
+    backend_cooldown_initial_seconds: int = Field(
+        default=30,
+        description=(
+            "Initial cooldown in seconds after the first backend connection failure. "
+            "Doubles on each consecutive failure up to backend_cooldown_max_seconds."
+        ),
+    )
+    backend_cooldown_max_seconds: int = Field(
+        default=600,
+        description=(
+            "Maximum backend connection failure cooldown in seconds. "
+            "Ceiling for the exponential backoff applied after repeated connection failures."
+        ),
     )
     agent_max_turns: int = Field(
         default=50,
@@ -89,16 +133,6 @@ class MatrixMouseConfig(BaseSettings):
             "Maximum turns an agent may take on a single task before the "
             "task is moved to BLOCKED_BY_HUMAN. The operator can extend, "
             "respec, or cancel via the turn-limit response endpoint."
-        ),
-    )
-
-    # --- Coder cascade ---
-    coder_cascade: list[str] = Field(
-        default=["http://localhost:11434:ollama:qwen3.5:4b", "http://localhost:11434:ollama:qwen3.5:9b", "http://localhost:11434:ollama:qwen3.5:27b"],
-        description=(
-            "Ordered list of models for the coder cascade, smallest to largest. "
-            "If only one entry, no escalation occurs. "
-            "Example: ['http://localhost:11434:ollama:qwen2.5-coder:7b', 'http://localhost:11434:ollama:qwen2.5-coder:14b', 'http://localhost:11434:ollama:qwen2.5-coder:30b']"
         ),
     )
 
@@ -372,14 +406,6 @@ class MatrixMouseConfig(BaseSettings):
         description=(
             "Maximum turns an agent may take to resolve a merge conflict "
             "before the task is escalated to BLOCKED_BY_HUMAN."
-        ),
-    )
-    merge_resolution_model: str = Field(
-        default="",
-        description=(
-            "Model to use for merge conflict resolution. "
-            "Empty string means use the last (largest) model in coder_cascade. "
-            "Override to pin a specific model: e.g. 'qwen2.5-coder:32b'."
         ),
     )
     push_wip_to_remote: bool = Field(
