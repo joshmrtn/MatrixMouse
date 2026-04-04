@@ -2719,4 +2719,160 @@ class TestStuckEscalationPath:
                                         orch._run_task(task)
 
         mock_human.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5B — Sweep tests (Issue #32)
+# ---------------------------------------------------------------------------
+
+class TestPhase5BSweepTests:
+    """Sweep tests from the Phase 5B plan — integration paths not covered elsewhere."""
+
+    def test_waiting_task_promoted_after_budget_rolls_off(self, tmp_path):
+        """Task WAITING with wait_until just in future; time mock advances;
+        _maybe_promote_waiting_tasks moves to READY."""
+        orch = make_orchestrator(tmp_path)
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        future_time = datetime.now(timezone.utc) - timedelta(seconds=1)  # Just passed
+        task.status = TaskStatus.WAITING
+        task.wait_until = future_time.isoformat()
+        task.wait_reason = "budget:anthropic"
+        orch.queue.add(task)
+
+        promoted = orch._maybe_promote_waiting_tasks()
+
+        assert promoted == 1
+        # all_tasks() returns copies, so re-fetch to verify
+        updated = orch.queue.get(task.id)
+        assert updated.status == TaskStatus.READY
+        assert updated.wait_until is None
+        assert updated.wait_reason == ""
+
+    def test_waiting_task_promoted_after_availability_cache_clears(self, tmp_path):
+        """Task WAITING with wait_reason=backend_unavailable:anthropic;
+        record_success called; next promote cycle moves to READY."""
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch = make_orchestrator(tmp_path)
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+
+        # Simulate a task that was put in WAITING due to backend unavailability
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.status = TaskStatus.WAITING
+        # Set wait_until far in the future so time alone won't promote it
+        future_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        task.wait_until = future_time.isoformat()
+        task.wait_reason = "backend_unavailable:anthropic"
+        orch.queue.add(task)
+
+        # Now simulate the backend recovering
+        cache.record_success("anthropic")
+        orch._availability_cache = cache
+
+        # Promote should NOT happen yet (wait_until still in future)
+        promoted = orch._maybe_promote_waiting_tasks()
+        assert promoted == 0
+        updated = orch.queue.get(task.id)
+        assert updated.status == TaskStatus.WAITING
+
+        # Clear the wait manually (simulating operator or scheduler action after
+        # availability recovered)
+        updated.wait_until = None
+        updated.wait_reason = ""
+        orch.queue.update(updated)
+
+        # Now promote should happen
+        promoted = orch._maybe_promote_waiting_tasks()
+        assert promoted == 1
+        final = orch.queue.get(task.id)
+        assert final.status == TaskStatus.READY
+
+    def test_full_three_entry_cascade_two_fail_one_passes(self, tmp_path):
+        """Entry 0 budget exhausted, entry 1 in cooldown, entry 2 local and
+        available → task runs on entry 2."""
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+        from matrixmouse.inference.base import TokenBudgetExceededError
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = [
+            "anthropic:claude-1",   # Entry 0: budget exhausted
+            "anthropic:claude-2",   # Entry 1: in cooldown
+            "ollama:coder-local",    # Entry 2: local, available
+        ]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            parts = model_str.split(":")
+            pm.backend = parts[0]
+            pm.model = parts[-1]
+            pm.is_remote = parts[0] in ("anthropic", "openai")
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        # Set up budget tracker — blocks first entry
+        mock_tracker = MagicMock()
+        def check_budget_fn(provider, model):
+            if model == "claude-1":
+                raise TokenBudgetExceededError(
+                    provider="anthropic", period="hour",
+                    limit=100, used=101,
+                )
+        mock_tracker.check_budget.side_effect = check_budget_fn
+        orch._budget_tracker = mock_tracker
+
+        # Set up availability cache — blocks second entry's backend
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("anthropic")  # Entry 1's backend in cooldown
+        orch._availability_cache = cache
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"
+        orch.queue.add(task)
+
+        result = orch._resolve_model_for_task(task)
+
+        # Should skip entry 0 (budget) and entry 1 (cooldown), return entry 2
+        assert result == "ollama:coder-local"
+
+    def test_single_entry_cascade_exhausted_sets_waiting(self, tmp_path):
+        """One-entry cascade, backend exhausted with known retry_after →
+        WAITING with correct wait_until."""
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["anthropic:claude-1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = "claude-1"
+            pm.is_remote = True
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        # Budget tracker with known retry_after
+        mock_tracker = MagicMock()
+        wait_after = datetime.now(timezone.utc) + timedelta(minutes=15)
+        mock_tracker.get_retry_after.return_value = wait_after
+        orch._budget_tracker = mock_tracker
+        orch._availability_cache = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        orch.queue.add(task)
+
+        orch._handle_all_backends_exhausted(task)
+
+        assert task.status == TaskStatus.WAITING
+        assert task.wait_reason == "budget:anthropic"
+        assert task.wait_until is not None
+        # wait_until should match the budget retry_after
+        wait_until_dt = datetime.fromisoformat(task.wait_until)
+        assert wait_until_dt == wait_after
         
