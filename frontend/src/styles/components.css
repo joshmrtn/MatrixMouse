@@ -1224,10 +1224,92 @@
   border-color: var(--green2);
 }
 
+/* Search Input */
+.search-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 150px;
+  max-width: 300px;
+}
+
+#task-search {
+  width: 100%;
+  background: var(--bg1);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  padding-right: 28px;  /* Space for clear button */
+  font-family: var(--font-ui);
+  font-size: 11px;
+  outline: none;
+  cursor: text;
+  border-radius: var(--radius-sm);
+}
+
+#task-search:focus {
+  border-color: var(--green2);
+}
+
+#task-search-clear {
+  position: absolute;
+  right: 4px;
+  background: none;
+  border: none;
+  color: var(--text3);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+#task-search-clear:hover {
+  color: var(--text);
+  background: var(--bg2);
+}
+
+#task-search-clear.hidden {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .search-container {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .filter-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #task-search {
+    max-width: none;
+  }
+}
+
 #tasks-list {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-sm);
+}
+
+.task-count {
+  font-size: 10px;
+  color: var(--text3);
+  padding: var(--spacing-xs) var(--spacing-md);
+  margin-bottom: var(--spacing-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 768px) {
+  .task-count {
+    white-space: normal;
+  }
 }
 
 .task-item {
@@ -1239,6 +1321,24 @@
 
 .task-item:hover {
   border-color: var(--green2);
+}
+
+/* Terminal state (complete/cancelled) */
+.task-item.terminal {
+  opacity: 0.6;
+}
+
+.task-item.terminal .task-title {
+  color: var(--text3);
+  text-decoration: line-through;
+}
+
+.task-item.terminal .task-repo {
+  color: var(--text3);
+}
+
+.task-item.terminal .task-id {
+  color: var(--text3);
 }
 
 .task-link {
@@ -1308,6 +1408,21 @@
   white-space: nowrap;
 }
 
+.task-role {
+  font-size: 9px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.task-priority {
+  font-size: 9px;
+  color: var(--amber);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
 .task-status.status-ready,
 .task-status.status-pending {
   color: var(--text2);
@@ -1352,6 +1467,64 @@
 .btn-primary:hover {
   background: var(--green);
   color: #000;
+}
+
+/* Task Loading Skeletons */
+.task-skeleton {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.task-skeleton-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.task-skeleton-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 100px;
+  max-width: 200px;
+}
+
+/* Error States */
+.error-message {
+  background: var(--bg1);
+  border: 1px solid var(--red2);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-md);
+  text-align: center;
+}
+
+.error-message p {
+  color: var(--text2);
+  font-size: 11px;
+  margin: 0 0 var(--spacing-sm) 0;
+}
+
+.retry-btn {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  padding: var(--spacing-xs) var(--spacing-md);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.retry-btn:hover {
+  border-color: var(--green2);
+  color: var(--green);
 }
 
 /* ============================================================================
