@@ -137,14 +137,9 @@ def make_orchestrator(tmp_path: Path, **config_kwargs) -> Orchestrator:
     ws_state_repo = InMemoryWorkspaceStateRepository()
 
     mock_router = MagicMock()
-    mock_router.model_for_role.return_value        = "ollama:test-model"
-    mock_router.parsed_model_for_role.return_value = MagicMock(model="test-model")
-    mock_router.backend_for_role.return_value      = MagicMock()
-    mock_router.get_backend.return_value           = MagicMock()
-    mock_router.cascade_for_role.return_value      = ["ollama:test-model"]
+    mock_router.cascade_for_role.return_value = ["ollama:test-model"]
     mock_router.get_backend_for_model.return_value = MagicMock()
-    mock_router.stream_for_role.return_value       = False
-    mock_router.think_for_role.return_value        = False
+    mock_router.summarizer_cascade.return_value = ["ollama:summarizer-model"]
 
     def _fake_parse(model_str):
         pm = MagicMock()
@@ -1732,80 +1727,6 @@ class TestMaybePromoteWaitingTasks:
 
 
 # ---------------------------------------------------------------------------
-# _handle_budget_exhausted
-# ---------------------------------------------------------------------------
-
-class TestHandleBudgetExhausted:
-    """Tests for Orchestrator._handle_budget_exhausted method."""
-
-    def test_sets_task_status_to_waiting(self, tmp_path):
-        """_handle_budget_exhausted sets task status to WAITING."""
-        from matrixmouse.inference.base import TokenBudgetExceededError
-        
-        orch = make_orchestrator(tmp_path)
-        task = make_task()
-        orch.queue.add(task)
-        
-        exc = TokenBudgetExceededError(
-            provider="anthropic",
-            period="hour",
-            limit=100000,
-            used=150000,
-            retry_after=datetime.now(timezone.utc) + timedelta(minutes=30),
-        )
-        orch._handle_budget_exhausted(task, exc)
-        
-        updated = orch.queue.get(task.id)
-        assert updated is not None
-        assert updated.status == TaskStatus.WAITING
-
-    def test_sets_wait_reason_to_budget_provider(self, tmp_path):
-        """_handle_budget_exhausted sets wait_reason to "budget:<provider>"."""
-        from matrixmouse.inference.base import TokenBudgetExceededError
-        
-        orch = make_orchestrator(tmp_path)
-        task = make_task()
-        orch.queue.add(task)
-        
-        exc = TokenBudgetExceededError(
-            provider="anthropic",
-            period="hour",
-            limit=100000,
-            used=150000,
-            retry_after=datetime.now(timezone.utc) + timedelta(minutes=30),
-        )
-        orch._handle_budget_exhausted(task, exc)
-        
-        updated = orch.queue.get(task.id)
-        assert updated is not None
-        assert updated.wait_reason == "budget:anthropic"
-
-    def test_sets_wait_until_from_exc_retry_after(self, tmp_path):
-        """_handle_budget_exhausted sets wait_until from exc.retry_after."""
-        from matrixmouse.inference.base import TokenBudgetExceededError
-        
-        orch = make_orchestrator(tmp_path)
-        task = make_task()
-        orch.queue.add(task)
-        
-        retry_dt = datetime.now(timezone.utc) + timedelta(minutes=30)
-        exc = TokenBudgetExceededError(
-            provider="anthropic",
-            period="hour",
-            limit=100000,
-            used=150000,
-            retry_after=retry_dt,
-        )
-        orch._handle_budget_exhausted(task, exc)
-        
-        updated = orch.queue.get(task.id)
-        assert updated is not None
-        assert updated.wait_until is not None
-        # Should be the ISO format of the retry_after datetime
-        assert updated.wait_until == retry_dt.isoformat()
-
-
-# ---------------------------------------------------------------------------
 # _mark_backend_exhausted / _get_and_clear_exhausted_backends
 # ---------------------------------------------------------------------------
 
@@ -2042,7 +1963,7 @@ class TestTaskRunContext:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3B — Cascade resolution (Issue #32)
+# Cascade resolution (Issue #32)
 # ---------------------------------------------------------------------------
 
 class TestResolveModelForTask:
@@ -2311,7 +2232,7 @@ class TestResolveModelForTask:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3C — Error handling, WAITING, stuck escalation (Issue #32)
+# Error handling, WAITING, stuck escalation (Issue #32)
 # ---------------------------------------------------------------------------
 
 class TestHandleAllBackendsExhausted:
@@ -2722,11 +2643,11 @@ class TestStuckEscalationPath:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5B — Sweep tests (Issue #32)
+# Sweep tests (Issue #32)
 # ---------------------------------------------------------------------------
 
-class TestPhase5BSweepTests:
-    """Sweep tests from the Phase 5B plan — integration paths not covered elsewhere."""
+class TestSweepTests:
+    """Sweep tests — integration paths not covered elsewhere."""
 
     def test_waiting_task_promoted_after_budget_rolls_off(self, tmp_path):
         """Task WAITING with wait_until just in future; time mock advances;

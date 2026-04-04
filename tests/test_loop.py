@@ -644,7 +644,7 @@ class TestTurnLimit:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3A — LLMBackendError propagation (Issue #32)
+# LLMBackendError propagation (Issue #32)
 # ---------------------------------------------------------------------------
 
 class TestLLMBackendErrorPropagation:

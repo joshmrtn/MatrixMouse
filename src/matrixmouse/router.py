@@ -287,79 +287,6 @@ class Router:
         return self._get_or_create_backend(parsed)
 
     # -----------------------------------------------------------------------
-    # Model selection (backward-compat shims — removed in Phase 1C)
-    # -----------------------------------------------------------------------
-
-    def model_for_role(self, role: AgentRole) -> str:
-        """Return the full model string for a given agent role.
-
-        Shim: returns the first entry of the cascade list for the role.
-        This preserves backward compatibility during the transition.
-        """
-        # Handle non-AgentRole values (e.g. string from legacy call sites)
-        if not isinstance(role, AgentRole):
-            coder_cascade = self._role_cascades.get(AgentRole.CODER.value, [])
-            if coder_cascade:
-                return coder_cascade[0]
-            logger.warning(
-                "model_for_role called with non-AgentRole %r — no cascade found.",
-                role,
-            )
-            return ""
-
-        cascade = self._role_cascades.get(role.value, [])
-        if cascade:
-            return cascade[0]
-
-        # Fallback for unknown roles
-        coder_cascade = self._role_cascades.get(AgentRole.CODER.value, [])
-        if coder_cascade:
-            return coder_cascade[0]
-
-        logger.warning(
-            "model_for_role called with unknown role %r — no cascade found.",
-            role,
-        )
-        return ""
-
-    def parsed_model_for_role(self, role: AgentRole) -> ParsedModel:
-        """Return the parsed model descriptor for a given agent role."""
-        return parse_model_string(self.model_for_role(role))
-
-    def backend_for_role(self, role: AgentRole) -> LLMBackend:
-        """Return the cached ``LLMBackend`` instance for a given agent role."""
-        model_string = self.model_for_role(role)
-        return self.get_backend_for_model(model_string)
-
-    def local_model_for_role(self, model_string: str) -> str:
-        """Extract the backend-local model identifier from a full model string."""
-        return parse_model_string(model_string).model
-
-    def get_backend(self, model_string: str) -> LLMBackend:
-        """Return the cached backend for an arbitrary model string.
-
-        Shim: alias for ``get_backend_for_model``.
-        """
-        return self.get_backend_for_model(model_string)
-
-    @property
-    def current_tier(self) -> int:
-        """Current position in the Coder cascade (0 = first entry).
-
-        Shim: always returns 0 since the router no longer tracks tier state.
-        Callers should use ``cascade_for_role`` directly instead.
-        """
-        return 0
-
-    @property
-    def at_ceiling(self) -> bool:
-        """True if the Coder is at the top of the cascade.
-
-        Shim: always returns True since there is no escalation state anymore.
-        """
-        return True
-
-    # -----------------------------------------------------------------------
     # Role-derived flags (unchanged from pre-#32)
     # -----------------------------------------------------------------------
 
@@ -466,26 +393,6 @@ class Router:
         }
 
         return [system_msg, instruction_msg, handoff_msg] + list(recent)
-
-    # -----------------------------------------------------------------------
-    # Backward-compat: escalate / record_success (no-ops, removed in 1C)
-    # -----------------------------------------------------------------------
-
-    def escalate(self, detector: StuckDetector) -> tuple[bool, str | None]:
-        """Shim: no longer escalates. Returns (False, None).
-
-        The actual escalation logic has moved to the orchestrator which
-        walks the cascade directly. This shim prevents crashes during
-        the transition.
-        """
-        logger.warning(
-            "Router.escalate() is deprecated — escalation now handled by "
-            "the orchestrator's cascade walk.",
-        )
-        return False, None
-
-    def record_success(self) -> None:
-        """Shim: no-op. De-escalation state has been removed."""
 
     # -----------------------------------------------------------------------
     # Internal helpers

@@ -347,7 +347,7 @@ class TestSummarizationUnavailablePropagation:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5B — Sweep tests (Issue #32)
+# Sweep tests (Issue #32)
 # ---------------------------------------------------------------------------
 
 class TestSummarizerBudgetTracking:

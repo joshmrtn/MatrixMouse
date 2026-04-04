@@ -1236,10 +1236,42 @@ class Orchestrator:
         task.wait_reason = wait_reason
         task.status = TaskStatus.WAITING
         self.queue.update(task)
-        logger.info(
-            "Task [%s]: all backends exhausted. WAITING until %s (reason: %s).",
-            task.id, wait_until.isoformat(), wait_reason,
+
+        # Mark the backend as exhausted for the current scheduling cycle
+        # so other tasks on the same backend are not retried needlessly.
+        if budget_provider is not None:
+            self._mark_backend_exhausted(budget_provider)
+
+        logger.warning(
+            "Task [%s] waiting on %s budget exhaustion. "
+            "wait_until=%s",
+            task.id, budget_provider or "unknown", wait_until.isoformat(),
         )
+
+        # Emit notification so the operator knows a task is waiting
+        from matrixmouse import comms as comms_module
+        m = comms_module.get_manager()
+        if m:
+            try:
+                m.notify(
+                    title=f"Task [{task.id}] waiting — backends exhausted",
+                    message=(
+                        f"Task: {task.title}\\n"
+                        f"Provider: {budget_provider or cooldown_provider or 'unknown'}\\n"
+                        f"Earliest retry: {wait_until.isoformat()}"
+                    ),
+                )
+                m.emit("task_waiting_on_budget", {
+                    "task_id":    task.id,
+                    "task_title": task.title,
+                    "provider":   budget_provider or cooldown_provider or "unknown",
+                    "wait_until": wait_until.isoformat(),
+                })
+            except Exception as notify_err:
+                logger.warning(
+                    "Failed to emit budget exhaustion notification: %s",
+                    notify_err,
+                )
 
     def _run_task_with_model(self, task: Task, model: str) -> None:
         """Re-enter task execution with a pre-selected model.
@@ -1272,8 +1304,10 @@ class Orchestrator:
                 messages,
                 model=model,
             )
-        except TokenBudgetExceededError as e:
-            self._handle_budget_exhausted(task, e)
+        except TokenBudgetExceededError:
+            # Budget exhausted during _run_task_with_model escalation.
+            # All cascade entries are now exhausted — handle accordingly.
+            self._handle_all_backends_exhausted(task)
             return
 
         result   = run_result.loop_result
@@ -1337,27 +1371,7 @@ class Orchestrator:
         # If no model is available, handle exhaustion and return.
         resolved_model = self._resolve_model_for_task(task)
         if resolved_model is None:
-            # No cascade entry available — fall back to old budget check
-            # for backward compatibility during transition. Full
-            # _handle_all_backends_exhausted comes in Phase 3C.
-            if self._budget_tracker is not None:
-                cascade = self._router.cascade_for_role(task.role)
-                if cascade:
-                    parsed = parse_model_string(cascade[0])
-                    if parsed.is_remote:
-                        try:
-                            self._budget_tracker.check_budget(
-                                provider=parsed.backend,
-                                model=parsed.model,
-                            )
-                        except TokenBudgetExceededError as e:
-                            self._handle_budget_exhausted(task, e)
-                            return
-            logger.warning(
-                "Task [%s]: no model available from cascade. "
-                "Marking READY.", task.id,
-            )
-            self.queue.mark_ready(task.id)
+            self._handle_all_backends_exhausted(task)
             return
 
         if task.branch and task.repo:
@@ -2930,65 +2944,6 @@ class Orchestrator:
 
     
     
-    def _handle_budget_exhausted(
-        self,
-        task: "Task",
-        exc: "TokenBudgetExceededError",
-    ) -> None:
-        """Move a task to WAITING after a budget exhaustion event.
- 
-        Calculates wait_until from the exception\'s retry_after field
-        (which already incorporates both our tracker\'s window calculation
-        and any API-supplied Retry-After hint).
- 
-        Emits a one-time notification so the operator knows a task is
-        waiting on budget, then marks the backend as exhausted for the
-        current scheduling cycle so other tasks on the same backend are
-        not retried needlessly.
- 
-        Args:
-            task: The task whose inference was blocked by budget exhaustion.
-            exc:  The TokenBudgetExceededError carrying provider and wait_until.
-        """
-        wait_until_dt = exc.retry_after
-        wait_until_iso = wait_until_dt.isoformat() if wait_until_dt else None
- 
-        task.wait_until = wait_until_iso
-        task.wait_reason = f"budget:{exc.provider}"
-        task.status = TaskStatus.WAITING
-        self.queue.update(task)
- 
-        self._mark_backend_exhausted(exc.provider)
- 
-        logger.warning(
-            "Task [%s] waiting on %s budget exhaustion. "
-            "wait_until=%s",
-            task.id, exc.provider, wait_until_iso or "unknown",
-        )
-        from matrixmouse import comms as comms_module
-        m = comms_module.get_manager()
-        if m:
-            try:
-                m.notify(
-                    title=f"Task [{task.id}] waiting — {exc.provider} budget exhausted",
-                    message=(
-                        f"Task: {task.title}\\n"
-                        f"Provider: {exc.provider}\\n"
-                        f"Earliest retry: {wait_until_iso or 'unknown'}"
-                    ),
-                )
-                m.emit("task_waiting_on_budget", {
-                    "task_id":    task.id,
-                    "task_title": task.title,
-                    "provider":   exc.provider,
-                    "wait_until": wait_until_iso,
-                })
-            except Exception as notify_err:
-                logger.warning(
-                    "Failed to emit budget exhaustion notification: %s",
-                    notify_err,
-                )
- 
     def _maybe_promote_waiting_tasks(self) -> int:
         """Promote WAITING tasks whose wait_until has passed back to READY.
  

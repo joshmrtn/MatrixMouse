@@ -47,7 +47,7 @@ Tool schema convention:
     raw callables.  Any call site that was previously iterating the result as
     plain functions must be updated to access ``tool.fn`` for dispatch and
     ``tool.schema`` for schema extraction.  The primary call site is
-    ``loop.py`` — this is a known Phase 2 update.
+    ``loop.py``.
 
 Submodules:
     file_tools       — read, write, str_replace, append

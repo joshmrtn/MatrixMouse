@@ -19,15 +19,12 @@ Coverage:
         - local_only=True with remote backend raises ValueError at construction
         - local_only=True with local backends passes
 
-    model_for_role:
-        - MANAGER returns manager_model
-        - CRITIC returns critic_model
-        - CODER returns first cascade tier by default
-        - WRITER returns writer_model
-        - Unknown role falls back to coder_model with warning
-
-    parsed_model_for_role:
-        - Returns ParsedModel with correct backend and model fields
+    cascade_for_role:
+        - Returns configured cascade list for each role
+        - Merge cascade defaults to last coder entry
+        - Empty cascade raises at init
+        - Summarizer cascade separate from AgentRole
+        - Single entry cascade works
 
     stream_for_role / think_for_role:
         - Each role returns configured value
@@ -59,7 +56,7 @@ Coverage:
         - Handoff message contains role from summary
         - keep_recent limits included messages
 
-    backend_for_role / get_backend:
+    get_backend_for_model / caching:
         - Returns an LLMBackend instance
         - Same (host, backend) pair returns cached instance
         - Different hosts return different instances
@@ -260,71 +257,85 @@ class TestLocalOnly:
 
 
 # ---------------------------------------------------------------------------
-# model_for_role
+# cascade_for_role / parsed_model
 # ---------------------------------------------------------------------------
 
-class TestModelForRole:
-    def test_manager_returns_manager_cascade_first(self):
-        r = make_router(manager_cascade=["ollama:big-model"])
-        assert r.model_for_role(AgentRole.MANAGER) == "ollama:big-model"
+class TestCascadeForRole:
+    """Tests for Router.cascade_for_role()."""
 
-    def test_critic_returns_critic_cascade_first(self):
-        r = make_router(critic_cascade=["ollama:big-model"])
-        assert r.model_for_role(AgentRole.CRITIC) == "ollama:big-model"
+    def test_cascade_for_role_returns_configured_list(self):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test"}):
+            r = make_router(
+                manager_cascade=["anthropic:claude-sonnet-4-5", "ollama:qwen3:72b"],
+                coder_cascade=["ollama:qwen3:4b", "ollama:qwen3:9b"],
+                local_only=False,
+            )
+        assert r.cascade_for_role(AgentRole.MANAGER) == [
+            "anthropic:claude-sonnet-4-5", "ollama:qwen3:72b"
+        ]
+        assert r.cascade_for_role(AgentRole.CODER) == [
+            "ollama:qwen3:4b", "ollama:qwen3:9b"
+        ]
 
-    def test_coder_returns_first_cascade_tier(self):
-        r = make_router(coder_cascade=["ollama:small", "ollama:medium", "ollama:large"])
-        assert r.model_for_role(AgentRole.CODER) == "ollama:small"
+    def test_cascade_for_role_single_entry(self):
+        r = make_router(coder_cascade=["ollama:qwen3:4b"])
+        assert r.cascade_for_role(AgentRole.CODER) == ["ollama:qwen3:4b"]
 
-    def test_writer_returns_writer_cascade_first(self):
-        r = make_router(writer_cascade=["ollama:writer-model"])
-        assert r.model_for_role(AgentRole.WRITER) == "ollama:writer-model"
+    def test_cascade_for_role_merge_defaults_to_coder_last(self):
+        """Merge cascade defaults to [coder_cascade[-1]] when not configured."""
+        r = make_router(
+            coder_cascade=["ollama:small", "ollama:medium", "ollama:large"],
+            merge_resolution_cascade=[],
+        )
+        assert r.cascade_for_role(AgentRole.MERGE) == ["ollama:large"]
 
-    def test_unknown_role_falls_back_to_coder_cascade(self):
-        r = make_router(coder_cascade=["ollama:coder-model"])
-        # Unknown role is not an AgentRole — shim handles it gracefully
-        result = r.model_for_role("nonexistent_role") # type: ignore[arg-type]
-        assert result == "ollama:coder-model"
+    def test_cascade_for_role_empty_raises_at_init(self):
+        """Empty required cascade raises ValueError at construction."""
+        with pytest.raises(ValueError, match="manager_cascade"):
+            make_router(manager_cascade=[])
+
+    def test_cascade_for_role_summarizer_empty_raises_at_init(self):
+        with pytest.raises(ValueError, match="summarizer_cascade"):
+            make_router(summarizer_cascade=[])
 
 
-# ---------------------------------------------------------------------------
-# parsed_model_for_role
-# ---------------------------------------------------------------------------
+class TestParsedModel:
+    """Tests for parse_model_string used with cascade entries."""
 
-class TestParsedModelForRole:
-    def test_returns_parsed_model(self):
-        r = make_router(manager_cascade=["ollama:big-model"])
-        p = r.parsed_model_for_role(AgentRole.MANAGER)
+    def test_parse_manager_cascade_entry(self):
+        from matrixmouse.router import parse_model_string
+        p = parse_model_string("ollama:big-model")
         assert isinstance(p, ParsedModel)
         assert p.backend == "ollama"
         assert p.model == "big-model"
 
-    def test_coder_model_with_colon_in_name(self):
-        r = make_router(coder_cascade=["ollama:qwen3:4b"])
-        p = r.parsed_model_for_role(AgentRole.CODER)
+    def test_model_with_colon_in_name(self):
+        from matrixmouse.router import parse_model_string
+        p = parse_model_string("ollama:qwen3:4b")
         assert p.model == "qwen3:4b"
 
-    def test_local_model_for_role_strips_prefix(self):
-        r = make_router(manager_cascade=["ollama:my-model"])
-        assert r.local_model_for_role("ollama:my-model") == "my-model"
+    def test_parse_strips_prefix(self):
+        from matrixmouse.router import parse_model_string
+        assert parse_model_string("ollama:my-model").model == "my-model"
 
-    def test_parsed_model_for_role_for_merge_role(self):
-        """parsed_model_for_role for MERGE role returns correct model."""
-        r = make_router(merge_resolution_cascade=["ollama:merge-model"])
-        p = r.parsed_model_for_role(AgentRole.MERGE)
+    def test_parsed_model_for_merge_role(self):
+        from matrixmouse.router import parse_model_string
+        p = parse_model_string("ollama:merge-model")
         assert isinstance(p, ParsedModel)
         assert p.backend == "ollama"
         assert p.model == "merge-model"
 
-    def test_parsed_model_for_role_merge_falls_back_to_cascade_top(self):
-        """MERGE role falls back to [coder_cascade[-1]] when merge_resolution_cascade empty."""
+    def test_parsed_model_merge_falls_back_to_cascade_top(self):
+        from matrixmouse.router import parse_model_string
         r = make_router(
             merge_resolution_cascade=[],
             coder_cascade=["ollama:small", "ollama:medium", "ollama:large"],
         )
-        p = r.parsed_model_for_role(AgentRole.MERGE)
+        # cascade_for_role returns the last coder entry
+        cascade = r.cascade_for_role(AgentRole.MERGE)
+        p = parse_model_string(cascade[0])
         assert isinstance(p, ParsedModel)
-        assert p.model == "large"  # Last of coder cascade
+        assert p.model == "large"
 
 
 # ---------------------------------------------------------------------------
@@ -394,16 +405,6 @@ class TestCascade:
             "ollama:small", "ollama:medium", "ollama:large"
         ]
 
-    def test_current_tier_starts_at_zero(self):
-        """Shim: current_tier always returns 0 now."""
-        r = make_router(coder_cascade=["ollama:small", "ollama:large"])
-        assert r.current_tier == 0
-
-    def test_at_ceiling_always_true(self):
-        """Shim: at_ceiling always returns True since no escalation state."""
-        r = make_router(coder_cascade=["ollama:small", "ollama:large"])
-        assert r.at_ceiling is True
-
 
 # ---------------------------------------------------------------------------
 # build_handoff
@@ -470,29 +471,26 @@ class TestBuildHandoff:
 
 
 # ---------------------------------------------------------------------------
-# backend_for_role / get_backend / caching
+# get_backend_for_model / caching
 # ---------------------------------------------------------------------------
 
 class TestBackendCaching:
-    def test_backend_for_role_returns_llmbackend(self):
+    def test_get_backend_for_model_returns_llmbackend(self):
         from matrixmouse.inference.base import LLMBackend
         r = make_router()
         with patch("matrixmouse.inference.ollama.OllamaBackend") as MockOllama:
             MockOllama.return_value = MagicMock(spec=LLMBackend)
-            backend = r.backend_for_role(AgentRole.MANAGER)
+            backend = r.get_backend_for_model("ollama:test-model")
         assert backend is not None
 
     def test_same_host_backend_pair_returns_cached_instance(self):
         """Two calls for the same (host, backend) return the identical object."""
-        r = make_router(
-            manager_model="ollama:model-a",
-            critic_model="ollama:model-b",
-        )
+        r = make_router()
         with patch("matrixmouse.inference.ollama.OllamaBackend") as MockOllama:
             instance = MagicMock()
             MockOllama.return_value = instance
-            b1 = r.backend_for_role(AgentRole.MANAGER)
-            b2 = r.backend_for_role(AgentRole.CRITIC)
+            b1 = r.get_backend_for_model("ollama:model-a")
+            b2 = r.get_backend_for_model("ollama:model-b")
         # Both use ollama @ localhost — same cached instance
         assert b1 is b2
         assert MockOllama.call_count == 1
@@ -505,19 +503,19 @@ class TestBackendCaching:
         )
         with patch("matrixmouse.inference.ollama.OllamaBackend") as MockOllama:
             MockOllama.side_effect = [MagicMock(), MagicMock()]
-            b1 = r.backend_for_role(AgentRole.MANAGER)
-            b2 = r.backend_for_role(AgentRole.CRITIC)
+            b1 = r.get_backend_for_model("http://192.168.1.10:ollama:model-a")
+            b2 = r.get_backend_for_model("http://192.168.1.11:ollama:model-b")
         assert b1 is not b2
         assert MockOllama.call_count == 2
 
-    def test_get_backend_uses_same_cache(self):
-        """get_backend() and backend_for_role() share the same cache."""
+    def test_get_backend_for_model_same_cache(self):
+        """Multiple calls for same model return cached instance."""
         r = make_router(manager_cascade=["ollama:test-model"])
         with patch("matrixmouse.inference.ollama.OllamaBackend") as MockOllama:
             instance = MagicMock()
             MockOllama.return_value = instance
-            b1 = r.backend_for_role(AgentRole.MANAGER)
-            b2 = r.get_backend("ollama:test-model")
+            b1 = r.get_backend_for_model("ollama:test-model")
+            b2 = r.get_backend_for_model("ollama:test-model")
         assert b1 is b2
         assert MockOllama.call_count == 1
 
@@ -592,7 +590,7 @@ class TestEnsureAllModels:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1B — New cascade API tests (Issue #32)
+# New cascade API tests (Issue #32)
 # ---------------------------------------------------------------------------
 
 class TestCascadeForRole:
@@ -800,7 +798,7 @@ class TestBackwardCompat:
 
 
 class TestBudgetTrackerInjection:
-    """Tests from the Phase 1B addendum: budget tracker wiring."""
+    """Tests for budget tracker injection into router."""
 
     def test_instantiate_anthropic_backend_receives_budget_tracker(self):
         mock_tracker = MagicMock()
