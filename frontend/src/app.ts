@@ -122,7 +122,12 @@ export class App {
       page = 'task-new';
     } else if (parts[0] === 'task-list') {
       page = 'tasks';
-    } else if (parts[0] === 'dashboard') {
+    } else if (parts[0] === 'dashboard' || parts[0] === 'status') {
+      // Support both /dashboard and /status (for backwards compatibility)
+      if (parts[0] === 'status') {
+        // Redirect to /dashboard
+        window.history.replaceState({}, '', '/dashboard');
+      }
       page = 'dashboard';
     } else if (parts[0] === 'settings') {
       page = 'settings';

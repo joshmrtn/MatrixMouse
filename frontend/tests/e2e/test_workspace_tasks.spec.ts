@@ -213,7 +213,7 @@ test.describe('Workspace Tasks', () => {
       await page.waitForTimeout(100);
 
       // Task should be visible under workspace
-      const taskItem = page.locator('[data-task-id="multi-task"]');
+      const taskItem = workspaceTree.locator('[data-task-id="multi-task"]');
       await expect(taskItem).toBeVisible();
     });
 

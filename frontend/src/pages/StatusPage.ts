@@ -35,7 +35,7 @@ export class StatusPage {
         <div id="status-blocked-human">
           <div class="status-section-header">
             <span class="status-section-icon">⦸</span>
-            <span class="status-section-title">Blocked by Human</span>
+            <h2 class="status-section-title">Blocked by Human</h2>
           </div>
           <div class="status-section-content"></div>
         </div>
@@ -43,7 +43,7 @@ export class StatusPage {
         <div id="status-blocked-deps">
           <div class="status-section-header">
             <span class="status-section-icon">⊞</span>
-            <span class="status-section-title">Blocked by Dependencies</span>
+            <h2 class="status-section-title">Blocked by Dependencies</h2>
           </div>
           <div class="status-section-content"></div>
         </div>
@@ -51,7 +51,7 @@ export class StatusPage {
         <div id="status-waiting">
           <div class="status-section-header">
             <span class="status-section-icon">⋯</span>
-            <span class="status-section-title">Waiting</span>
+            <h2 class="status-section-title">Waiting</h2>
           </div>
           <div class="status-section-content"></div>
         </div>

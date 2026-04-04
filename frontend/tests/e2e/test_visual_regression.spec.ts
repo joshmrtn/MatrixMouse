@@ -146,7 +146,7 @@ test.describe('Visual Regression - Desktop (1280x720)', () => {
       await route.fulfill({ status: 200, json: { report: mockBlockedReport } });
     });
 
-    await page.goto('/status');
+    await page.goto('/dashboard');
     await page.waitForSelector('#status-page');
     await expect(page).toHaveScreenshot('status-desktop.png', { fullPage: true });
   });
@@ -243,15 +243,17 @@ test.describe('Visual Regression - Desktop (1280x720)', () => {
 
   test('Task Page - Edit Mode', async ({ page }) => {
     page.route('**/tasks/task001', async route => {
-      await route.fulfill({ status: 200, json: mockTasks[0] });
+      if (route.request().method() === 'PATCH') {
+        await route.fulfill({ status: 200, json: { ...mockTasks[0], title: 'Updated' } });
+      } else {
+        await route.fulfill({ status: 200, json: mockTasks[0] });
+      }
     });
     page.route('**/tasks/task001/dependencies', async route => {
       await route.fulfill({ status: 200, json: { task_id: 'task001', dependencies: [], count: 0 } });
     });
-    page.route('**/tasks/task001', async route => {
-      if (route.request().method() === 'PATCH') {
-        await route.fulfill({ status: 200, json: { ...mockTasks[0], title: 'Updated' } });
-      }
+    page.route('**/context**', async route => {
+      await route.fulfill({ status: 200, json: { messages: [], count: 0, estimated_tokens: 0 } });
     });
 
     await page.goto('/task/task001');
@@ -280,7 +282,7 @@ test.describe('Visual Regression - Mobile (375x667)', () => {
       await route.fulfill({ status: 200, json: { report: mockBlockedReport } });
     });
 
-    await page.goto('/status');
+    await page.goto('/dashboard');
     await page.waitForSelector('#status-page');
     await expect(page).toHaveScreenshot('status-mobile.png', { fullPage: true });
   });
@@ -331,12 +333,12 @@ test.describe('Visual Regression - Mobile (375x667)', () => {
     });
 
     await page.goto('/task-list');
-    await page.waitForSelector('#hamburger-menu');
-    
+    await page.waitForSelector('#sidebar-toggle');
+
     // Open sidebar
-    await page.click('#hamburger-menu');
+    await page.click('#sidebar-toggle');
     await page.waitForTimeout(300);
-    
+
     await expect(page).toHaveScreenshot('sidebar-open-mobile.png', { fullPage: true });
   });
 });
@@ -355,7 +357,7 @@ test.describe('Visual Regression - Tablet (768x1024)', () => {
       await route.fulfill({ status: 200, json: { report: mockBlockedReport } });
     });
 
-    await page.goto('/status');
+    await page.goto('/dashboard');
     await page.waitForSelector('#status-page');
     await expect(page).toHaveScreenshot('status-tablet.png', { fullPage: true });
   });

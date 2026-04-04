@@ -98,8 +98,16 @@ export class Sidebar {
 
     if (collapsed) {
       this.element.classList.add('collapsed');
+      // When closing sidebar, return focus to toggle button in header
+      const toggleBtn = document.querySelector('#sidebar-toggle');
+      if (toggleBtn) {
+        (toggleBtn as HTMLElement).focus();
+      }
     } else {
       this.element.classList.remove('collapsed');
+      // When opening sidebar, move focus to sidebar
+      this.element.setAttribute('tabindex', '-1');
+      this.element.focus();
     }
   }
 

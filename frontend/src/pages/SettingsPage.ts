@@ -445,7 +445,7 @@ export class SettingsPage {
           </div>
         </div>
 
-        <div id="settings-message" class="message" style="display: none;" role="status" aria-live="polite"></div>
+        <div id="settings-message" class="message" style="display: none;" role="alert" aria-live="assertive"></div>
         
         <div class="refresh-actions">
           <button type="button" class="refresh-config-btn" aria-label="Refresh configuration">

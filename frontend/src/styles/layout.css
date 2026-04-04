@@ -201,6 +201,12 @@
   flex-direction: column;
   overflow: hidden;
   transition: transform var(--transition-normal) ease;
+  outline: none;
+}
+
+#sidebar:focus {
+  outline: 2px solid var(--green, #39ff14);
+  outline-offset: -2px;
 }
 
 #sb-channels {

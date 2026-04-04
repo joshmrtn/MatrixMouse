@@ -32,7 +32,7 @@
   gap: var(--spacing-xs);
   background: var(--red2);
   border: 1px solid var(--red);
-  color: var(--red);
+  color: #ffffff; /* White text for proper contrast on dark red background */
   padding: var(--spacing-xs) var(--spacing-sm);
   font-family: var(--font-ui);
   font-size: 10px;
@@ -166,6 +166,7 @@
 
 .status-waiting {
   background: var(--blue);
+  color: #000000; /* Black text for proper contrast on blue background */
 }
 
 .status-complete {
@@ -329,7 +330,7 @@
   background: var(--green2);
   border: none;
   border-left: 1px solid var(--border);
-  color: var(--green);
+  color: #ffffff; /* White text for proper contrast on dark green background */
   padding: var(--spacing-md) var(--spacing-lg);
   font-family: var(--font-ui);
   font-size: 11px;
@@ -364,6 +365,11 @@
   background: var(--blue);
   color: #000;
   border-bottom-right-radius: var(--radius-sm);
+}
+
+/* Force ALL text inside user bubbles to be black for proper contrast */
+.message-bubble.user * {
+  color: #000 !important;
 }
 
 .message-bubble.assistant {
@@ -1106,6 +1112,8 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 500;
+  margin: 0;
+  padding: 0;
 }
 
 .status-section-content {
@@ -1784,7 +1792,7 @@
 
 #settings-message.error {
   background: var(--red2);
-  color: var(--red);
+  color: #ffffff; /* White text for proper contrast on dark red background */
   border: 1px solid var(--red);
 }
 

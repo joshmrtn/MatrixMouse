@@ -47,7 +47,7 @@ export class TasksPage {
         <div id="tasks-filters">
           <div class="filter-row">
             <label for="filter-status">Status:</label>
-            <select id="filter-status">
+            <select id="filter-status" aria-label="Filter by status">
               <option value="all">All</option>
               <option value="pending">Pending</option>
               <option value="ready">Ready</option>
@@ -60,7 +60,7 @@ export class TasksPage {
             </select>
 
             <label for="filter-repo">Repo:</label>
-            <select id="filter-repo">
+            <select id="filter-repo" aria-label="Filter by repo">
               <option value="all">All</option>
             </select>
 
@@ -73,7 +73,7 @@ export class TasksPage {
           </div>
         </div>
 
-        <div id="tasks-list"></div>
+        <div id="tasks-list" role="list" aria-label="Task list"></div>
       </div>
     `;
 
@@ -252,7 +252,7 @@ export class TasksPage {
     const terminalClass = terminalStatuses.has(task.status) ? ' terminal' : '';
 
     return `
-      <div class="task-item${terminalClass}">
+      <div class="task-item${terminalClass}" role="listitem">
         <a href="/task/${escapeHtml(task.id)}" class="task-link">
           <div class="task-main">
             <div class="task-title">${escapeHtml(task.title)}</div>

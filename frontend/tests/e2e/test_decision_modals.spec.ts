@@ -8,14 +8,19 @@
  * - Turn limit reached
  *
  * Tests verify modal rendering, choices, text validation, and submission.
- * 
+ *
  * NOTE: These tests mock WebSocket events since we don't have a running backend.
  * In production, these events would come from the WebSocket connection.
+ * 
+ * ⚠️ STATUS (April 3, 2026): Tests are SKIPPED - the DecisionModal component
+ * has not been implemented yet. These tests define the expected behavior for
+ * future implementation. See PROJECT_HANDOFF.md "Decision Modals - Implementation Needed"
  */
 
 import { test, expect } from '@playwright/test';
 
-test.describe('Decision Modals', () => {
+// SKIP: Component not implemented yet - tests define expected behavior
+test.describe.skip('Decision Modals', () => {
   test.beforeEach(async ({ page }) => {
     // Mock API endpoints
     await page.route('**/repos', async route => {

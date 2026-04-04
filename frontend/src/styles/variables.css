@@ -10,12 +10,12 @@
   --border2: #333333;
   --text: #c8c8c8;
   --text2: #888888;
-  --text3: #555555;
-  --green: #39ff14;
+  --text3: #8a8a8a; /* Increased for 4.5:1 contrast on #111111 */
+  --green: #bbff99; /* Bright enough for 4.5:1+ contrast on --green2 */
   --green2: #1a7a00;
   --amber: #ffaa00;
   --amber2: #7a4a00;
-  --red: #ff2244;
+  --red: #ff6688; /* Increased brightness for better contrast on --red2 */
   --red2: #7a0011;
   --blue: #00aaff;
   --purple: #aa66ff;

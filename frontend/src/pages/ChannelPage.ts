@@ -41,26 +41,26 @@ export class ChannelPage {
     container.innerHTML = `
       <div id="channel-page">
         <div id="channel-header">
-          <span>Channel: ${escapeHtml(this.scope)}</span>
+          <h1>Channel: ${escapeHtml(this.scope)}</h1>
         </div>
 
-        <div id="clarification-banner">
+        <div id="clarification-banner" role="alert" aria-live="assertive">
           <div class="clar-q">🔔 Awaiting your answer...</div>
           <div class="clar-row">
-            <input id="clar-input" type="text" placeholder="Type your answer..." />
-            <button id="clar-answer-btn">Answer</button>
+            <input id="clar-input" type="text" placeholder="Type your answer..." aria-label="Answer clarification question" />
+            <button id="clar-answer-btn" aria-label="Submit clarification answer">Answer</button>
           </div>
         </div>
 
         <div id="conversation">
-          <div id="conversation-log">
+          <div id="conversation-log" role="log" aria-live="polite" aria-label="Conversation history">
             <div class="loading-state">Loading conversation...</div>
           </div>
         </div>
 
         <div id="channel-input">
-          <input type="text" placeholder="Message ${escapeHtml(this.scope)}..." />
-          <button>Send</button>
+          <input type="text" placeholder="Message ${escapeHtml(this.scope)}..." aria-label="Message input for ${escapeHtml(this.scope)} channel" />
+          <button aria-label="Send message">Send</button>
         </div>
       </div>
     `;

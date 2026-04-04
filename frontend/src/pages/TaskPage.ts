@@ -75,7 +75,7 @@ export class TaskPage {
             <span class="meta-value">${this.task.repo.length > 0 ? this.task.repo.map(escapeHtml).join(', ') : 'Workspace'}</span>
           </span>
         </div>
-        <div id="task-dependencies" style="display:none;"></div>
+        <div id="task-dependencies" style="display:none;" role="region" aria-label="Task dependencies"></div>
       </div>
       
       <div id="task-edit-container"></div>

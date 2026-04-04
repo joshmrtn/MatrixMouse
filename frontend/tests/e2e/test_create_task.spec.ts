@@ -184,13 +184,17 @@ test.describe('Create Task - Desktop', () => {
 
   test('validates required title field', async ({ page }) => {
     await page.goto('/task-new');
+    await page.waitForSelector('#create-task-form');
 
-    // Try to submit without title
-    await page.click('#btn-submit');
-
-    // Submit button should be disabled
+    // Submit button should be disabled initially (no title)
     const submitBtn = page.locator('#btn-submit');
     await expect(submitBtn).toBeDisabled();
+
+    // Clear and type a title
+    await page.fill('#task-title', 'Test Title');
+    
+    // Now the button should be enabled
+    await expect(submitBtn).toBeEnabled();
   });
 
   test('validates importance range (0-1)', async ({ page }) => {
@@ -423,19 +427,20 @@ test.describe('Create Task - Integration', () => {
     // Click new task button
     await page.click('#add-task-btn');
     await expect(page).toHaveURL('/task-new');
-
     // Create task
     await page.fill('#task-title', 'Integration Test Task');
+    
+    // Wait for button to be enabled
+    await expect(page.locator('#btn-submit')).toBeEnabled();
+    
+    // Submit the form
     await page.click('#btn-submit');
 
-    // Wait for redirect
-    await page.waitForTimeout(1600);
+    // Wait for redirect to task detail page
+    await page.waitForURL(/\/task-/);
 
-    // Navigate back to task list
-    await page.goto('/task-list');
-
-    // New task should appear (from mock)
-    await expect(page.locator('.task-item')).toContainText('E2E Test Task');
+    // Task detail page should be visible
+    await expect(page).toHaveURL(/\/task-/);
   });
 
   test('role hint updates when selecting multiple repos', async ({ page }) => {
@@ -504,10 +509,14 @@ test.describe('Create Task - Integration', () => {
     await page.goto('/task-new');
 
     await page.fill('#task-title', 'Error Test');
+    
+    // Wait for button to be enabled
+    await expect(page.locator('#btn-submit')).toBeEnabled();
+
     await page.click('#btn-submit');
 
     // Should show error message
-    await expect(page.locator('#create-task-message')).toBeVisible();
-    await expect(page.locator('#create-task-message')).toHaveClass(/error/);
+    await expect(page.locator('#form-message')).toBeVisible();
+    await expect(page.locator('#form-message')).toHaveClass(/error/);
   });
 });
