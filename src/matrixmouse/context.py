@@ -9,7 +9,7 @@ Responsibilities:
       (default: 60% of model context length, capped at ~32k tokens regardless
       of model maximum)
     - Performing summarisation using a small, fast model (separate from the
-      working model) via config.summarizer_model
+      working model) via the summarizer cascade
     - Preserving: system prompt, original task instruction, last N turns
       (default: 6)
     - Replacing middle history with a compressed summary message marked
@@ -79,14 +79,19 @@ class ContextManager:
         context_manager = ContextManager(
             config=config,
             paths=paths,
-            coder_model=router.parsed_model_for_role(AgentRole.CODER).model,
-            coder_backend=router.backend_for_role(AgentRole.CODER),
-            summarizer_backend=router.get_backend(config.summarizer_model),
-            summarizer_model=router.local_model_for_role(config.summarizer_model),
+            coder_model=working_parsed.model,
+            coder_backend=working_backend,
+            summarizer_backend=summarizer_backend,
+            summarizer_model=summarizer_parsed.model,
         )
         loop = AgentLoop(..., context_manager=context_manager)
 
     The loop calls ``context_manager(messages, config)`` before each inference.
+
+    Note: ``coder_model``/``coder_backend`` are legacy parameter names that will
+    be renamed to ``working_model``/``working_backend`` in a future phase. They
+    accept whichever model is resolved from the cascade for the current task's
+    role — not just Coder.
 
     Args:
         config: MatrixMouseConfig instance.

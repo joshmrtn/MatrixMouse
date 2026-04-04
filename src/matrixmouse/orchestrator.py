@@ -38,7 +38,6 @@ from matrixmouse.agents import agent_for_role
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.context import ContextManager
 from matrixmouse.inference.base import TokenBudgetExceededError
-from matrixmouse.inference.ollama import OllamaBackend
 from matrixmouse.inference.token_budget import TokenBudgetTracker
 from matrixmouse.loop import AgentLoop, LoopExitReason, LoopResult
 from matrixmouse.repository.task_repository import TaskRepository
@@ -1100,17 +1099,21 @@ class Orchestrator:
         # If the backend for this task is known-exhausted this cycle, move
         # the task to WAITING immediately without doing any git or agent work.
         # The backend calculates the precise wait_until from the usage window.
+        # Uses cascade[0] (most-preferred model) at this stage — full cascade
+        # walk comes in Phase 3.
         if self._budget_tracker is not None:
-            parsed = self._router.parsed_model_for_role(task.role)
-            if parsed.is_remote:
-                try:
-                    self._budget_tracker.check_budget(
-                        provider=parsed.backend,
-                        model=parsed.model,
-                    )
-                except TokenBudgetExceededError as e:
-                    self._handle_budget_exhausted(task, e)
-                    return
+            cascade = self._router.cascade_for_role(task.role)
+            if cascade:
+                parsed = parse_model_string(cascade[0])
+                if parsed.is_remote:
+                    try:
+                        self._budget_tracker.check_budget(
+                            provider=parsed.backend,
+                            model=parsed.model,
+                        )
+                    except TokenBudgetExceededError as e:
+                        self._handle_budget_exhausted(task, e)
+                        return
 
         if task.branch and task.repo:
             repo_root = self.paths.workspace_root / task.repo[0]
@@ -1230,9 +1233,13 @@ class Orchestrator:
 
         messages = self._load_or_build_messages(task, agent)
 
+        # Resolve model from cascade[0] — full cascade walk in Phase 3
+        cascade = self._router.cascade_for_role(task.role)
+        resolved_model = cascade[0] if cascade else ""
+
         self._update_status(
             role=task.role.value,
-            model=self._router.model_for_role(task.role),
+            model=resolved_model,
             turns=0,
             context_messages=messages,
         )
@@ -1377,15 +1384,11 @@ class Orchestrator:
                 queue=self.queue,
             )
 
-        # Select model — merge resolution always uses the top model
-        if task.role == AgentRole.MERGE:
-            merge_model = (
-                self.config.merge_resolution_model
-                or self._router.model_for_role(AgentRole.CODER)
-            )
-            model = merge_model
-        else:
-            model = self._router.model_for_role(task.role)
+        # Select model — uses cascade[0] for all roles at this stage.
+        # MERGE role uses its cascade (which defaults to coder_cascade[-1]).
+        # Full cascade walk comes in Phase 3.
+        cascade = self._router.cascade_for_role(task.role)
+        model = cascade[0] if cascade else ""
 
         wip_commit_fn = None
         if cwd is not None and task.branch:
@@ -1459,13 +1462,24 @@ class Orchestrator:
             memory.configure(self.paths.agent_notes)
 
         detector = StuckDetector(role=task.role)
+
+        # Resolve working model from the resolved cascade entry
+        working_parsed = parse_model_string(model)
+        working_backend = self._router.get_backend_for_model(model)
+
+        # Resolve summarizer model from summarizer_cascade[0]
+        summarizer_cascade = self._router.summarizer_cascade()
+        summarizer_model_str = summarizer_cascade[0] if summarizer_cascade else ""
+        summarizer_parsed = parse_model_string(summarizer_model_str)
+        summarizer_backend = self._router.get_backend_for_model(summarizer_model_str)
+
         context_manager = ContextManager(
             config=self.config,
             paths=repo_paths or self.paths,
-            coder_model=self._router.parsed_model_for_role(task.role).model,
-            coder_backend=self._router.backend_for_role(task.role),
-            summarizer_backend=self._router.backend_for_role(task.role),
-            summarizer_model=parse_model_string(self.config.summarizer_model).model,
+            coder_model=working_parsed.model,
+            coder_backend=working_backend,
+            summarizer_backend=summarizer_backend,
+            summarizer_model=summarizer_parsed.model,
         )
         comms_manager = get_manager()
 
@@ -1480,7 +1494,7 @@ class Orchestrator:
                 )
 
         loop = AgentLoop(
-            model=self._router.parsed_model_for_role(task.role).model,
+            model=working_parsed.model,
             messages=messages,
             tools=tools,
             allowed_tools=agent.allowed_tools,
@@ -1498,7 +1512,7 @@ class Orchestrator:
             think=self._router.think_for_role(task.role),
             current_repo=current_repo,
             task_turn_limit=task.turn_limit,
-            backend=OllamaBackend(),         # TODO: Have this injected
+            backend=working_backend,
         )
 
         # If the task has pending tool calls from an interrupted turn

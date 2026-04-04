@@ -118,20 +118,20 @@ def _stop_ollama_models() -> None:
         logger.debug("Config not loaded — skipping ollama model unload.")
         return
 
-    # Collect all unique model names across all roles
-    model_fields = [
-        _config.coder_model,
-        _config.manager_model,
-        _config.summarizer_model,
-        _config.critic_model,
-        _config.writer_model,
+    # Collect all unique model names across all role cascades
+    cascade_fields = [
+        _config.manager_cascade,
+        _config.critic_cascade,
+        _config.writer_cascade,
+        _config.coder_cascade,
+        _config.merge_resolution_cascade,
+        _config.summarizer_cascade,
     ]
 
-    # coder_cascade is a list — flatten it
-    cascade = _config.coder_cascade or []
-    if isinstance(cascade, str):
-        cascade = [m.strip() for m in cascade.split(",") if m.strip()]
-    model_fields.extend(cascade)
+    model_fields = []
+    for cascade in cascade_fields:
+        if cascade:
+            model_fields.extend(cascade)
 
     models = list(dict.fromkeys(m for m in model_fields if m))  # unique, ordered
 
@@ -213,15 +213,18 @@ def _load_inference_secrets(config) -> None:
     """
     from matrixmouse.router import parse_model_string, _REMOTE_BACKENDS
 
-    # Collect every configured model string
-    all_model_strings = [
-        config.manager_model,
-        config.coder_model,
-        config.writer_model,
-        config.critic_model,
-        config.summarizer_model,
-        config.merge_resolution_model,
-    ] + list(config.coder_cascade)
+    # Collect every configured model string from all cascades
+    all_model_strings: list[str] = []
+    for cascade in [
+        config.manager_cascade,
+        config.critic_cascade,
+        config.writer_cascade,
+        config.coder_cascade,
+        config.merge_resolution_cascade,
+        config.summarizer_cascade,
+    ]:
+        if cascade:
+            all_model_strings.extend(cascade)
 
     backends_in_use: set[str] = set()
     for model_string in all_model_strings:
