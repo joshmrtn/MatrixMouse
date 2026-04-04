@@ -20,6 +20,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 from matrixmouse.inference.base import (
     LLMResponse, TextBlock, ThinkingBlock, ToolUseBlock, Tool,
+    BackendConnectionError, TokenBudgetExceededError,
+    SummarizationUnavailableError,
 )
 import pytest
 
@@ -628,7 +630,7 @@ class TestTurnLimit:
         response2 = make_response(tool_calls=[make_declare_complete_call()])
         backend.chat.side_effect = [response1, response2]
         result = loop.run()
-    
+
         assert result.exit_reason == LoopExitReason.COMPLETE
         tool_messages = [
             m for m in result.messages
@@ -639,3 +641,62 @@ class TestTurnLimit:
             or "allowed_tools" in m.get("content", "").lower()
             for m in tool_messages
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3A — LLMBackendError propagation (Issue #32)
+# ---------------------------------------------------------------------------
+
+class TestLLMBackendErrorPropagation:
+    """Tests that LLMBackendError subclasses escape loop.run() so the
+    orchestrator can handle them, while other exceptions become user
+    messages (existing behaviour must not regress)."""
+
+    def test_backend_connection_error_propagates(self):
+        """BackendConnectionError should raise out of run(), not return LoopResult."""
+        backend = make_backend()
+        backend.chat.side_effect = BackendConnectionError("connection refused")
+        loop = make_loop_full(stream=False, backend=backend)
+
+        with pytest.raises(BackendConnectionError):
+            loop.run()
+
+    def test_token_budget_exceeded_propagates(self):
+        """TokenBudgetExceededError should raise out of run()."""
+        backend = make_backend()
+        backend.chat.side_effect = TokenBudgetExceededError(
+            provider="anthropic", period="hour", limit=100, used=101,
+        )
+        loop = make_loop_full(stream=False, backend=backend)
+
+        with pytest.raises(TokenBudgetExceededError):
+            loop.run()
+
+    def test_summarization_unavailable_propagates(self):
+        """SummarizationUnavailableError should raise out of run()."""
+        backend = make_backend()
+        backend.chat.side_effect = SummarizationUnavailableError("no summarizer")
+        loop = make_loop_full(stream=False, backend=backend)
+
+        with pytest.raises(SummarizationUnavailableError):
+            loop.run()
+
+    def test_other_exceptions_become_user_message(self):
+        """Plain ValueError should be caught and appended as a user message,
+        not re-raised (regression — must preserve existing behaviour)."""
+        backend = make_backend()
+        backend.chat.side_effect = [
+            ValueError("parse error"),
+            make_response(tool_calls=[make_declare_complete_call()]),
+        ]
+        loop = make_loop_full(stream=False, backend=backend)
+
+        result = loop.run()
+
+        assert result.exit_reason == LoopExitReason.COMPLETE
+        user_messages = [
+            m for m in result.messages
+            if isinstance(m, dict) and m.get("role") == "user"
+            and "parsing error" in m.get("content", "").lower()
+        ]
+        assert len(user_messages) == 1
