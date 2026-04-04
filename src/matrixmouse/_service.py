@@ -107,7 +107,7 @@ def _stop_ollama_models() -> None:
     """
     Unload all configured models from Ollama VRAM.
 
-    Uses the config model fields (coder_model, manager_model, etc.) rather
+    Uses the config cascade fields (manager_cascade, coder_cascade, etc.) rather
     than `ollama ps` so we don't accidentally stop unrelated models running
     on the same machine.
 
@@ -420,6 +420,9 @@ def main() -> None:
         # --- Memory and comms ---
         memory.configure(paths.agent_notes)
         comms.configure(_config)
+
+        # --- Workspace state repository ---
+        ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
 
         # --- Token budget tracker ---
         from matrixmouse.inference.token_budget import TokenBudgetTracker
