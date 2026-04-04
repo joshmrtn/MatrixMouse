@@ -8,8 +8,9 @@ Responsibilities:
     - Triggering summarisation when usage exceeds a configurable soft limit
       (default: 60% of model context length, capped at ~32k tokens regardless
       of model maximum)
-    - Performing summarisation using a small, fast model (separate from the
-      working model) via the summarizer cascade
+    - Performing summarisation using a small, fast model from the
+      summarizer cascade — walks the cascade and raises
+      SummarizationUnavailableError if all entries are unavailable
     - Preserving: system prompt, original task instruction, last N turns
       (default: 6)
     - Replacing middle history with a compressed summary message marked
@@ -31,7 +32,9 @@ from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
 from matrixmouse.inference.base import LLMBackend, TextBlock
 
 if TYPE_CHECKING:
-    pass
+    from matrixmouse.router import Router
+    from matrixmouse.inference.availability import BackendAvailabilityCache
+    from matrixmouse.inference.base import SummarizationUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -79,47 +82,44 @@ class ContextManager:
         context_manager = ContextManager(
             config=config,
             paths=paths,
-            coder_model=working_parsed.model,
-            coder_backend=working_backend,
-            summarizer_backend=summarizer_backend,
-            summarizer_model=summarizer_parsed.model,
+            working_model=working_parsed.model,
+            working_backend=working_backend,
+            router=router,
+            availability_cache=availability_cache,
         )
         loop = AgentLoop(..., context_manager=context_manager)
 
     The loop calls ``context_manager(messages, config)`` before each inference.
 
-    Note: ``coder_model``/``coder_backend`` are legacy parameter names that will
-    be renamed to ``working_model``/``working_backend`` in a future phase. They
-    accept whichever model is resolved from the cascade for the current task's
-    role — not just Coder.
-
     Args:
         config: MatrixMouseConfig instance.
         paths: Resolved paths for this workspace.
-        coder_model: Backend-local model identifier for the working agent
+        working_model: Backend-local model identifier for the working agent
             (the portion after ``backend:`` in the full model string).
-            Used only to query the context length via coder_backend.
-        coder_backend: LLMBackend for the working agent — provides
+            Used to query the context length via working_backend.
+        working_backend: LLMBackend for the working agent — provides
             get_context_length().
-        summarizer_backend: LLMBackend for the summarizer model.
-        summarizer_model: Backend-local model identifier for the summarizer.
+        router: Router instance — used to access summarizer_cascade and
+            get_backend_for_model.
+        availability_cache: Optional BackendAvailabilityCache for checking
+            summarizer backend availability.
     """
 
     def __init__(
         self,
         config: MatrixMouseConfig,
         paths: MatrixMousePaths | RepoPaths,
-        coder_model: str,
-        coder_backend: LLMBackend,
-        summarizer_backend: LLMBackend,
-        summarizer_model: str,
+        working_model: str,
+        working_backend: LLMBackend,
+        router: "Router",
+        availability_cache: "BackendAvailabilityCache | None" = None,
     ) -> None:
         self.config = config
         self.paths = paths
-        self._summarizer_backend = summarizer_backend
-        self._summarizer_model = summarizer_model
+        self._router = router
+        self._availability_cache = availability_cache
 
-        raw_limit = coder_backend.get_context_length(coder_model)
+        raw_limit = working_backend.get_context_length(working_model)
         self.token_limit = min(raw_limit, config.context_soft_limit)
         self.compress_at = int(self.token_limit * config.compress_threshold)
 
@@ -204,6 +204,38 @@ class ContextManager:
         )
         return compressed
 
+    def _resolve_summarizer(self) -> tuple[LLMBackend, str]:
+        """Return the first available (backend, model_id) from summarizer_cascade.
+
+        Walks the summarizer cascade and checks each entry's backend
+        availability via the availability_cache. Returns the first
+        available backend and model identifier.
+
+        Raises:
+            SummarizationUnavailableError: If all entries are in cooldown or
+                the cascade is exhausted. This is a hard failure — callers must
+                not catch and swallow it. A task that cannot summarise will
+                become permanently stuck as its context window fills.
+        """
+        from matrixmouse.router import parse_model_string
+        from matrixmouse.inference.base import SummarizationUnavailableError
+
+        for model_str in self._router.summarizer_cascade():
+            parsed = parse_model_string(model_str)
+            if self._availability_cache is not None:
+                if not self._availability_cache.is_available(parsed.backend):
+                    logger.debug(
+                        "Summarizer backend '%s' in cooldown, skipping.",
+                        parsed.backend,
+                    )
+                    continue
+            backend = self._router.get_backend_for_model(model_str)
+            return backend, parsed.model
+
+        raise SummarizationUnavailableError(
+            "All summarizer cascade entries are unavailable."
+        )
+
     def _summarise(self, messages: list) -> str:
         """Use the summarizer backend to produce a concise summary.
 
@@ -212,7 +244,16 @@ class ContextManager:
 
         Returns:
             Summary text as a string.
+
+        Raises:
+            SummarizationUnavailableError: If no summarizer backend is
+                available. This exception propagates to the orchestrator
+                and must NOT be caught here.
         """
+        # Resolve the summarizer backend — raises SummarizationUnavailableError
+        # if all cascade entries are exhausted.
+        backend, model_id = self._resolve_summarizer()
+
         transcript_parts = []
         for m in messages:
             role = m.get("role", "unknown") if isinstance(m, dict) else "unknown"
@@ -242,26 +283,18 @@ class ContextManager:
             f"Work log to summarise:\n\n{transcript}"
         )
 
-        try:
-            response = self._summarizer_backend.chat(
-                model=self._summarizer_model,
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-                stream=False,
-            )
-            # Extract text from the response content blocks
-            text_parts = [
-                b.text for b in response.content
-                if isinstance(b, TextBlock) and b.text
-            ]
-            return "\n".join(text_parts) or "(Empty summary returned.)"
-
-        except Exception as e:
-            logger.warning("Summarisation failed: %s. Using fallback summary.", e)
-            return (
-                f"(Summarisation failed: {e}. "
-                f"{len(messages)} messages were compressed without summary.)"
-            )
+        response = backend.chat(
+            model=model_id,
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+            stream=False,
+        )
+        # Extract text from the response content blocks
+        text_parts = [
+            b.text for b in response.content
+            if isinstance(b, TextBlock) and b.text
+        ]
+        return "\n".join(text_parts) or "(Empty summary returned.)"
 
     def _save_discoveries_to_notes(self, messages: list) -> None:
         """Extract and append notable discoveries to AGENT_NOTES.md.
@@ -299,10 +332,10 @@ def check_and_compress(
     messages: list,
     config: MatrixMouseConfig,
     paths: MatrixMousePaths | RepoPaths,
-    coder_model: str,
-    coder_backend: LLMBackend,
-    summarizer_backend: LLMBackend,
-    summarizer_model: str,
+    working_model: str,
+    working_backend: LLMBackend,
+    router: "Router",
+    availability_cache: "BackendAvailabilityCache | None" = None,
 ) -> list:
     """Functional interface for context checking — creates a ContextManager
     and calls it in one step.
@@ -314,10 +347,10 @@ def check_and_compress(
         messages: Current message history.
         config: Active MatrixMouseConfig.
         paths: Resolved MatrixMousePaths.
-        coder_model: Backend-local model identifier for the working agent.
-        coder_backend: LLMBackend for the working agent.
-        summarizer_backend: LLMBackend for the summarizer model.
-        summarizer_model: Backend-local model identifier for the summarizer.
+        working_model: Backend-local model identifier for the working agent.
+        working_backend: LLMBackend for the working agent.
+        router: Router instance for summarizer cascade resolution.
+        availability_cache: Optional availability cache for summarizer checks.
 
     Returns:
         The message list, compressed if necessary.
@@ -325,9 +358,9 @@ def check_and_compress(
     manager = ContextManager(
         config=config,
         paths=paths,
-        coder_model=coder_model,
-        coder_backend=coder_backend,
-        summarizer_backend=summarizer_backend,
-        summarizer_model=summarizer_model,
+        working_model=working_model,
+        working_backend=working_backend,
+        router=router,
+        availability_cache=availability_cache,
     )
     return manager(messages, config)

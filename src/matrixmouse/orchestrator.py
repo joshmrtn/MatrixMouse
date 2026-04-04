@@ -1750,19 +1750,13 @@ class Orchestrator:
         working_parsed = parse_model_string(model)
         working_backend = self._router.get_backend_for_model(model)
 
-        # Resolve summarizer model from summarizer_cascade[0]
-        summarizer_cascade = self._router.summarizer_cascade()
-        summarizer_model_str = summarizer_cascade[0] if summarizer_cascade else ""
-        summarizer_parsed = parse_model_string(summarizer_model_str)
-        summarizer_backend = self._router.get_backend_for_model(summarizer_model_str)
-
         context_manager = ContextManager(
             config=self.config,
             paths=repo_paths or self.paths,
-            coder_model=working_parsed.model,
-            coder_backend=working_backend,
-            summarizer_backend=summarizer_backend,
-            summarizer_model=summarizer_parsed.model,
+            working_model=working_parsed.model,
+            working_backend=working_backend,
+            router=self._router,
+            availability_cache=self._availability_cache,
         )
         comms_manager = get_manager()
 
