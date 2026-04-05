@@ -97,13 +97,7 @@ def make_config(**kwargs) -> MagicMock:
     cfg.summarizer_cascade    = kwargs.get("summarizer_cascade",    ["ollama:summarizer-model"])
     cfg.backend_cooldown_initial_seconds = kwargs.get("backend_cooldown_initial_seconds", 30)
     cfg.backend_cooldown_max_seconds = kwargs.get("backend_cooldown_max_seconds", 600)
-    # --- Backward-compat single-model keys (shims until 1C) ---
-    cfg.manager_model         = kwargs.get("manager_model",         "ollama:manager-model")
-    cfg.critic_model          = kwargs.get("critic_model",          "ollama:critic-model")
-    cfg.coder_model           = kwargs.get("coder_model",           "ollama:coder-model")
-    cfg.writer_model          = kwargs.get("writer_model",          "ollama:writer-model")
-    cfg.summarizer_model      = kwargs.get("summarizer_model",      "ollama:summarizer-model")
-    cfg.merge_resolution_model = kwargs.get("merge_resolution_model", "")
+    # --- Runtime flags ---
     cfg.local_only            = kwargs.get("local_only",            True)
     cfg.manager_stream        = kwargs.get("manager_stream",        True)
     cfg.critic_stream         = kwargs.get("critic_stream",         True)
