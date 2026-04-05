@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class AgentRole(str, Enum):
+    """Enumeration of roles an agent can take on for a task."""
     MANAGER = "manager"
     CODER   = "coder"
     WRITER  = "writer"
@@ -50,6 +51,7 @@ class AgentRole(str, Enum):
 # ---------------------------------------------------------------------------
 
 class PRState(str, Enum):
+    """Enumeration of pull request states."""
     NONE   = ""        # no PR exists
     OPEN   = "open"    # PR created, awaiting review
     MERGED = "merged"  # PR merged, task can complete
@@ -61,6 +63,7 @@ class PRState(str, Enum):
 # ---------------------------------------------------------------------------
 
 class TaskStatus(Enum):
+    """Enumeration of task lifecycle statuses."""
     PENDING          = "pending"
     READY            = "ready"
     RUNNING          = "running"
@@ -234,8 +237,7 @@ class Task:
         importance_weight: float = 0.6,
         urgency_weight: float = 0.4,
     ) -> float:
-        """
-        Compute a priority score for this task.
+        """Compute a priority score for this task.
 
         Lower return value == higher priority (0.0 = most urgent).
 
@@ -247,7 +249,14 @@ class Task:
         an aging bonus (so older tasks drift toward 0 over time, preventing
         starvation).
 
-        Clamped to [0.0, 1.0].
+        Args:
+            aging_rate: Daily priority increase for incomplete tasks.
+            max_aging_bonus: Maximum priority bonus from aging.
+            importance_weight: Weight for importance in [0, 1].
+            urgency_weight: Weight for urgency in [0, 1].
+
+        Returns:
+            The calculated priority score clamped to [0.0, 1.0].
         """
         base = (self.importance * importance_weight) + (self.urgency * urgency_weight)
         # base is in [0, 1]; higher = more important/urgent
@@ -269,6 +278,11 @@ class Task:
     # -----------------------------------------------------------------------
 
     def to_dict(self) -> dict:
+        """Serialise the task to a dictionary for storage or API delivery.
+
+        Returns:
+            Dictionary containing all task fields.
+        """
         return {
             "id":                           self.id,
             "title":                        self.title,
@@ -308,6 +322,14 @@ class Task:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Task":
+        """Reconstruct a task from a dictionary.
+
+        Args:
+            data: Dictionary of task fields (e.g. from JSON or SQLite).
+
+        Returns:
+            A new Task instance.
+        """
         # --- role ---
         role_str = data.get("role", "coder")
         try:

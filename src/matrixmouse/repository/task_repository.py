@@ -45,8 +45,7 @@ from matrixmouse.task import AgentRole, Task
 
 
 class TaskRepository(ABC):
-    """
-    Abstract interface for task persistence.
+    """Abstract interface for task persistence.
 
     All concrete implementations must be thread-safe. Write operations
     must use transactions so that concurrent access from multiple worker
@@ -54,16 +53,18 @@ class TaskRepository(ABC):
     """
 
     def _ensure_unique_id(self, task: Task) -> None:
-        """
-        Regenerate task.id until it is globally unique in this repository.
+        """Regenerate `task.id` until it is globally unique in this repository.
 
         Modifies task in place. Collision is astronomically unlikely with
         16-char hex IDs but handled cleanly rather than surfacing an
-        IntegrityError to the caller.
+        `IntegrityError` to the caller.
 
-        This method is called by all creation paths (add, add_subtask,
-        add_subtasks) so uniqueness is guaranteed regardless of how a
+        This method is called by all creation paths (`add`, `add_subtask`,
+        `add_subtasks`) so uniqueness is guaranteed regardless of how a
         task enters the repository.
+
+        Args:
+            task: The Task instance whose ID should be unique.
         """
         while self.get(task.id) is not None:
             old_id = task.id
@@ -79,8 +80,10 @@ class TaskRepository(ABC):
 
     @abstractmethod
     def add(self, task: Task) -> None:
-        """
-        Persist a new task.
+        """Persist a new task.
+
+        Args:
+            task: The Task instance to persist.
 
         Raises:
             ValueError: If a task with this ID already exists.
@@ -88,27 +91,31 @@ class TaskRepository(ABC):
 
     @abstractmethod
     def get(self, task_id: str) -> Task | None:
-        """
-        Return the task with the given ID, or None if not found.
+        """Return the task with the given ID, or None if not found.
 
-        Supports prefix matching: if task_id is a unique prefix of exactly
+        Supports prefix matching: if `task_id` is a unique prefix of exactly
         one task ID, that task is returned. If the prefix matches multiple
-        tasks, raises ValueError.
+        tasks, raises `ValueError`.
 
         Args:
             task_id: Full task ID or unique prefix.
 
+        Returns:
+            The matched Task instance, or None if not found.
+
         Raises:
-            ValueError: If task_id is an ambiguous prefix.
+            ValueError: If `task_id` is an ambiguous prefix.
         """
 
     @abstractmethod
     def update(self, task: Task) -> None:
-        """
-        Persist changes to an existing task.
+        """Persist changes to an existing task.
 
-        Automatically stamps task.last_modified to the current UTC time.
-        Callers must not set last_modified directly.
+        Automatically stamps `task.last_modified` to the current UTC time.
+        Callers must not set `last_modified` directly.
+
+        Args:
+            task: The Task instance with updated fields.
 
         Raises:
             KeyError: If no task with this ID exists.
@@ -116,12 +123,14 @@ class TaskRepository(ABC):
 
     @abstractmethod
     def delete(self, task_id: str) -> None:
-        """
-        Remove a task permanently.
+        """Remove a task permanently.
 
         Also removes all dependency edges involving this task from
         task_dependencies, and any stale clarification record for this
         task, via CASCADE.
+
+        Args:
+            task_id: ID of the task to delete.
 
         Raises:
             KeyError: If no task with this ID exists.
@@ -133,46 +142,60 @@ class TaskRepository(ABC):
 
     @abstractmethod
     def all_tasks(self) -> list[Task]:
-        """Return all tasks regardless of status."""
+        """Return all tasks regardless of status.
+
+        Returns:
+            List of all Task instances in the repository.
+        """
 
     @abstractmethod
     def active_tasks(self) -> list[Task]:
-        """
-        Return all non-terminal tasks.
+        """Return all non-terminal tasks.
 
-        Terminal statuses are COMPLETE and CANCELLED.
+        Terminal statuses are `COMPLETE` and `CANCELLED`.
+
+        Returns:
+            List of all non-terminal Task instances.
         """
 
     @abstractmethod
     def completed_ids(self) -> set[str]:
-        """
-        Return the IDs of all terminal tasks (COMPLETE or CANCELLED).
+        """Return the IDs of all terminal tasks (`COMPLETE` or `CANCELLED`).
 
-        Used by is_ready to evaluate dependency satisfaction without
+        Used by `is_ready` to evaluate dependency satisfaction without
         loading full task objects for every dependency check.
+
+        Returns:
+            Set of terminal task IDs.
         """
 
     @abstractmethod
     def is_ready(self, task_id: str) -> bool:
-        """
-        Return True if the task has no outstanding blockers.
+        """Return True if the task has no outstanding blockers.
 
-        A task is ready when all tasks in its blocked_by set are terminal.
+        A task is ready when all tasks in its `blocked_by` set are terminal.
         A task with no dependencies is always ready (subject to its status).
 
-        Returns False if the task does not exist.
+        Args:
+            task_id: ID of the task to check.
+
+        Returns:
+            True if the task is ready, False otherwise or if it doesn't exist.
         """
 
     @abstractmethod
     def has_blockers(self, task_id: str) -> bool:
-        """
-        Return True if any non-terminal task is blocking the given task.
+        """Return True if any non-terminal task is blocking the given task.
 
-        Used by the scheduler on every iteration to filter READY candidates.
-        Equivalent to len(get_blocked_by(task_id)) > 0 but cheaper —
-        implementations should use EXISTS rather than a full JOIN.
+        Used by the scheduler on every iteration to filter `READY` candidates.
+        Equivalent to `len(get_blocked_by(task_id)) > 0` but cheaper —
+        implementations should use `EXISTS` rather than a full `JOIN`.
 
-        Returns False if the task does not exist.
+        Args:
+            task_id: ID of the task to check.
+
+        Returns:
+            True if the task has non-terminal blockers, False otherwise.
         """
 
     # ------------------------------------------------------------------
@@ -181,30 +204,40 @@ class TaskRepository(ABC):
 
     @abstractmethod
     def get_subtasks(self, task_id: str) -> list[Task]:
-        """
-        Return all direct children of the given task.
+        """Return all direct children of the given task.
 
-        Queries tasks WHERE parent_task_id = task_id.
-        Returns an empty list if the task has no subtasks or does not exist.
+        Queries tasks WHERE `parent_task_id` = `task_id`.
+
+        Args:
+            task_id: ID of the parent task.
+
+        Returns:
+            List of child Task instances.
         """
 
     @abstractmethod
     def get_blocked_by(self, task_id: str) -> list[Task]:
-        """
-        Return all tasks that are directly blocking the given task.
+        """Return all tasks that are directly blocking the given task.
 
         These are the tasks that must reach a terminal status before
-        task_id can transition to READY.
+        `task_id` can transition to `READY`.
 
-        Returns an empty list if the task has no blockers or does not exist.
+        Args:
+            task_id: ID of the blocked task.
+
+        Returns:
+            List of blocking Task instances.
         """
 
     @abstractmethod
     def get_blocking(self, task_id: str) -> list[Task]:
-        """
-        Return all tasks that the given task is directly blocking.
+        """Return all tasks that the given task is directly blocking.
 
-        Returns an empty list if the task blocks nothing or does not exist.
+        Args:
+            task_id: ID of the blocking task.
+
+        Returns:
+            List of tasks blocked by the given task.
         """
 
     # ------------------------------------------------------------------
@@ -217,27 +250,21 @@ class TaskRepository(ABC):
         blocking_task_id: str,
         blocked_task_id: str,
     ) -> None:
-        """
-        Record that blocked_task_id is blocked by blocking_task_id,
-        and transition blocked_task_id to BLOCKED_BY_TASK status.
+        """Record that `blocked_task_id` is blocked by `blocking_task_id`.
+
+        Transitions `blocked_task_id` to `BLOCKED_BY_TASK` status.
 
         Cycle detection runs inside the transaction before any rows are
         written. If adding this edge would create a cycle in the dependency
-        graph, the transaction is rolled back and ValueError is raised.
+        graph, the transaction is rolled back and `ValueError` is raised.
         No partial state is written.
 
-        Because the cycle check and the write share a single transaction,
-        there is no window for a concurrent writer to introduce a cycle
-        between the check and the commit.
-
-        If the dependency already exists this is a no-op.
-
         Args:
-            blocking_task_id: The task that will block blocked_task_id.
-            blocked_task_id:  The task that will become blocked.
+            blocking_task_id: The task that will block `blocked_task_id`.
+            blocked_task_id: The task that will become blocked.
 
         Raises:
-            KeyError:   If either task does not exist.
+            KeyError: If either task does not exist.
             ValueError: If adding this edge would create a dependency cycle.
         """
 
@@ -247,18 +274,15 @@ class TaskRepository(ABC):
         blocking_task_id: str,
         blocked_task_id: str,
     ) -> None:
-        """
-        Remove the dependency between blocking_task_id and blocked_task_id.
+        """Remove the dependency between `blocking_task_id` and `blocked_task_id`.
 
-        If blocked_task_id has no remaining non-terminal blockers after
-        removal, and its status is BLOCKED_BY_TASK, it is automatically
-        transitioned to READY. This is a domain invariant: a task with no
-        blockers must not remain in BLOCKED_BY_TASK status.
+        If `blocked_task_id` has no remaining non-terminal blockers after
+        removal, and its status is `BLOCKED_BY_TASK`, it is automatically
+        transitioned to `READY`.
 
-        Both the edge removal and the status transition are atomic within
-        a single transaction.
-
-        No-op if the dependency does not exist.
+        Args:
+            blocking_task_id: The task that is currently blocking.
+            blocked_task_id: The task that is currently blocked.
 
         Raises:
             KeyError: If either task does not exist.
@@ -270,51 +294,57 @@ class TaskRepository(ABC):
 
     @abstractmethod
     def mark_running(self, task_id: str) -> None:
-        """
-        Transition a task to RUNNING status.
+        """Transition a task to `RUNNING` status.
 
-        Only READY tasks can become RUNNING. Raises ValueError if the task
+        Only `READY` tasks can become `RUNNING`. Raises `ValueError` if the task
         is in any other status.
 
-        Sets time_slice_started to the current monotonic time.
-        Sets started_at to the current UTC time on the first transition
-        to RUNNING only.
+        Sets `time_slice_started` to the current monotonic time.
+        Sets `started_at` to the current UTC time on the first transition
+        to `RUNNING` only.
+
+        Args:
+            task_id: ID of the task to transition.
 
         Raises:
-            KeyError:   If no task with this ID exists.
-            ValueError: If the task is not in READY status.
+            KeyError: If no task with this ID exists.
+            ValueError: If the task is not in `READY` status.
         """
 
     @abstractmethod
     def mark_ready(self, task_id: str) -> None:
-        """
-        Transition a task to READY status.
+        """Transition a task to `READY` status.
 
-        Cannot be applied to terminal tasks (COMPLETE, CANCELLED).
-        Raises ValueError if the task is already terminal.
+        Cannot be applied to terminal tasks (`COMPLETE`, `CANCELLED`).
+        Raises `ValueError` if the task is already terminal.
 
-        Clears time_slice_started.
+        Clears `time_slice_started`.
+
+        Args:
+            task_id: ID of the task to transition.
 
         Raises:
-            KeyError:   If no task with this ID exists.
+            KeyError: If no task with this ID exists.
             ValueError: If the task is in a terminal status.
         """
 
     @abstractmethod
     def mark_complete(self, task_id: str) -> None:
-        """
-        Transition a task to COMPLETE status.
+        """Transition a task to `COMPLETE` status.
 
         No-op if the task is already terminal (idempotent for terminal
         states — the orchestrator may attempt to complete an already-complete
         task in edge cases).
 
-        Sets completed_at to the current UTC time.
+        Sets `completed_at` to the current UTC time.
 
         Side effect: removes all dependency edges where this task is the
         blocker, then transitions any previously-blocked tasks that now
-        have no remaining non-terminal blockers to READY. All within one
+        have no remaining non-terminal blockers to `READY`. All within one
         transaction.
+
+        Args:
+            task_id: ID of the task to complete.
 
         Raises:
             KeyError: If no task with this ID exists.
@@ -322,28 +352,33 @@ class TaskRepository(ABC):
 
     @abstractmethod
     def mark_blocked_by_human(self, task_id: str, reason: str = "") -> None:
-        """
-        Transition a task to BLOCKED_BY_HUMAN status.
+        """Transition a task to `BLOCKED_BY_HUMAN` status.
 
-        Cannot be applied to terminal tasks. Raises ValueError if the
-        task is already COMPLETE or CANCELLED.
+        Cannot be applied to terminal tasks. Raises `ValueError` if the
+        task is already `COMPLETE` or `CANCELLED`.
 
-        Appends "[BLOCKED] {reason}" to task.notes if reason is non-empty.
+        Appends `[BLOCKED] {reason}` to `task.notes` if reason is non-empty.
+
+        Args:
+            task_id: ID of the task to block.
+            reason: Optional reason for the block.
 
         Raises:
-            KeyError:   If no task with this ID exists.
+            KeyError: If no task with this ID exists.
             ValueError: If the task is in a terminal status.
         """
 
     @abstractmethod
     def mark_cancelled(self, task_id: str) -> None:
-        """
-        Transition a task to CANCELLED status.
+        """Transition a task to `CANCELLED` status.
 
-        No-op if the task is already COMPLETE (a completed task cannot
+        No-op if the task is already `COMPLETE` (a completed task cannot
         be cancelled — the work is done).
 
-        Sets completed_at to the current UTC time.
+        Sets `completed_at` to the current UTC time.
+
+        Args:
+            task_id: ID of the task to cancel.
 
         Raises:
             KeyError: If no task with this ID exists.
@@ -367,34 +402,31 @@ class TaskRepository(ABC):
         urgency: float | None = None,
         **kwargs,
     ) -> Task:
-        """
-        Create a single subtask under parent_id atomically.
+        """Create a single subtask under `parent_id` atomically.
 
-        The subtask's branch is created via create_git_branch inside the
+        The subtask's branch is created via `create_git_branch` inside the
         same transaction as the task row. If either the git operation or
         the DB write fails, neither is committed.
 
         Args:
-            parent_id:          ID of the parent task.
-            title:              Subtask title.
-            description:        Subtask description.
-            create_git_branch:  Callable(branch_name, base_branch)
-                                -> (success, error_msg, head_hash).
-                                Called inside the transaction.
-            delete_git_branch:  Callable(branch_name) -> (success, error_msg).
-                                Called on rollback if git branch was created
-                                before the transaction failed.
-            role:               Agent role. Defaults to parent's role.
-            repo:               Repo list. Defaults to parent's repo.
-            importance:         Defaults to parent's importance.
-            urgency:            Defaults to parent's urgency.
-            **kwargs:           Additional Task fields.
+            parent_id: ID of the parent task.
+            title: Subtask title.
+            description: Subtask description.
+            create_git_branch: Callable(branch_name, base_branch)
+                -> (success, error_msg, head_hash). Called inside the transaction.
+            delete_git_branch: Callable(branch_name) -> (success, error_msg).
+                Called on rollback if git branch was created before the transaction failed.
+            role: Agent role. Defaults to parent's role.
+            repo: Repo list. Defaults to parent's repo.
+            importance: Defaults to parent's importance.
+            urgency: Defaults to parent's urgency.
+            **kwargs: Additional Task fields.
 
         Returns:
-            The created Task with branch and wip_commit_hash set.
+            The created Task instance with branch and `wip_commit_hash` set.
 
         Raises:
-            KeyError:   Parent task not found.
+            KeyError: Parent task not found.
             ValueError: Branch creation failed or would create a cycle.
         """
 
@@ -406,35 +438,33 @@ class TaskRepository(ABC):
         create_git_branch: Callable[[str, str], tuple[bool, str, str]],
         delete_git_branch: Callable[[str], tuple[bool, str]],
     ) -> list[Task]:
-        """
-        Add multiple subtasks under parent_id in a single atomic transaction.
+        """Add multiple subtasks under `parent_id` in a single atomic transaction.
 
         For each subtask:
-          1. Assigns branch name as <parent_branch>/<subtask_id>
-          2. Calls create_git_branch(branch_name, parent_branch)
-          3. Sets subtask.wip_commit_hash from returned head_hash
+          1. Assigns branch name as `<parent_branch>/<subtask_id>`
+          2. Calls `create_git_branch(branch_name, parent_branch)`
+          3. Sets `subtask.wip_commit_hash` from returned `head_hash`
           4. Inserts task row and dependency edge
 
         If any step fails, all git branches created so far are deleted via
-        delete_git_branch, and no DB changes are committed.
+        `delete_git_branch`, and no DB changes are committed.
 
         Args:
-            parent_id:          ID of the parent task.
-            subtasks:           Task objects to create. IDs may be regenerated
-                                by _ensure_unique_id before branch assignment.
-            create_git_branch:  Callable(branch_name, base_branch)
-                                -> (success, error_msg, head_hash).
-            delete_git_branch:  Callable(branch_name) -> (success, error_msg).
-                                Called for each successfully created branch
-                                on rollback.
+            parent_id: ID of the parent task.
+            subtasks: Task objects to create. IDs may be regenerated
+                by `_ensure_unique_id` before branch assignment.
+            create_git_branch: Callable(branch_name, base_branch)
+                -> (success, error_msg, head_hash).
+            delete_git_branch: Callable(branch_name) -> (success, error_msg).
+                Called for each successfully created branch on rollback.
 
         Returns:
-            List of created Task objects with branch and wip_commit_hash set.
+            List of created Task objects with branch and `wip_commit_hash` set.
 
         Raises:
-            KeyError:   Parent task not found.
+            KeyError: Parent task not found.
             ValueError: Branch creation failed, cycle detected, or parent
-                        has no branch assigned.
+                has no branch assigned.
         """
 
     @abstractmethod
@@ -446,49 +476,44 @@ class TaskRepository(ABC):
         create_git_branch: Callable[[str, str], tuple[bool, str, str]],
         delete_git_branch: Callable[[str], tuple[bool, str]],
     ) -> str:
-        """
-        Assign a branch to a task that currently has no branch.
+        """Assign a branch to a task that currently has no branch.
 
-        This is the only method that sets task.branch on an existing task.
-        Used by the Manager in BRANCH_SETUP session mode to name the top-level
+        This is the only method that sets `task.branch` on an existing task.
+        Used by the Manager in `BRANCH_SETUP` session mode to name the top-level
         interjection task before decomposition begins.
 
         Atomicity guarantee: the git branch is created and the DB is updated
         in a single operation. If either fails, neither is committed.
 
         Args:
-            task_id:            Task to assign the branch to. Must have
-                                branch == "".
-            full_branch_name:   Full branch name including prefix,
-                                e.g. 'mm/refactor/foobar'.
-            base_branch:        Branch to base the new branch on.
-            create_git_branch:  Callable(branch_name, base_branch)
-                                -> (success, error_msg, head_hash).
-            delete_git_branch:  Callable(branch_name) -> (success, error_msg).
-                                Called on rollback if git branch was created
-                                before the DB write failed.
+            task_id: Task to assign the branch to. Must have `branch == ""`.
+            full_branch_name: Full branch name including prefix,
+                e.g. 'mm/refactor/foobar'.
+            base_branch: Branch to base the new branch on.
+            create_git_branch: Callable(branch_name, base_branch)
+                -> (success, error_msg, head_hash).
+            delete_git_branch: Callable(branch_name) -> (success, error_msg).
+                Called on rollback if git branch was created before the DB write failed.
 
         Returns:
             The full branch name on success.
 
         Raises:
-            KeyError:   Task not found.
+            KeyError: Task not found.
             ValueError: Task already has a branch, git operation failed,
-                        or branch name is invalid.
+                or branch name is invalid.
         """
 
     @abstractmethod
     def commit_pending_subtree(self, root_task_id: str) -> list[str]:
-        """
-        Transition all PENDING descendants of root_task_id to their
-        correct schedulable status in a single atomic operation.
+        """Transition all `PENDING` descendants of `root_task_id` to their correct status.
 
-        For each PENDING descendant:
-        - If it has no non-terminal blockers: READY
-        - If it has non-terminal blockers: BLOCKED_BY_TASK
+        For each `PENDING` descendant:
+        - If it has no non-terminal blockers: `READY`
+        - If it has non-terminal blockers: `BLOCKED_BY_TASK`
 
-        Called by the orchestrator when a Manager declares_complete
-        in PLANNING session mode, committing the planned task graph.
+        Called by the orchestrator when a Manager `declares_complete`
+        in `PLANNING` session mode, committing the planned task graph.
 
         Args:
             root_task_id: Root of the subtree to commit.
@@ -497,5 +522,5 @@ class TaskRepository(ABC):
             List of task IDs that were transitioned.
 
         Raises:
-            KeyError: If root_task_id does not exist.
+            KeyError: If `root_task_id` does not exist.
         """

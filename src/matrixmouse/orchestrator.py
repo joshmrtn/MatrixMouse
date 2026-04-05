@@ -450,43 +450,45 @@ def _parse_owner_repo(remote_url: str) -> str:
 # ---------------------------------------------------------------------------
 
 class Orchestrator:
-    """
-    Persistent control loop. Waits for tasks via a condition variable,
-    instantiates the correct agent for each task's role, drives the
-    agent loop, then waits again.
+    """Persistent control loop and task execution manager.
 
     Instantiated once at service startup. Never exits unless the process
     is killed or an unrecoverable error occurs.
 
-    Time slice management
-    ---------------------
-    After each inference call the loop checks whether the current task's
-    time slice has expired or a preempting task is waiting. If so, the
-    task is returned to READY and control passes back to the scheduling
-    loop. context_messages are persisted after every inference call so
-    no work is lost across a context switch.
+    Args:
+        config: Active `MatrixMouseConfig` instance.
+        paths: `MatrixMousePaths` instance for workspace path resolution.
+        queue: `TaskRepository` for task persistence and state management.
+        ws_state_repo: `WorkspaceStateRepository` for cross-repo and session state.
+        graph: Optional `ProjectAnalyzer` instance for codebase mapping.
+        budget_tracker: Optional `TokenBudgetTracker` for remote LLM budget enforcement.
+        availability_cache: Optional `BackendAvailabilityCache` for tracking LLM backend health.
 
-    Critic interception
-    -------------------
-    When a Coder or Writer task calls declare_complete, the loop exits
-    with LoopExitReason.COMPLETE. The orchestrator intercepts this,
-    creates a Critic review task, and blocks the original task on it.
-    The task is only marked COMPLETE after the Critic calls approve().
-    Manager tasks skip Critic review and go directly to COMPLETE.
+    Time slice management:
+        After each inference call the loop checks whether the current task's
+        time slice has expired or a preempting task is waiting. If so, the
+        task is returned to READY and control passes back to the scheduling
+        loop. context_messages are persisted after every inference call so
+        no work is lost across a context switch.
 
-    Daily review injection
-    ----------------------
-    At the top of each scheduling cycle the orchestrator checks whether
-    a Manager review is due (based on manager_review_schedule cron string
-    and last_manager_review_at in workspace state). If due, a review task
-    is created and injected with preempt=True so it takes priority.
+    Critic interception:
+        When a Coder or Writer task calls `declare_complete`, the loop exits
+        with `LoopExitReason.COMPLETE`. The orchestrator intercepts this,
+        creates a Critic review task, and blocks the original task on it.
+        The task is only marked COMPLETE after the Critic calls `approve()`.
+        Manager tasks skip Critic review and go directly to COMPLETE.
 
-    Stale clarification handling
-    ----------------------------
-    The scheduler calls _handle_stale_clarification() when it detects a
-    BLOCKED_BY_HUMAN task with an unanswered pending_question older than
-    clarification_timeout_minutes. The orchestrator creates a low-priority
-    Manager task and records it in workspace state to prevent duplicates.
+    Daily review injection:
+        At the top of each scheduling cycle the orchestrator checks whether
+        a Manager review is due (based on `manager_review_schedule` cron string
+        and `last_manager_review_at` in workspace state). If due, a review task
+        is created and injected with `preempt=True` so it takes priority.
+
+    Stale clarification handling:
+        The scheduler calls `_handle_stale_clarification()` when it detects a
+        `BLOCKED_BY_HUMAN` task with an unanswered `pending_question` older than
+        `clarification_timeout_minutes`. The orchestrator creates a low-priority
+        Manager task and records it in workspace state to prevent duplicates.
     """
 
     _IDLE_TIMEOUT = 300  # 5 minutes
@@ -1356,14 +1358,16 @@ class Orchestrator:
         )
 
     def _run_task(self, task: Task) -> None:
-        """
-        Run a single task to completion, yield, or block.
+        """Run a single task to completion, yield, or block.
 
         Instantiates the agent for the task's role, loads or resumes
         context messages, runs the agent loop, and handles the outcome.
 
-        Returns normally in all cases — the caller (run()) decides what
+        Returns normally in all cases — the caller `run()` decides what
         to do next based on task status after return.
+
+        Args:
+            task: The Task to run.
         """
 
         # --- Model resolution ---
@@ -1606,8 +1610,7 @@ class Orchestrator:
     def _run_agent(
         self, ctx: TaskRunContext, agent, messages: list, model: str
     ) -> RunResult:
-        """
-        Construct and run the AgentLoop for a task.
+        """Construct and run the AgentLoop for a task.
 
         Args:
             ctx: TaskRunContext with task and graph.

@@ -65,31 +65,31 @@ class AgentLoop:
 
     Instantiated by the orchestrator with a resolved backend, model
     identifier, a starting message history, and references to the
-    subsystems it needs. Call run() to start the loop.
+    subsystems it needs. Call `run()` to start the loop.
 
     The loop runs until the agent declares completion, the stuck detector
     signals escalation, a human decision is required, the turn limit is
     reached, or a yield signal is received.
 
     Args:
-        backend: Resolved ``LLMBackend`` instance from the router.
-        model: Backend-local model identifier to pass to ``backend.chat()``.
+        backend: Resolved `LLMBackend` instance from the router.
+        model: Backend-local model identifier to pass to `backend.chat()`.
         messages: Starting conversation history.
         config: MatrixMouseConfig instance.
         paths: MatrixMousePaths or RepoPaths for this workspace.
-        context_manager: Callable ``(messages, config) -> messages``.
-        stuck_detector: Callable ``(tool_name, arguments, had_error) -> bool``.
-        comms: Callable ``() -> str | None`` — returns pending interjection.
-        emit: Callable ``(event_type, data) -> None`` — forwards events to UI.
-        persist: Callable ``(messages) -> None`` — persists message history.
-        persist_pending: Callable ``(calls) -> None`` — persists pending tool calls.
-        wip_commit: Callable ``() -> None`` — WIP commit after each dispatch.
-        should_yield: Callable ``() -> bool`` — preemption signal.
+        context_manager: Callable `(messages, config) -> messages`.
+        stuck_detector: Callable `(tool_name, arguments, had_error) -> bool`.
+        comms: Callable `() -> str | None` — returns pending interjection.
+        emit: Callable `(event_type, data) -> None` — forwards events to UI.
+        persist: Callable `(messages) -> None` — persists message history.
+        persist_pending: Callable `(calls) -> None` — persists pending tool calls.
+        wip_commit: Callable `() -> None` — WIP commit after each dispatch.
+        should_yield: Callable `() -> bool` — preemption signal.
         stream: If True, text tokens are forwarded to emit as they arrive.
         think: If True, enable extended thinking on the backend.
         current_repo: Repository name for context, if applicable.
         task_turn_limit: Override for agent_max_turns (0 = use config).
-        tools: Role-filtered list of ``Tool`` descriptors passed to the backend.
+        tools: Role-filtered list of `Tool` descriptors passed to the backend.
         allowed_tools: Role-filtered frozenset of tool names for dispatch enforcement.
     """
 
@@ -258,11 +258,10 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     def _chat_completion(self) -> LLMResponse:
-        """
-        Dispatch to the backend, wiring chunk_callback when streaming.
+        """Dispatch to the backend, wiring chunk_callback when streaming.
 
         Returns:
-            Fully assembled ``LLMResponse``.
+            Fully assembled `LLMResponse`.
         """
         chunk_callback: Callable[[str], None] | None # type: ignore[assignment]
         if self.stream:
@@ -289,25 +288,24 @@ class AgentLoop:
         tool_blocks: list[ToolUseBlock],
         pending_tool_calls: list[dict] | None = None,
     ) -> LoopResult | None:
-        """
-        Execute each tool call and append results to message history.
+        """Execute each tool call and append results to message history.
 
         Handles three exit conditions:
-            - ``declare_complete``          → COMPLETE
-            - ``DecisionRequiredException`` → DECISION
+            - `declare_complete`          → COMPLETE
+            - `DecisionRequiredException` → DECISION
             - stuck detector triggered      → ESCALATE
 
         A WIP commit is made after each successful dispatch so the workspace
         is always consistent when a task is blocked or context-switched.
 
         Args:
-            tool_blocks: ``ToolUseBlock`` entries from the model response.
-                Ignored when ``pending_tool_calls`` is provided.
+            tool_blocks: `ToolUseBlock` entries from the model response.
+                Ignored when `pending_tool_calls` is provided.
             pending_tool_calls: Remaining serialised calls to replay, used
-                when resuming after a DECISION. ``None`` on a fresh turn.
+                when resuming after a DECISION. `None` on a fresh turn.
 
         Returns:
-            ``LoopResult`` if the loop should exit, ``None`` to continue.
+            `LoopResult` if the loop should exit, `None` to continue.
         """
         from matrixmouse.tools.task_tools import DecisionRequiredException
 
@@ -424,18 +422,17 @@ class AgentLoop:
 # ---------------------------------------------------------------------------
 
 def _response_to_message(response: LLMResponse) -> dict:
-    """
-    Normalise an ``LLMResponse`` into a standard assistant message dict.
+    """Normalise an `LLMResponse` into a standard assistant message dict.
 
     Produces a format that all backends accept as conversation history:
-    the ``content`` field is a list of typed block dicts matching the
+    the `content` field is a list of typed block dicts matching the
     Anthropic convention, which adapters translate as needed.
 
     Args:
-        response: Assembled ``LLMResponse`` from ``LLMBackend.chat()``.
+        response: Assembled `LLMResponse` from `LLMBackend.chat()`.
 
     Returns:
-        Dict with ``role: "assistant"`` and a ``content`` list.
+        Dict with `role: "assistant"` and a `content` list.
     """
     from matrixmouse.inference.base import TextBlock, ThinkingBlock, ToolUseBlock
 
@@ -456,19 +453,18 @@ def _response_to_message(response: LLMResponse) -> dict:
 
 
 def _tool_result_message(tool_use_id: str, name: str, result: str) -> dict:
-    """
-    Build a tool result message to append to conversation history.
+    """Build a tool result message to append to conversation history.
 
-    Includes ``tool_use_id`` so backends that require call-result
+    Includes `tool_use_id` so backends that require call-result
     correlation (Anthropic, OpenAI) can match the result to its call.
 
     Args:
-        tool_use_id: The ``id`` from the corresponding ``ToolUseBlock``.
+        tool_use_id: The `id` from the corresponding `ToolUseBlock`.
         name: Tool name, for logging and Ollama-compat backends.
         result: String result returned by the tool function.
 
     Returns:
-        Dict with ``role: "tool"`` and result payload.
+        Dict with `role: "tool"` and result payload.
     """
     return {
         "role":        "tool",
