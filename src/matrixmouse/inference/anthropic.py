@@ -11,8 +11,9 @@ the canonical internal format (Anthropic-style content blocks) maps almost
 directly to the wire format, so message translation is minimal compared to
 the OpenAI-compat adapters.
 
-Token budget tracking is injected via TokenBudgetTracker (Phase 4). Until
-then, usage is logged but not enforced.
+Token budget tracking is injected via TokenBudgetTracker.
+Usage is enforced — ``chat()`` raises ``TokenBudgetExceededError``
+when the configured budget is exceeded.
 
 Streaming is handled internally via the Anthropic streaming API. When
 ``stream=True`` and ``chunk_callback`` is provided, text tokens are

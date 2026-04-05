@@ -25,7 +25,7 @@ from enum import Enum, auto
 from typing import Any, Callable
 
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, RepoPaths
-from matrixmouse.inference.base import LLMBackend, LLMResponse, ToolUseBlock, Tool
+from matrixmouse.inference.base import LLMBackend, LLMResponse, ToolUseBlock, Tool, LLMBackendError
 from matrixmouse.tools import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -188,6 +188,8 @@ class AgentLoop:
             # --- Inference ---
             try:
                 response = self._chat_completion()
+            except LLMBackendError:
+                raise  # propagate to orchestrator
             except Exception as e:
                 logger.warning("chat_completion failed: %s", e)
                 self.messages.append({

@@ -10,8 +10,11 @@ and ensures defaults match documented behaviour.
 New keys are added here whenever a config field is introduced.
 """
 
-from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, load_config
 from pathlib import Path
+
+import pytest
+
+from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths, load_config
 
 
 # ---------------------------------------------------------------------------
@@ -87,9 +90,9 @@ class TestTurnLimitConfig:
 # ---------------------------------------------------------------------------
 
 class TestWriterModelConfig:
-    def test_writer_model_accessible(self):
+    def test_writer_cascade_accessible(self):
         cfg = make_config()
-        _ = cfg.writer_model
+        _ = cfg.writer_cascade
 
     def test_writer_stream_accessible(self):
         cfg = make_config()
@@ -137,8 +140,8 @@ class TestBranchManagement:
     def test_merge_conflict_max_turns_default(self):
         assert make_config().merge_conflict_max_turns == 5
 
-    def test_merge_resolution_model_default_empty(self):
-        assert make_config().merge_resolution_model == ""
+    def test_merge_resolution_cascade_default_empty(self):
+        assert make_config().merge_resolution_cascade == []
 
     def test_push_wip_to_remote_default_false(self):
         assert make_config().push_wip_to_remote is False
@@ -184,3 +187,53 @@ class TestMatrixMousePaths:
     def test_mm_dir_property(self, tmp_path):
         paths = MatrixMousePaths(workspace_root=tmp_path)
         assert paths.mm_dir == tmp_path / ".matrixmouse"
+
+
+# ---------------------------------------------------------------------------
+# Cascade config — Issue #32
+# ---------------------------------------------------------------------------
+
+class TestCascadeConfig:
+    """All six role cascade fields exist and default to empty lists."""
+
+    def test_cascade_fields_present(self):
+        cfg = make_config()
+        assert cfg.manager_cascade == []
+        assert cfg.critic_cascade == []
+        assert cfg.writer_cascade == []
+        assert cfg.coder_cascade == []
+        assert cfg.merge_resolution_cascade == []
+        assert cfg.summarizer_cascade == []
+
+    def test_cooldown_fields_present(self):
+        cfg = make_config()
+        assert cfg.backend_cooldown_initial_seconds == 30
+        assert cfg.backend_cooldown_max_seconds == 600
+
+    def test_legacy_model_keys_removed(self):
+        """Old single-model keys should no longer be attributes."""
+        cfg = make_config()
+        for key in (
+            "manager_model", "critic_model", "writer_model",
+            "coder_model", "merge_resolution_model", "summarizer_model",
+        ):
+            with pytest.raises(AttributeError):
+                getattr(cfg, key)
+
+    def test_config_loads_cascade_from_toml(self, tmp_path):
+        toml_content = (
+            'manager_cascade = ["anthropic:claude-sonnet-4-5"]\n'
+            'coder_cascade = ["ollama:qwen3:4b", "ollama:qwen3:9b"]\n'
+            'summarizer_cascade = ["ollama:qwen3:4b"]\n'
+            'backend_cooldown_initial_seconds = 60\n'
+            'backend_cooldown_max_seconds = 300\n'
+        )
+        config_file = tmp_path / ".matrixmouse" / "config.toml"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(toml_content)
+        cfg = load_config(repo_root=None, workspace_root=tmp_path)
+        assert cfg.manager_cascade == ["anthropic:claude-sonnet-4-5"]
+        assert cfg.coder_cascade == ["ollama:qwen3:4b", "ollama:qwen3:9b"]
+        assert cfg.summarizer_cascade == ["ollama:qwen3:4b"]
+        assert cfg.backend_cooldown_initial_seconds == 60
+        assert cfg.backend_cooldown_max_seconds == 300

@@ -8,25 +8,26 @@ Responsibilities:
     - Parsing ``[host:]backend:model`` model strings from config
     - Instantiating and caching ``LLMBackend`` instances (one per host+backend)
     - Enforcing the ``local_only`` safety flag at startup
-    - Assigning models to roles based on config
-    - Maintaining the cascade ladder for Coder escalation
-    - Escalating to the next model tier when stuck.py signals a stuck state
+    - Providing cascade lists for every role via ``cascade_for_role()``
+    - Providing the summarizer cascade via ``summarizer_cascade()``
+    - Vending backend instances via ``get_backend_for_model()``
+    - Validating all cascade entries at init time
+    - Ensuring only first (most-preferred) entries at startup
     - Constructing a clean handoff context when escalating
-    - Gradually de-escalating after successful cycles
+    - Injecting ``TokenBudgetTracker`` into remote backends
 
-Role-to-model mapping:
-    MANAGER  → config.manager_model  (largest, most capable)
-    CODER    → config.coder_cascade  (escalating ladder)
-    WRITER   → config.writer_model
-    CRITIC   → config.critic_model   (strong reasoning)
-    MERGE    → config.merge_resolution_model (defaults to top of coder_cascade)
-    internal summarization → config.summarizer_model (not agent-facing)
+Cascade lists:
+    Defined by config per-role (manager_cascade, critic_cascade, writer_cascade,
+    coder_cascade, merge_resolution_cascade, summarizer_cascade).  All roles
+    share the same cascade semantics — ordered preference, most-preferred first.
 
-Cascade ladder:
-    Defined by config.coder_cascade (list, smallest to largest).
-    Applies to CODER role only. All other roles use a fixed model
-    with no escalation — if Manager or Critic is stuck, the task
-    escalates to BLOCKED_BY_HUMAN rather than a larger model.
+Role-to-model mapping (via cascade):
+    MANAGER  → config.manager_cascade
+    CRITIC   → config.critic_cascade
+    WRITER   → config.writer_cascade
+    CODER    → config.coder_cascade
+    MERGE    → config.merge_resolution_cascade (defaults to [coder_cascade[-1]])
+    summarizer → config.summarizer_cascade
 
 Model string format:
     [host:]backend:model
@@ -52,14 +53,20 @@ so it is safe for concurrent access from multiple worker threads (#15).
 Do not add inference logic or tool dispatch here.
 """
 
+from __future__ import annotations
+
 import logging
 import threading
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from matrixmouse.config import MatrixMouseConfig
 from matrixmouse.inference.base import LLMBackend, Tool
 from matrixmouse.stuck import StuckDetector
 from matrixmouse.task import AgentRole
+
+if TYPE_CHECKING:
+    from matrixmouse.inference.token_budget import TokenBudgetTracker
 
 logger = logging.getLogger(__name__)
 
@@ -189,29 +196,11 @@ def _default_host(backend: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Handoff context
-# ---------------------------------------------------------------------------
-
-@dataclass
-class EscalationHandoff:
-    """Context passed to the larger model when escalating within the cascade.
-
-    Summarises what the smaller model tried and why it failed so the
-    larger model does not repeat the same mistakes.
-    """
-    from_model: str
-    to_model: str
-    stuck_summary: dict
-    recent_messages: list
-    original_messages: list
-
-
-# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
 class Router:
-    """Selects models and backends for each agent role; manages escalation.
+    """Selects models and backends for each agent role; manages cascade resolution.
 
     Instantiated once by the orchestrator at startup. Backend instances are
     created lazily on first use and cached for the lifetime of the router.
@@ -223,124 +212,86 @@ class Router:
     ``config.local_only`` is ``True``, ``ValueError`` is raised immediately
     so the misconfiguration is caught at startup rather than at first
     inference call.
-
-    Escalation applies to CODER only. Manager and Critic use fixed models;
-    if they cannot complete their work within the turn limit the task moves
-    to BLOCKED_BY_HUMAN.
     """
 
-    # Number of successful Coder cycles before stepping down one cascade tier.
-    DEESCALATE_AFTER = 2
-
-    def __init__(self, config: MatrixMouseConfig) -> None:
+    def __init__(
+        self,
+        config: MatrixMouseConfig,
+        budget_tracker: TokenBudgetTracker | None = None,
+    ) -> None:
         self.config = config
+        self._budget_tracker = budget_tracker
         self._backend_cache: dict[tuple[str, str], LLMBackend] = {}
         self._cache_lock = threading.Lock()
 
-        self._cascade = self._build_cascade()
-        self._current_tier = 0
-        self._successful_cycles = 0
+        # Build and cache all role cascades at init time
+        self._role_cascades: dict[str, list[str]] = {}
+        for role in AgentRole:
+            self._role_cascades[role.value] = self._build_cascade_for_role(role)
 
-        # Validate all configured model strings and enforce local_only.
+        # Build summarizer cascade separately (not an AgentRole)
+        self._role_cascades["_summarizer"] = self._build_summarizer_cascade()
+
+        # Validate all cascade entries and enforce local_only
         self._validate_config()
 
         logger.info(
-            "Router initialised. Cascade: %s. Manager: %s. "
-            "Critic: %s. Writer: %s. Summarizer: %s. local_only: %s.",
-            self._cascade,
-            config.manager_model,
-            config.critic_model,
-            config.writer_model,
-            config.summarizer_model,
+            "Router initialised. local_only=%s, budget_tracker=%s.",
             config.local_only,
+            budget_tracker is not None,
         )
 
     # -----------------------------------------------------------------------
-    # Model selection
+    # Cascade accessors
     # -----------------------------------------------------------------------
 
-    def model_for_role(self, role: AgentRole) -> str:
-        """Return the full model string for a given agent role.
+    def cascade_for_role(self, role: AgentRole) -> list[str]:
+        """Return the ordered cascade list for the given role.
 
-        The returned string is the raw config value — use
-        ``parsed_model_for_role`` or ``backend_for_role`` when you need
-        to pass it to an inference backend.
-
-        Args:
-            role: The AgentRole of the running agent.
-
-        Returns:
-            Model string, e.g. ``"ollama:qwen3:4b"``.
-        """
-        if role == AgentRole.MANAGER:
-            return self.config.manager_model
-        if role == AgentRole.CRITIC:
-            return self.config.critic_model
-        if role == AgentRole.CODER:
-            return self._current_model()
-        if role == AgentRole.WRITER:
-            return self.config.writer_model
-        if role == AgentRole.MERGE:
-            return self._merge_model()
-
-        logger.warning(
-            "model_for_role called with unknown role %r — "
-            "falling back to coder_model.",
-            role,
-        )
-        return self.config.coder_model
-
-    def parsed_model_for_role(self, role: AgentRole) -> ParsedModel:
-        """Return the parsed model descriptor for a given agent role.
+        Always returns at least one entry. Raises ValueError at init time
+        if a required cascade is empty or missing.
 
         Args:
-            role: The AgentRole of the running agent.
+            role: The AgentRole to get the cascade for.
 
         Returns:
-            ``ParsedModel`` with host, backend, and model identifier.
+            Ordered list of model strings, most-preferred first.
         """
-        return parse_model_string(self.model_for_role(role))
+        return list(self._role_cascades[role.value])
 
-    def backend_for_role(self, role: AgentRole) -> LLMBackend:
-        """Return the cached ``LLMBackend`` instance for a given agent role.
+    def summarizer_cascade(self) -> list[str]:
+        """Return the ordered cascade list for the summarizer.
 
-        Instantiates the backend on first call for this (host, backend) pair.
-        Subsequent calls return the cached instance.
-
-        Args:
-            role: The AgentRole of the running agent.
+        Named separately from cascade_for_role to keep AgentRole clean.
 
         Returns:
-            ``LLMBackend`` ready for ``chat()`` calls.
-
-        Raises:
-            ValueError: If the backend identifier is not recognised.
+            Ordered list of model strings, most-preferred first.
         """
-        parsed = self.parsed_model_for_role(role)
-        return self._get_or_create_backend(parsed)
+        return list(self._role_cascades["_summarizer"])
 
-    def local_model_for_role(self, model_string: str) -> str:
-        """Extract the backend-local model identifier from a full model string.
+    def get_backend_for_model(self, model_string: str) -> LLMBackend:
+        """Return the cached LLMBackend for an arbitrary model string.
 
-        This is the portion passed to ``LLMBackend.chat(model=...)``.
+        Single entry point for all backend access after cascade resolution.
+        Backends are instantiated with budget_tracker if one is configured —
+        token usage is recorded automatically by the adapter on every
+        successful chat() call, regardless of caller.
 
         Args:
             model_string: Full model string, e.g. ``"ollama:qwen3:4b"``.
 
         Returns:
-            Backend-local model identifier, e.g. ``"qwen3:4b"``.
+            Cached ``LLMBackend`` instance.
         """
-        return parse_model_string(model_string).model
+        parsed = parse_model_string(model_string)
+        return self._get_or_create_backend(parsed)
+
+    # -----------------------------------------------------------------------
+    # Role-derived flags (unchanged from pre-#32)
+    # -----------------------------------------------------------------------
 
     def stream_for_role(self, role: AgentRole) -> bool:
-        """Return whether to stream model output for a given role.
-
-        Args:
-            role: The AgentRole of the running agent.
-
-        Returns:
-            ``True`` if streaming should be enabled.
-        """
+        """Return whether to stream model output for a given role."""
         if role == AgentRole.MANAGER:
             return self.config.manager_stream
         if role == AgentRole.CRITIC:
@@ -352,14 +303,7 @@ class Router:
         return True
 
     def think_for_role(self, role: AgentRole) -> bool:
-        """Return whether to enable extended thinking for a given role.
-
-        Args:
-            role: The AgentRole of the running agent.
-
-        Returns:
-            ``True`` if extended thinking should be enabled.
-        """
+        """Return whether to enable extended thinking for a given role."""
         if role == AgentRole.MANAGER:
             return self.config.manager_think
         if role == AgentRole.CRITIC:
@@ -375,30 +319,23 @@ class Router:
     # -----------------------------------------------------------------------
 
     def ensure_all_models(self) -> None:
-        """Verify all configured models are available on their backends.
+        """Verify the first (most-preferred) entry in each cascade is available.
 
-        Calls ``backend.ensure_model()`` for every configured model string,
-        deduplicating by (backend_instance, model_id) so the same model
-        served by the same backend is only checked once.
-
-        Called once during the service startup sequence in ``_service.py``,
-        after the Router is constructed and ``_validate_config()`` has
-        already confirmed all model strings are well-formed.
+        Calls ``backend.ensure_model()`` for cascade[0] of every role
+        plus cascade[0] of summarizer, deduplicating by (backend_instance,
+        model_id).
 
         Raises:
             ModelNotAvailableError: If a model cannot be made available.
             BackendConnectionError: If a backend cannot be reached.
         """
-        all_model_strings = [
-            self.config.manager_model,
-            self.config.critic_model,
-            self.config.writer_model,
-            self.config.summarizer_model,
-            self._merge_model(),
-        ] + list(self._cascade)
+        model_strings: list[str] = []
+        for cascade in self._role_cascades.values():
+            if cascade:
+                model_strings.append(cascade[0])
 
         seen: set[tuple[int, str]] = set()
-        for model_string in all_model_strings:
+        for model_string in model_strings:
             if not model_string:
                 continue
             parsed = parse_model_string(model_string)
@@ -413,157 +350,9 @@ class Router:
             )
             backend.ensure_model(parsed.model)
 
-    def get_backend(self, model_string: str) -> LLMBackend:
-        """Return the cached backend for an arbitrary model string.
-
-        Useful for the summarizer model and other non-role inference calls.
-
-        Args:
-            model_string: Full model string, e.g. ``"ollama:qwen3:4b"``.
-
-        Returns:
-            Cached ``LLMBackend`` instance.
-        """
-        parsed = parse_model_string(model_string)
-        return self._get_or_create_backend(parsed)
-
-    def _get_or_create_backend(self, parsed: ParsedModel) -> LLMBackend:
-        """Return a cached backend or instantiate a new one.
-
-        Cache key is ``(host, backend)`` — one instance per endpoint,
-        regardless of which model is requested from it.
-
-        Args:
-            parsed: Parsed model descriptor.
-
-        Returns:
-            ``LLMBackend`` instance.
-        """
-        cache_key = (parsed.host, parsed.backend)
-        with self._cache_lock:
-            if cache_key in self._backend_cache:
-                return self._backend_cache[cache_key]
-            backend = self._instantiate_backend(parsed)
-            self._backend_cache[cache_key] = backend
-            logger.debug(
-                "Backend instantiated and cached: %s @ %s",
-                parsed.backend, parsed.host,
-            )
-            return backend
-
-    def _instantiate_backend(self, parsed: ParsedModel) -> LLMBackend:
-        """Construct a new ``LLMBackend`` instance for the given parsed model.
-
-        Args:
-            parsed: Parsed model descriptor.
-
-        Returns:
-            New ``LLMBackend`` instance.
-
-        Raises:
-            ValueError: If the backend identifier is not recognised or
-                the required API key is missing.
-        """
-        backend = parsed.backend
-
-        if backend == "ollama":
-            from matrixmouse.inference.ollama import OllamaBackend
-            return OllamaBackend(host=parsed.host)
-
-        if backend == "llamacpp":
-            from matrixmouse.inference.llamacpp import LlamaCppBackend
-            return LlamaCppBackend(host=parsed.host)
-
-        if backend == "anthropic":
-            import os
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                raise ValueError(
-                    "ANTHROPIC_API_KEY is not set. "
-                    "Place the key in /etc/matrixmouse/secrets/anthropic_api_key "
-                    "and ensure _service.py loads it into the environment."
-                )
-            from matrixmouse.inference.anthropic import AnthropicBackend
-            return AnthropicBackend(api_key=api_key)
-
-        if backend == "openai":
-            import os
-            api_key = os.environ.get("OPENAI_API_KEY", "")
-            if not api_key:
-                raise ValueError(
-                    "OPENAI_API_KEY is not set. "
-                    "Place the key in /etc/matrixmouse/secrets/openai_api_key "
-                    "and ensure _service.py loads it into the environment."
-                )
-            from matrixmouse.inference.openai import OpenAIBackend
-            return OpenAIBackend(api_key=api_key, base_url=parsed.host)
-
-        raise ValueError(
-            f"Unknown backend '{backend}'. "
-            f"Known backends: {sorted(_KNOWN_BACKENDS)}"
-        )
-
     # -----------------------------------------------------------------------
-    # Cascade escalation (Coder only)
+    # Handoff construction (kept unchanged)
     # -----------------------------------------------------------------------
-
-    def escalate(self, detector: StuckDetector) -> tuple[bool, str | None]:
-        """Attempt to escalate the Coder to the next cascade tier.
-
-        Only applies to the Coder role. Manager and Critic do not
-        escalate — they move to BLOCKED_BY_HUMAN at their turn limit.
-
-        Args:
-            detector: StuckDetector from the failed loop run.
-
-        Returns:
-            ``(escalated, new_model_string)`` — ``escalated`` is False if
-            already at the top of the cascade.
-        """
-        if self._current_tier >= len(self._cascade) - 1:
-            logger.warning(
-                "Escalation requested but already at top of cascade (%s). "
-                "Human intervention required.",
-                self._current_model(),
-            )
-            return False, None
-
-        old_model = self._current_model()
-        self._current_tier += 1
-        new_model = self._current_model()
-        self._successful_cycles = 0
-
-        logger.info(
-            "Escalating Coder: %s → %s. Stuck reason: %s",
-            old_model, new_model, detector.last_reason,
-        )
-        return True, new_model
-
-    def record_success(self) -> None:
-        """Record a successful Coder cycle toward de-escalation.
-
-        After ``DEESCALATE_AFTER`` consecutive successes, step down one
-        cascade tier. Call this from the orchestrator when a Coder task
-        completes cleanly.
-        """
-        if self._current_tier == 0:
-            return
-
-        self._successful_cycles += 1
-        logger.debug(
-            "Successful Coder cycle recorded (%d/%d toward de-escalation).",
-            self._successful_cycles, self.DEESCALATE_AFTER,
-        )
-
-        if self._successful_cycles >= self.DEESCALATE_AFTER:
-            old_model = self._current_model()
-            self._current_tier = max(0, self._current_tier - 1)
-            new_model = self._current_model()
-            self._successful_cycles = 0
-            logger.info(
-                "De-escalating Coder after %d successful cycles: %s → %s.",
-                self.DEESCALATE_AFTER, old_model, new_model,
-            )
 
     def build_handoff(
         self,
@@ -571,16 +360,7 @@ class Router:
         messages: list,
         keep_recent: int = 6,
     ) -> list:
-        """Build a clean starting message history for the escalated model.
-
-        Args:
-            detector: StuckDetector with diagnostics from the failed run.
-            messages: Full message history from the failed run.
-            keep_recent: Number of recent messages to include verbatim.
-
-        Returns:
-            Trimmed message list ready to pass to AgentLoop.
-        """
+        """Build a clean starting message history for the escalated model."""
         if len(messages) < 2:
             return messages
 
@@ -614,52 +394,180 @@ class Router:
 
         return [system_msg, instruction_msg, handoff_msg] + list(recent)
 
-    @property
-    def current_tier(self) -> int:
-        """Current position in the Coder cascade (0 = smallest model)."""
-        return self._current_tier
-
-    @property
-    def at_ceiling(self) -> bool:
-        """True if the Coder is already at the top of the cascade."""
-        return self._current_tier >= len(self._cascade) - 1
-
     # -----------------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------------
 
-    def _validate_config(self) -> None:
-        """Parse all configured model strings and enforce local_only.
+    def _get_or_create_backend(self, parsed: ParsedModel) -> LLMBackend:
+        """Return a cached backend or instantiate a new one.
 
-        Called once at construction time. Raises immediately if any model
-        string is malformed or if a remote backend is configured while
+        Cache key is ``(host, backend)`` — one instance per endpoint.
+        """
+        cache_key = (parsed.host, parsed.backend)
+        with self._cache_lock:
+            if cache_key in self._backend_cache:
+                return self._backend_cache[cache_key]
+            backend = self._instantiate_backend(parsed)
+            self._backend_cache[cache_key] = backend
+            logger.debug(
+                "Backend instantiated and cached: %s @ %s",
+                parsed.backend, parsed.host,
+            )
+            return backend
+
+    def _instantiate_backend(self, parsed: ParsedModel) -> LLMBackend:
+        """Construct a new ``LLMBackend`` instance for the given parsed model."""
+        backend = parsed.backend
+
+        if backend == "ollama":
+            from matrixmouse.inference.ollama import OllamaBackend
+            return OllamaBackend(host=parsed.host)
+
+        if backend == "llamacpp":
+            from matrixmouse.inference.llamacpp import LlamaCppBackend
+            return LlamaCppBackend(host=parsed.host)
+
+        if backend == "anthropic":
+            import os
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY is not set. "
+                    "Place the key in /etc/matrixmouse/secrets/anthropic_api_key "
+                    "and ensure _service.py loads it into the environment."
+                )
+            from matrixmouse.inference.anthropic import AnthropicBackend
+            return AnthropicBackend(
+                api_key=api_key,
+                budget_tracker=self._budget_tracker,
+            )
+
+        if backend == "openai":
+            import os
+            api_key = os.environ.get("OPENAI_API_KEY", "")
+            if not api_key:
+                raise ValueError(
+                    "OPENAI_API_KEY is not set. "
+                    "Place the key in /etc/matrixmouse/secrets/openai_api_key "
+                    "and ensure _service.py loads it into the environment."
+                )
+            from matrixmouse.inference.openai import OpenAIBackend
+            return OpenAIBackend(
+                api_key=api_key,
+                base_url=parsed.host,
+                budget_tracker=self._budget_tracker,
+            )
+
+        raise ValueError(
+            f"Unknown backend '{backend}'. "
+            f"Known backends: {sorted(_KNOWN_BACKENDS)}"
+        )
+
+    def _build_cascade_for_role(self, role: AgentRole) -> list[str]:
+        """Build the ordered cascade list for a role from config.
+
+        Merge role defaults to [coder_cascade[-1]] if unconfigured.
+        Raises ValueError if a required cascade is empty.
+
+        Args:
+            role: The AgentRole to build the cascade for.
+
+        Returns:
+            Non-empty list of model strings.
+
+        Raises:
+            ValueError: If the cascade is empty after resolving defaults.
+        """
+        role_to_config_key: dict[AgentRole, str] = {
+            AgentRole.MANAGER:  "manager_cascade",
+            AgentRole.CRITIC:   "critic_cascade",
+            AgentRole.WRITER:   "writer_cascade",
+            AgentRole.CODER:    "coder_cascade",
+            AgentRole.MERGE:    "merge_resolution_cascade",
+        }
+
+        config_key = role_to_config_key.get(role)
+        if config_key is None:
+            raise ValueError(f"Unknown role: {role}")
+
+        cascade = list(getattr(self.config, config_key, []))
+
+        # Default: merge_resolution_cascade falls back to [coder_cascade[-1]]
+        if role == AgentRole.MERGE and not cascade:
+            coder_cascade = list(self.config.coder_cascade or [])
+            if coder_cascade:
+                cascade = [coder_cascade[-1]]
+
+        if not cascade:
+            raise ValueError(
+                f"Required cascade '{config_key}' is empty. "
+                f"Configure it in config.toml."
+            )
+
+        logger.info("%s cascade: %s", config_key, cascade)
+        return cascade
+
+    def _build_summarizer_cascade(self) -> list[str]:
+        """Build the summarizer cascade from config.
+
+        Summarizer is not an AgentRole, so it's handled separately.
+
+        Returns:
+            Non-empty list of model strings.
+
+        Raises:
+            ValueError: If summarizer_cascade is empty.
+        """
+        cascade = list(self.config.summarizer_cascade or [])
+        if not cascade:
+            raise ValueError(
+                "Required cascade 'summarizer_cascade' is empty. "
+                "Configure it in config.toml."
+            )
+        logger.info("summarizer_cascade: %s", cascade)
+        return cascade
+
+    def _validate_config(self) -> None:
+        """Parse all cascade entries and enforce local_only.
+
+        Called once at construction time. Raises immediately if any entry
+        is malformed, empty, or if a remote backend is configured while
         ``local_only`` is ``True``.
 
         Raises:
-            ValueError: On any malformed model string or local_only violation.
+            ValueError: On any malformed/empty entry or local_only violation.
         """
-        all_model_strings = [
-            ("manager_model",    self.config.manager_model),
-            ("critic_model",     self.config.critic_model),
-            ("writer_model",     self.config.writer_model),
-            ("summarizer_model", self.config.summarizer_model),
-        ]
-        for i, model_string in enumerate(self._cascade):
-            all_model_strings.append((f"coder_cascade[{i}]", model_string))
+        # Map internal cascade keys to their config key names for error messages
+        key_map: dict[str, str] = {
+            AgentRole.MANAGER.value:  "manager_cascade",
+            AgentRole.CRITIC.value:   "critic_cascade",
+            AgentRole.WRITER.value:   "writer_cascade",
+            AgentRole.CODER.value:    "coder_cascade",
+            AgentRole.MERGE.value:    "merge_resolution_cascade",
+            "_summarizer":             "summarizer_cascade",
+        }
 
-        merge_model = self._merge_model()
-        all_model_strings.append(("merge_resolution_model", merge_model))
+        # Collect all cascade entries with their config key names
+        all_entries: list[tuple[str, str]] = []  # (config_key, model_string)
+
+        for cascade_key, cascade in self._role_cascades.items():
+            config_key_base = key_map.get(cascade_key, cascade_key)
+            for i, model_string in enumerate(cascade):
+                all_entries.append((f"{config_key_base}[{i}]", model_string))
 
         remote_violations: list[str] = []
 
-        for config_key, model_string in all_model_strings:
+        for config_key, model_string in all_entries:
             if not model_string:
-                continue
+                raise ValueError(
+                    f"Empty model string at {config_key}. "
+                    f"Every cascade entry must be a valid model string."
+                )
             try:
                 parsed = parse_model_string(model_string)
             except ValueError as e:
                 raise ValueError(
-                    f"Invalid model string for {config_key}: {e}"
+                    f"Invalid model string at {config_key}: {e}"
                 ) from e
 
             if self.config.local_only and parsed.is_remote:
@@ -675,36 +583,4 @@ class Router:
                 + "\n\nEither set local_only = false or use only local "
                 "backends (ollama, llamacpp)."
             )
-
-    def _build_cascade(self) -> list[str]:
-        """Build the ordered Coder cascade ladder from config.
-
-        If ``config.coder_cascade`` is set, use it directly. Otherwise
-        fall back to a single-tier ladder containing only
-        ``config.coder_model`` — escalation is effectively disabled.
-        """
-        if self.config.coder_cascade:
-            cascade = list(self.config.coder_cascade)
-            logger.info("Coder cascade ladder: %s", cascade)
-            return cascade
-
-        logger.info(
-            "No coder_cascade configured. Single-tier Coder ladder: [%s]. "
-            "Set coder_cascade in config.toml to enable escalation.",
-            self.config.coder_model,
-        )
-        return [self.config.coder_model]
-
-    def _current_model(self) -> str:
-        """Return the full model string at the current Coder cascade tier."""
-        return self._cascade[self._current_tier]
-
-    def _merge_model(self) -> str:
-        """Return the model string for the Merge role.
-
-        Defaults to the top of the Coder cascade if not explicitly configured.
-        """
-        if self.config.merge_resolution_model:
-            return self.config.merge_resolution_model
-        return self._cascade[-1] if self._cascade else self.config.coder_model
     

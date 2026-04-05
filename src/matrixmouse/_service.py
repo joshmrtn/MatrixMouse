@@ -107,7 +107,7 @@ def _stop_ollama_models() -> None:
     """
     Unload all configured models from Ollama VRAM.
 
-    Uses the config model fields (coder_model, manager_model, etc.) rather
+    Uses the config cascade fields (manager_cascade, coder_cascade, etc.) rather
     than `ollama ps` so we don't accidentally stop unrelated models running
     on the same machine.
 
@@ -118,20 +118,20 @@ def _stop_ollama_models() -> None:
         logger.debug("Config not loaded — skipping ollama model unload.")
         return
 
-    # Collect all unique model names across all roles
-    model_fields = [
-        _config.coder_model,
-        _config.manager_model,
-        _config.summarizer_model,
-        _config.critic_model,
-        _config.writer_model,
+    # Collect all unique model names across all role cascades
+    cascade_fields = [
+        _config.manager_cascade,
+        _config.critic_cascade,
+        _config.writer_cascade,
+        _config.coder_cascade,
+        _config.merge_resolution_cascade,
+        _config.summarizer_cascade,
     ]
 
-    # coder_cascade is a list — flatten it
-    cascade = _config.coder_cascade or []
-    if isinstance(cascade, str):
-        cascade = [m.strip() for m in cascade.split(",") if m.strip()]
-    model_fields.extend(cascade)
+    model_fields = []
+    for cascade in cascade_fields:
+        if cascade:
+            model_fields.extend(cascade)
 
     models = list(dict.fromkeys(m for m in model_fields if m))  # unique, ordered
 
@@ -213,15 +213,18 @@ def _load_inference_secrets(config) -> None:
     """
     from matrixmouse.router import parse_model_string, _REMOTE_BACKENDS
 
-    # Collect every configured model string
-    all_model_strings = [
-        config.manager_model,
-        config.coder_model,
-        config.writer_model,
-        config.critic_model,
-        config.summarizer_model,
-        config.merge_resolution_model,
-    ] + list(config.coder_cascade)
+    # Collect every configured model string from all cascades
+    all_model_strings: list[str] = []
+    for cascade in [
+        config.manager_cascade,
+        config.critic_cascade,
+        config.writer_cascade,
+        config.coder_cascade,
+        config.merge_resolution_cascade,
+        config.summarizer_cascade,
+    ]:
+        if cascade:
+            all_model_strings.extend(cascade)
 
     backends_in_use: set[str] = set()
     for model_string in all_model_strings:
@@ -406,6 +409,7 @@ def main() -> None:
             )
 
         # --- Model validation ---
+        budget_tracker = None  # Will be constructed below, passed to Router after
         router = Router(_config)        # parse + local_only check
         router.ensure_all_models()     # pull/verify each model
 
@@ -416,6 +420,9 @@ def main() -> None:
         # --- Memory and comms ---
         memory.configure(paths.agent_notes)
         comms.configure(_config)
+
+        # --- Workspace state repository ---
+        ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
 
         # --- Token budget tracker ---
         from matrixmouse.inference.token_budget import TokenBudgetTracker
@@ -435,15 +442,34 @@ def main() -> None:
             _config.openai_tokens_per_day,
         )
 
+        # --- Backend Availability Cache ---
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+        availability_cache = BackendAvailabilityCache(
+            ws_state_repo=ws_state_repo,
+            initial_cooldown_seconds=_config.backend_cooldown_initial_seconds,
+            max_cooldown_seconds=_config.backend_cooldown_max_seconds,
+        )
+        logger.info(
+            "Backend availability cache initialised: "
+            "initial=%ds, max=%ds",
+            _config.backend_cooldown_initial_seconds,
+            _config.backend_cooldown_max_seconds,
+        )
+
+        # --- Rebuild router with budget_tracker (backends need it) ---
+        # Router was already constructed above for validation, but backends
+        # need the budget_tracker for token accounting. Rebuild it now.
+        router = Router(_config, budget_tracker=budget_tracker)
+
         # --- Orchestrator ---
         queue = SQLiteTaskRepository(paths.db_file)
-        ws_state_repo = SQLiteWorkspaceStateRepository(paths.db_file)
         orchestrator = Orchestrator(
             config=_config,
             paths=paths,
             queue=queue,
             ws_state_repo=ws_state_repo,
             budget_tracker=budget_tracker,
+            availability_cache=availability_cache,
         )
         orchestrator.configure_api()
 

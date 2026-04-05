@@ -137,12 +137,17 @@ def make_orchestrator(tmp_path: Path, **config_kwargs) -> Orchestrator:
     ws_state_repo = InMemoryWorkspaceStateRepository()
 
     mock_router = MagicMock()
-    mock_router.model_for_role.return_value        = "ollama:test-model"
-    mock_router.parsed_model_for_role.return_value = MagicMock(model="test-model")
-    mock_router.backend_for_role.return_value      = MagicMock()
-    mock_router.get_backend.return_value           = MagicMock()
-    mock_router.stream_for_role.return_value       = False
-    mock_router.think_for_role.return_value        = False
+    mock_router.cascade_for_role.return_value = ["ollama:test-model"]
+    mock_router.get_backend_for_model.return_value = MagicMock()
+    mock_router.summarizer_cascade.return_value = ["ollama:summarizer-model"]
+
+    def _fake_parse(model_str):
+        pm = MagicMock()
+        pm.backend = "ollama"
+        pm.model = "test-model"
+        pm.is_remote = False
+        return pm
+    mock_router.parse_model_string = _fake_parse
 
     with patch("matrixmouse.orchestrator.Router", return_value=mock_router):
         orch = Orchestrator(
@@ -1722,80 +1727,6 @@ class TestMaybePromoteWaitingTasks:
 
 
 # ---------------------------------------------------------------------------
-# _handle_budget_exhausted
-# ---------------------------------------------------------------------------
-
-class TestHandleBudgetExhausted:
-    """Tests for Orchestrator._handle_budget_exhausted method."""
-
-    def test_sets_task_status_to_waiting(self, tmp_path):
-        """_handle_budget_exhausted sets task status to WAITING."""
-        from matrixmouse.inference.base import TokenBudgetExceededError
-        
-        orch = make_orchestrator(tmp_path)
-        task = make_task()
-        orch.queue.add(task)
-        
-        exc = TokenBudgetExceededError(
-            provider="anthropic",
-            period="hour",
-            limit=100000,
-            used=150000,
-            retry_after=datetime.now(timezone.utc) + timedelta(minutes=30),
-        )
-        orch._handle_budget_exhausted(task, exc)
-        
-        updated = orch.queue.get(task.id)
-        assert updated is not None
-        assert updated.status == TaskStatus.WAITING
-
-    def test_sets_wait_reason_to_budget_provider(self, tmp_path):
-        """_handle_budget_exhausted sets wait_reason to "budget:<provider>"."""
-        from matrixmouse.inference.base import TokenBudgetExceededError
-        
-        orch = make_orchestrator(tmp_path)
-        task = make_task()
-        orch.queue.add(task)
-        
-        exc = TokenBudgetExceededError(
-            provider="anthropic",
-            period="hour",
-            limit=100000,
-            used=150000,
-            retry_after=datetime.now(timezone.utc) + timedelta(minutes=30),
-        )
-        orch._handle_budget_exhausted(task, exc)
-        
-        updated = orch.queue.get(task.id)
-        assert updated is not None
-        assert updated.wait_reason == "budget:anthropic"
-
-    def test_sets_wait_until_from_exc_retry_after(self, tmp_path):
-        """_handle_budget_exhausted sets wait_until from exc.retry_after."""
-        from matrixmouse.inference.base import TokenBudgetExceededError
-        
-        orch = make_orchestrator(tmp_path)
-        task = make_task()
-        orch.queue.add(task)
-        
-        retry_dt = datetime.now(timezone.utc) + timedelta(minutes=30)
-        exc = TokenBudgetExceededError(
-            provider="anthropic",
-            period="hour",
-            limit=100000,
-            used=150000,
-            retry_after=retry_dt,
-        )
-        orch._handle_budget_exhausted(task, exc)
-        
-        updated = orch.queue.get(task.id)
-        assert updated is not None
-        assert updated.wait_until is not None
-        # Should be the ISO format of the retry_after datetime
-        assert updated.wait_until == retry_dt.isoformat()
-
-
-# ---------------------------------------------------------------------------
 # _mark_backend_exhausted / _get_and_clear_exhausted_backends
 # ---------------------------------------------------------------------------
 
@@ -1912,7 +1843,7 @@ class TestTaskRunContext:
         # Mock _run_agent to capture the ctx
         captured_ctx = None
 
-        def mock_run_agent(ctx, agent, messages):
+        def mock_run_agent(ctx, agent, messages, model=None):
             nonlocal captured_ctx
             captured_ctx = ctx
             return make_run_result(LoopExitReason.COMPLETE, summary="done")
@@ -1971,7 +1902,7 @@ class TestTaskRunContext:
 
         captured_graphs = []
 
-        def mock_run_agent(ctx, agent, messages):
+        def mock_run_agent(ctx, agent, messages, model=None):
             captured_graphs.append(ctx.graph)
             return make_run_result(LoopExitReason.COMPLETE, summary="done")
 
@@ -2016,7 +1947,7 @@ class TestTaskRunContext:
 
         captured_ctx = None
 
-        def mock_run_agent(ctx, agent, messages):
+        def mock_run_agent(ctx, agent, messages, model=None):
             nonlocal captured_ctx
             captured_ctx = ctx
             return make_run_result(LoopExitReason.COMPLETE, summary="done")
@@ -2029,4 +1960,840 @@ class TestTaskRunContext:
         assert captured_ctx is not None
         assert isinstance(captured_ctx, TaskRunContext)
         assert captured_ctx.graph is None
+
+
+# ---------------------------------------------------------------------------
+# Cascade resolution (Issue #32)
+# ---------------------------------------------------------------------------
+
+class TestResolveModelForTask:
+    """Tests for Orchestrator._resolve_model_for_task()."""
+
+    def _make_orch_for_resolve(self, tmp_path):
+        """Create orchestrator with real-ish cascade resolution."""
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        config = make_config()
+        config.coder_cascade = ["ollama:coder1", "ollama:coder2"]
+        config.manager_cascade = ["ollama:manager1"]
+        config.writer_cascade = ["ollama:writer1"]
+        config.critic_cascade = ["ollama:critic1"]
+        config.merge_resolution_cascade = ["ollama:merge1"]
+        config.summarizer_cascade = ["ollama:summarizer1"]
+
+        paths = MagicMock()
+        paths.workspace_root = tmp_path
+
+        queue = InMemoryTaskRepository()
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+
+        mock_router = MagicMock()
+        mock_router.cascade_for_role.return_value = ["ollama:coder1", "ollama:coder2"]
+
+        mock_router.stream_for_role.return_value = False
+        mock_router.think_for_role.return_value = False
+
+        # parse_model_string mock
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = model_str.split(":")[0] if ":" in model_str else "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = pm.backend in ("anthropic", "openai")
+            return pm
+
+        mock_router.get_backend_for_model.return_value = MagicMock()
+
+        with patch("matrixmouse.orchestrator.Router", return_value=mock_router):
+            orch = Orchestrator(
+                config=config,
+                paths=paths,
+                queue=queue,
+                ws_state_repo=ws_state_repo,
+            )
+        orch._router = mock_router
+        orch._router.parse_model_string = fake_parse
+        return orch, mock_router
+
+    def test_resolve_model_picks_first_available(self):
+        """Cascade [A, B, C], all pass → A."""
+        tmp = Path("/tmp/test_orch_3b_1")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "ollama:coder1"
+
+    def test_resolve_model_skips_budget_exhausted_remote(self):
+        """A raises TokenBudgetExceededError in check_budget → B."""
+        tmp = Path("/tmp/test_orch_3b_2")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        from matrixmouse.inference.base import TokenBudgetExceededError
+        from matrixmouse.inference.token_budget import TokenBudgetTracker
+
+        # Set up a budget tracker that blocks the first model
+        mock_tracker = MagicMock()
+        def check_budget_fn(provider, model):
+            if provider == "anthropic" and model == "claude-1":
+                raise TokenBudgetExceededError(
+                    provider="anthropic", period="hour",
+                    limit=100, used=101,
+                )
+        mock_tracker.check_budget.side_effect = check_budget_fn
+        orch._budget_tracker = mock_tracker
+
+        mock_router.cascade_for_role.return_value = [
+            "anthropic:claude-1", "anthropic:claude-2"
+        ]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = True
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "anthropic:claude-2"
+
+    def test_resolve_model_skips_cooldown_backend(self):
+        """A's backend in cooldown → B (different backend)."""
+        tmp = Path("/tmp/test_orch_3b_3")
+        tmp.mkdir(exist_ok=True)
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("anthropic")
+        orch._availability_cache = cache
+
+        mock_router.cascade_for_role.return_value = [
+            "anthropic:claude-1", "openai:gpt-4o"
+        ]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            parts = model_str.split(":")
+            pm.backend = parts[0]
+            pm.model = parts[-1]
+            pm.is_remote = True
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+        # No budget tracker → budget check skipped
+        orch._budget_tracker = None
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "openai:gpt-4o"
+
+    def test_resolve_model_local_backend_skips_budget_check(self):
+        """Local backend is not passed to check_budget even when
+        budget_tracker is set; confirm via mock."""
+        tmp = Path("/tmp/test_orch_3b_4")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        mock_tracker = MagicMock()
+        orch._budget_tracker = mock_tracker
+
+        mock_router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+
+        # Budget tracker should NOT be called for local backends
+        mock_tracker.check_budget.assert_not_called()
+
+    def test_resolve_model_all_exhausted_returns_none(self):
+        """All fail → None."""
+        tmp = Path("/tmp/test_orch_3b_5")
+        tmp.mkdir(exist_ok=True)
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("anthropic")
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        mock_router.cascade_for_role.return_value = ["anthropic:claude-1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = True
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result is None
+
+    def test_resolve_model_single_entry_cascade_passes(self):
+        """Single entry cascade, available → returns it."""
+        tmp = Path("/tmp/test_orch_3b_6")
+        tmp.mkdir(exist_ok=True)
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        mock_router.cascade_for_role.return_value = ["ollama:only-model"]
+        orch._budget_tracker = None
+        orch._availability_cache = None
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result == "ollama:only-model"
+
+    def test_resolve_model_single_entry_cascade_fails_returns_none(self):
+        """Single entry cascade, backend in cooldown → None."""
+        tmp = Path("/tmp/test_orch_3b_7")
+        tmp.mkdir(exist_ok=True)
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch, mock_router = self._make_orch_for_resolve(tmp)
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("ollama")
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        mock_router.cascade_for_role.return_value = ["ollama:only-model"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+
+        mock_router.parse_model_string = fake_parse
+
+        result = orch._resolve_model_for_task(
+            make_task(role=AgentRole.CODER, repo=["repo"])
+        )
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Error handling, WAITING, stuck escalation (Issue #32)
+# ---------------------------------------------------------------------------
+
+class TestHandleAllBackendsExhausted:
+    """Tests for _handle_all_backends_exhausted()."""
+
+    def test_handle_all_exhausted_sets_waiting_with_budget_wait_until(self, tmp_path):
+        """Budget exhausted, retry_after known → WAITING with correct wait_until."""
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["anthropic:claude-1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = "claude-1"
+            pm.is_remote = True
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        mock_tracker = MagicMock()
+        wait_after = datetime.now(timezone.utc) + timedelta(minutes=30)
+        mock_tracker.get_retry_after.return_value = wait_after
+        orch._budget_tracker = mock_tracker
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        orch.queue.add(task)
+
+        orch._handle_all_backends_exhausted(task)
+
+        assert task.status == TaskStatus.WAITING
+        assert task.wait_reason.startswith("budget:")
+
+    def test_handle_all_exhausted_sets_waiting_with_cooldown_wait_until(self, tmp_path):
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = "coder1"
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("ollama")
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        orch.queue.add(task)
+
+        orch._handle_all_backends_exhausted(task)
+
+        assert task.status == TaskStatus.WAITING
+        assert task.wait_reason.startswith("backend_unavailable:")
+
+    def test_handle_all_exhausted_no_wait_until_returns_ready(self, tmp_path):
+        """No tracker, no cache, local-only cascade → READY, not WAITING."""
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = "coder1"
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        orch._budget_tracker = None
+        orch._availability_cache = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        orch._handle_all_backends_exhausted(task)
+
+        assert task.status == TaskStatus.READY
+
+    def test_handle_all_exhausted_wait_reason_budget_beats_cooldown(self, tmp_path):
+        """Both apply → wait_reason = budget:{provider} when budget is sooner."""
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["anthropic:claude-1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = "claude-1"
+            pm.is_remote = True
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        mock_tracker = MagicMock()
+        # Budget is sooner than cooldown (30s default)
+        wait_after = datetime.now(timezone.utc) + timedelta(seconds=5)
+        mock_tracker.get_retry_after.return_value = wait_after
+        orch._budget_tracker = mock_tracker
+
+        # Cooldown is 30s (default) — budget is sooner at 5s
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("anthropic")
+        orch._availability_cache = cache
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        orch.queue.add(task)
+
+        orch._handle_all_backends_exhausted(task)
+
+        assert task.wait_reason == "budget:anthropic"
+
+
+class TestRunTaskErrorHandling:
+    """Tests for error handling after _run_agent in _run_task."""
+
+    def test_summarization_unavailable_records_failure_and_yields(self, tmp_path):
+        from matrixmouse.inference.base import SummarizationUnavailableError
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = "coder1"
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        with patch.object(
+            orch, "_run_agent",
+            side_effect=SummarizationUnavailableError("no summarizer"),
+        ):
+            with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator.reconfigure_for_task"):
+                        with patch("matrixmouse.orchestrator.analyze_project"):
+                            with patch("matrixmouse.orchestrator.agent_for_role"):
+                                orch._run_task(task)
+
+        assert task.status == TaskStatus.READY
+
+    def test_connection_error_mid_loop_records_failure_and_yields(self, tmp_path):
+        from matrixmouse.inference.base import BackendConnectionError
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = "coder1"
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        with patch.object(
+            orch, "_run_agent",
+            side_effect=BackendConnectionError("connection refused"),
+        ):
+            with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator.reconfigure_for_task"):
+                        with patch("matrixmouse.orchestrator.analyze_project"):
+                            with patch("matrixmouse.orchestrator.agent_for_role"):
+                                orch._run_task(task)
+
+        assert task.status == TaskStatus.READY
+
+    def test_budget_error_mid_loop_marks_exhausted_and_yields(self, tmp_path):
+        from matrixmouse.inference.base import TokenBudgetExceededError
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = "coder1"
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        orch._budget_tracker = None
+        orch._availability_cache = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        with patch.object(
+            orch, "_run_agent",
+            side_effect=TokenBudgetExceededError(
+                provider="anthropic", period="hour", limit=100, used=101,
+            ),
+        ):
+            with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator.reconfigure_for_task"):
+                        with patch("matrixmouse.orchestrator.analyze_project"):
+                            with patch("matrixmouse.orchestrator.agent_for_role"):
+                                orch._run_task(task)
+
+        assert task.status == TaskStatus.READY
+
+    def test_success_clears_availability_failure(self, tmp_path):
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = "coder1"
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        orch._availability_cache = cache
+        orch._budget_tracker = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        # Record a failure to start with unavailable backend
+        cache.record_failure("ollama")
+        assert cache.is_available("ollama") is False
+
+        # Mock _resolve_model_for_task to return the model anyway
+        # (simulating that availability has recovered between resolution and run)
+        with patch.object(orch, "_resolve_model_for_task", return_value="ollama:coder1"):
+            with patch.object(
+                orch, "_run_agent",
+                return_value=make_run_result(LoopExitReason.COMPLETE, summary="done"),
+            ):
+                with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                        with patch("matrixmouse.orchestrator.reconfigure_for_task"):
+                            with patch("matrixmouse.orchestrator.analyze_project"):
+                                with patch("matrixmouse.orchestrator.agent_for_role"):
+                                    orch._run_task(task)
+
+        # record_success clears cooldown
+        assert cache.is_available("ollama") is True
+
+
+class TestRunTaskWithModel:
+    """Tests for _run_task_with_model()."""
+
+    def test_run_task_with_model_skips_cascade_resolution(self, tmp_path):
+        """Confirm _resolve_model_for_task is NOT called when
+        _run_task_with_model is used."""
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = "coder1"
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        with patch.object(orch, "_resolve_model_for_task") as mock_resolve:
+            with patch.object(
+                orch, "_run_agent",
+                return_value=make_run_result(LoopExitReason.COMPLETE, summary="done"),
+            ):
+                with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                        with patch("matrixmouse.orchestrator.reconfigure_for_task"):
+                            with patch("matrixmouse.orchestrator.analyze_project"):
+                                with patch("matrixmouse.orchestrator.agent_for_role"):
+                                    orch._run_task_with_model(task, "ollama:coder1")
+
+        mock_resolve.assert_not_called()
+
+
+class TestStuckEscalationPath:
+    """Tests for the updated stuck escalation path."""
+
+    def test_escalate_picks_next_cascade_entry(self, tmp_path):
+        """Stuck on entry 0 → _run_task_with_model called with entry 1."""
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = [
+            "ollama:coder1", "ollama:coder2"
+        ]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        orch._budget_tracker = None
+        orch._availability_cache = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        called_with = []
+
+        def mock_run_task_with_model(t, model):
+            called_with.append(model)
+            return make_run_result(LoopExitReason.COMPLETE, summary="done")
+
+        with patch.object(orch, "_run_task_with_model", side_effect=mock_run_task_with_model):
+            with patch.object(
+                orch, "_run_agent",
+                return_value=make_run_result(LoopExitReason.ESCALATE, summary="stuck"),
+            ):
+                with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                        with patch("matrixmouse.orchestrator.reconfigure_for_task"):
+                            with patch("matrixmouse.orchestrator.analyze_project"):
+                                with patch("matrixmouse.orchestrator.agent_for_role"):
+                                    with patch.object(orch, "_resolve_model_for_task", return_value="ollama:coder1"):
+                                        orch._run_task(task)
+
+        assert "ollama:coder2" in called_with
+
+    def test_escalate_at_ceiling_blocks_for_human(self, tmp_path):
+        """Stuck on last entry → _request_human_intervention called."""
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["ollama:coder1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "ollama"
+            pm.model = model_str.split(":")[-1]
+            pm.is_remote = False
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        orch._budget_tracker = None
+        orch._availability_cache = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"  # Required to skip branch setup
+        orch.queue.add(task)
+
+        with patch.object(orch, "_request_human_intervention") as mock_human:
+            with patch.object(
+                orch, "_run_agent",
+                return_value=make_run_result(LoopExitReason.ESCALATE, summary="stuck"),
+            ):
+                with patch("matrixmouse.orchestrator.ensure_branch_from_mirror", return_value=(True, "")):
+                    with patch("matrixmouse.orchestrator._git", return_value=(True, "")):
+                        with patch("matrixmouse.orchestrator.reconfigure_for_task"):
+                            with patch("matrixmouse.orchestrator.analyze_project"):
+                                with patch("matrixmouse.orchestrator.agent_for_role"):
+                                    with patch.object(orch, "_resolve_model_for_task", return_value="ollama:coder1"):
+                                        orch._run_task(task)
+
+        mock_human.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Sweep tests (Issue #32)
+# ---------------------------------------------------------------------------
+
+class TestSweepTests:
+    """Sweep tests — integration paths not covered elsewhere."""
+
+    def test_waiting_task_promoted_after_budget_rolls_off(self, tmp_path):
+        """Task WAITING with wait_until just in future; time mock advances;
+        _maybe_promote_waiting_tasks moves to READY."""
+        orch = make_orchestrator(tmp_path)
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        future_time = datetime.now(timezone.utc) - timedelta(seconds=1)  # Just passed
+        task.status = TaskStatus.WAITING
+        task.wait_until = future_time.isoformat()
+        task.wait_reason = "budget:anthropic"
+        orch.queue.add(task)
+
+        promoted = orch._maybe_promote_waiting_tasks()
+
+        assert promoted == 1
+        # all_tasks() returns copies, so re-fetch to verify
+        updated = orch.queue.get(task.id)
+        assert updated.status == TaskStatus.READY
+        assert updated.wait_until is None
+        assert updated.wait_reason == ""
+
+    def test_waiting_task_promoted_after_availability_cache_clears(self, tmp_path):
+        """Task WAITING with wait_reason=backend_unavailable:anthropic;
+        record_success called; next promote cycle moves to READY."""
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+
+        orch = make_orchestrator(tmp_path)
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+
+        # Simulate a task that was put in WAITING due to backend unavailability
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.status = TaskStatus.WAITING
+        # Set wait_until far in the future so time alone won't promote it
+        future_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        task.wait_until = future_time.isoformat()
+        task.wait_reason = "backend_unavailable:anthropic"
+        orch.queue.add(task)
+
+        # Now simulate the backend recovering
+        cache.record_success("anthropic")
+        orch._availability_cache = cache
+
+        # Promote should NOT happen yet (wait_until still in future)
+        promoted = orch._maybe_promote_waiting_tasks()
+        assert promoted == 0
+        updated = orch.queue.get(task.id)
+        assert updated.status == TaskStatus.WAITING
+
+        # Clear the wait manually (simulating operator or scheduler action after
+        # availability recovered)
+        updated.wait_until = None
+        updated.wait_reason = ""
+        orch.queue.update(updated)
+
+        # Now promote should happen
+        promoted = orch._maybe_promote_waiting_tasks()
+        assert promoted == 1
+        final = orch.queue.get(task.id)
+        assert final.status == TaskStatus.READY
+
+    def test_full_three_entry_cascade_two_fail_one_passes(self, tmp_path):
+        """Entry 0 budget exhausted, entry 1 in cooldown, entry 2 local and
+        available → task runs on entry 2."""
+        from matrixmouse.repository.memory_workspace_state_repository import (
+            InMemoryWorkspaceStateRepository,
+        )
+        from matrixmouse.inference.availability import BackendAvailabilityCache
+        from matrixmouse.inference.base import TokenBudgetExceededError
+
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = [
+            "anthropic:claude-1",   # Entry 0: budget exhausted
+            "anthropic:claude-2",   # Entry 1: in cooldown
+            "ollama:coder-local",    # Entry 2: local, available
+        ]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            parts = model_str.split(":")
+            pm.backend = parts[0]
+            pm.model = parts[-1]
+            pm.is_remote = parts[0] in ("anthropic", "openai")
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        # Set up budget tracker — blocks first entry
+        mock_tracker = MagicMock()
+        def check_budget_fn(provider, model):
+            if model == "claude-1":
+                raise TokenBudgetExceededError(
+                    provider="anthropic", period="hour",
+                    limit=100, used=101,
+                )
+        mock_tracker.check_budget.side_effect = check_budget_fn
+        orch._budget_tracker = mock_tracker
+
+        # Set up availability cache — blocks second entry's backend
+        ws_state_repo = InMemoryWorkspaceStateRepository()
+        cache = BackendAvailabilityCache(ws_state_repo)
+        cache.record_failure("anthropic")  # Entry 1's backend in cooldown
+        orch._availability_cache = cache
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        task.branch = "test-branch"
+        orch.queue.add(task)
+
+        result = orch._resolve_model_for_task(task)
+
+        # Should skip entry 0 (budget) and entry 1 (cooldown), return entry 2
+        assert result == "ollama:coder-local"
+
+    def test_single_entry_cascade_exhausted_sets_waiting(self, tmp_path):
+        """One-entry cascade, backend exhausted with known retry_after →
+        WAITING with correct wait_until."""
+        orch = make_orchestrator(tmp_path)
+        orch._router.cascade_for_role.return_value = ["anthropic:claude-1"]
+
+        def fake_parse(model_str):
+            pm = MagicMock()
+            pm.backend = "anthropic"
+            pm.model = "claude-1"
+            pm.is_remote = True
+            return pm
+        orch._router.parse_model_string = fake_parse
+
+        # Budget tracker with known retry_after
+        mock_tracker = MagicMock()
+        wait_after = datetime.now(timezone.utc) + timedelta(minutes=15)
+        mock_tracker.get_retry_after.return_value = wait_after
+        orch._budget_tracker = mock_tracker
+        orch._availability_cache = None
+
+        task = make_task(role=AgentRole.CODER, repo=["repo"])
+        orch.queue.add(task)
+
+        orch._handle_all_backends_exhausted(task)
+
+        assert task.status == TaskStatus.WAITING
+        assert task.wait_reason == "budget:anthropic"
+        assert task.wait_until is not None
+        # wait_until should match the budget retry_after
+        wait_until_dt = datetime.fromisoformat(task.wait_until)
+        assert wait_until_dt == wait_after
         
