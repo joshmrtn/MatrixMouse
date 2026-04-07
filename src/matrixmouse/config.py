@@ -458,22 +458,22 @@ def load_config(
     repo_root: Optional[Path],
     workspace_root: Optional[Path] = None,
 ) -> MatrixMouseConfig:
-    """
-    Load and merge configuration from all sources in order of
-    increasing priority:
-        1. Field defaults
-        2. /etc/matrixmouse/config.toml                         global
-        3. <workspace>/.matrixmouse/config.toml                 workspace-wide
-        4. <repo_root>/.matrixmouse/config.toml                 repo-local, tracked
-        5. <workspace>/.matrixmouse/<repo_name>/config.toml     repo-local, untracked
+    """Load and merge configuration from all sources.
 
-    repo_root may be None at service startup (workspace-level context).
+    Priority (increasing):
+        1. Field defaults
+        2. /etc/matrixmouse/config.toml (global)
+        3. <workspace>/.matrixmouse/config.toml (workspace-wide)
+        4. <repo_root>/.matrixmouse/config.toml (repo-local, tracked)
+        5. <workspace>/.matrixmouse/<repo_name>/config.toml (repo-local, untracked)
+
+    `repo_root` may be None at service startup (workspace-level context).
     Layers 4 and 5 are both skipped in that case.
 
     Args:
-        repo_root:       Root directory of the repo, or None.
-        workspace_root:  Root of the MatrixMouse workspace. Falls back to
-                         the WORKSPACE_PATH environment variable if None.
+        repo_root: Root directory of the repo, or None.
+        workspace_root: Root of the MatrixMouse workspace. Falls back to
+            the WORKSPACE_PATH environment variable if None.
 
     Returns:
         A fully merged and validated MatrixMouseConfig instance.
@@ -528,10 +528,10 @@ _loaded_config: Optional[MatrixMouseConfig] = None
 
 
 def generate_starter_config() -> str:
-    """
-    Generate the contents of a starter config.toml from MatrixMouseConfig
-    field metadata. All fields are commented out so the file documents
-    available options without overriding any defaults.
+    """Generate the contents of a starter config.toml from MatrixMouseConfig metadata.
+
+    All fields are commented out so the file documents available options
+    without overriding any defaults.
 
     Returns:
         A TOML-formatted string ready to write to disk.
@@ -567,11 +567,10 @@ def generate_starter_config() -> str:
 
 @dataclass
 class MatrixMousePaths:
-    """
-    Workspace-scoped paths. Constructed once at service startup.
+    """Workspace-scoped paths. Constructed once at service startup.
 
     This is the top-level paths object. It does not represent any specific
-    repo — repo-scoped paths are built on demand via repo_paths(repo_name)
+    repo — repo-scoped paths are built on demand via `repo_paths(repo_name)`
     when a task begins execution.
 
     Layout:
@@ -690,13 +689,12 @@ class MatrixMousePaths:
 
 @dataclass
 class RepoPaths:
-    """
-    Repo-scoped paths for a single task execution.
+    """Repo-scoped paths for a single task execution.
 
-    Built on demand by MatrixMousePaths.repo_paths(repo_name).
-    Passed to AgentLoop, ContextManager, and init.setup_repo.
+    Built on demand by `MatrixMousePaths.repo_paths(repo_name)`.
+    Passed to `AgentLoop`, `ContextManager`, and `init.setup_repo`.
 
-    Never constructed directly — always via MatrixMousePaths.repo_paths().
+    Never constructed directly — always via `MatrixMousePaths.repo_paths()`.
     """
     workspace_root: Path
     repo_root: Path

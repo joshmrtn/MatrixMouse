@@ -38,11 +38,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class AgentRole(str, Enum):
+    """Enumeration of roles an agent can take on for a task."""
     MANAGER = "manager"
+    """Orchestrates task decomposition and high-level management."""
     CODER   = "coder"
+    """Implements code changes and bug fixes."""
     WRITER  = "writer"
+    """Writes documentation and non-code content."""
     CRITIC  = "critic"
+    """Reviews changes made by other agents."""
     MERGE   = "merge"
+    """Resolves merge conflicts."""
 
 
 # ---------------------------------------------------------------------------
@@ -50,10 +56,15 @@ class AgentRole(str, Enum):
 # ---------------------------------------------------------------------------
 
 class PRState(str, Enum):
-    NONE   = ""        # no PR exists
-    OPEN   = "open"    # PR created, awaiting review
-    MERGED = "merged"  # PR merged, task can complete
-    CLOSED = "closed"  # PR rejected, needs rework
+    """Enumeration of pull request states."""
+    NONE   = ""
+    """No pull request exists for this task."""
+    OPEN   = "open"
+    """Pull request is open and awaiting review or merge."""
+    MERGED = "merged"
+    """Pull request has been successfully merged."""
+    CLOSED = "closed"
+    """Pull request was closed without merging."""
 
 
 # ---------------------------------------------------------------------------
@@ -61,14 +72,23 @@ class PRState(str, Enum):
 # ---------------------------------------------------------------------------
 
 class TaskStatus(Enum):
+    """Enumeration of task lifecycle statuses."""
     PENDING          = "pending"
+    """Task isn't yet schedulable and isn't yet committed to the dependency graph."""
     READY            = "ready"
+    """Task is schedulable and can be picked up to work on."""
     RUNNING          = "running"
+    """An agent is currently working on the task."""
     BLOCKED_BY_TASK  = "blocked_by_task"
+    """Task cannot be started until its dependencies are satisfied."""
     BLOCKED_BY_HUMAN = "blocked_by_human"
-    WAITING          = "waiting"          # paused until wait_until; resumes automatically
+    """Human intervention is needed before the task can continue."""
+    WAITING          = "waiting"
+    """Temporarily blocked but will resolve automatically after a time condition."""
     COMPLETE         = "complete"
+    """Task has been successfully completed."""
     CANCELLED        = "cancelled"
+    """Task has been cancelled and will not be executed."""
 
     @property
     def is_terminal(self) -> bool:
@@ -234,8 +254,7 @@ class Task:
         importance_weight: float = 0.6,
         urgency_weight: float = 0.4,
     ) -> float:
-        """
-        Compute a priority score for this task.
+        """Compute a priority score for this task.
 
         Lower return value == higher priority (0.0 = most urgent).
 
@@ -247,7 +266,14 @@ class Task:
         an aging bonus (so older tasks drift toward 0 over time, preventing
         starvation).
 
-        Clamped to [0.0, 1.0].
+        Args:
+            aging_rate: Daily priority increase for incomplete tasks.
+            max_aging_bonus: Maximum priority bonus from aging.
+            importance_weight: Weight for importance in [0, 1].
+            urgency_weight: Weight for urgency in [0, 1].
+
+        Returns:
+            The calculated priority score clamped to [0.0, 1.0].
         """
         base = (self.importance * importance_weight) + (self.urgency * urgency_weight)
         # base is in [0, 1]; higher = more important/urgent
@@ -269,6 +295,11 @@ class Task:
     # -----------------------------------------------------------------------
 
     def to_dict(self) -> dict:
+        """Serialise the task to a dictionary for storage or API delivery.
+
+        Returns:
+            Dictionary containing all task fields.
+        """
         return {
             "id":                           self.id,
             "title":                        self.title,
@@ -308,6 +339,14 @@ class Task:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Task":
+        """Reconstruct a task from a dictionary.
+
+        Args:
+            data: Dictionary of task fields (e.g. from JSON or SQLite).
+
+        Returns:
+            A new Task instance.
+        """
         # --- role ---
         role_str = data.get("role", "coder")
         try:
