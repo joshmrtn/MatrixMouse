@@ -102,7 +102,11 @@ def notify_task_available() -> None:
 
 
 def get_task_condition() -> threading.Condition:
-    """Return the condition variable for the orchestrator to wait on."""
+    """Return the condition variable for the orchestrator to wait on.
+
+    Returns:
+        The `threading.Condition` shared between API and orchestrator.
+    """
     return _task_condition
 
 
@@ -115,12 +119,20 @@ _stop_requested = threading.Event()
 
 
 def is_stop_requested() -> bool:
-    """Return True if a soft stop has been requested."""
+    """Return True if a soft stop has been requested.
+
+    Returns:
+        Boolean stop flag state.
+    """
     return _stop_requested.is_set()
 
 
 def clear_stop_requested() -> None:
-    """Clear the stop flag. Called by the orchestrator when starting a new task."""
+    """Clear the stop flag.
+
+    Called by the orchestrator when starting a new task to reset the stop
+    signal from a previous task run.
+    """
     _stop_requested.clear()
 
 
@@ -146,9 +158,18 @@ def configure(
     ws_state_repo: WorkspaceStateRepository,
     budget_tracker: Any | None = None,
 ) -> None:
-    """
-    Inject runtime state into the API module.
+    """Inject runtime state into the API module.
+
     Called once at startup before uvicorn starts.
+
+    Args:
+        queue: `TaskRepository` for task persistence.
+        scheduler: `Scheduler` instance for priority reporting.
+        status: Shared agent status dict (mutated by orchestrator).
+        workspace_root: Base path for the MatrixMouse workspace.
+        config: `MatrixMouseConfig` instance.
+        ws_state_repo: `WorkspaceStateRepository` for cross-repo state.
+        budget_tracker: `TokenBudgetTracker` for usage reporting.
     """
     global _queue, _scheduler, _status, _workspace_root, _config, _ws_state_repo, _budget_tracker
     _queue = queue
@@ -161,13 +182,29 @@ def configure(
     logger.info("API module configured. Workspace: %s", workspace_root)
 
 
-def _require_queue():
+def _require_queue() -> TaskRepository:
+    """Return the task repository or raise 503 if not configured.
+
+    Returns:
+        The active `TaskRepository`.
+
+    Raises:
+        HTTPException: 503 if the repository is not ready.
+    """
     if _queue is None:
         raise HTTPException(status_code=503, detail="Agent not ready.")
     return _queue
 
 
 def _require_workspace() -> Path:
+    """Return the workspace root path or raise 503 if not configured.
+
+    Returns:
+        The workspace root `Path`.
+
+    Raises:
+        HTTPException: 503 if the workspace is not configured.
+    """
     if _workspace_root is None:
         raise HTTPException(status_code=503, detail="Workspace not configured.")
     return _workspace_root
@@ -185,60 +222,104 @@ def _estop_path() -> Path | None:
 # ---------------------------------------------------------------------------
 
 class TaskCreateRequest(BaseModel):
+    """Payload for creating a new task."""
     title: str
+    """The title of the task."""
     description: str = ""
+    """Detailed description of the task."""
     repo: list[str] = []
+    """List of repository names this task relates to."""
     role: str = "coder"
+    """The agent role responsible for this task (e.g., 'coder', 'writer')."""
     target_files: list[str] = []
+    """List of specific files the task should focus on."""
     importance: float = 0.5
+    """Importance score of the task (0.0-1.0, lower is more important)."""
     urgency: float = 0.5
+    """Urgency score of the task (0.0-1.0, lower is more urgent)."""
 
 class TaskEditRequest(BaseModel):
+    """Payload for patching an existing task."""
     title: str | None = None
+    """The new title for the task."""
     description: str | None = None
+    """The new detailed description for the task."""
     repo: list[str] | None = None
+    """The new list of repository names this task relates to."""
     target_files: list[str] | None = None
+    """The new list of specific files the task should focus on."""
     importance: float | None = None
+    """The new importance score for the task."""
     urgency: float | None = None
+    """The new urgency score for the task."""
     notes: str | None = None
+    """Additional notes for the task."""
 
 class InterjectionRequest(BaseModel):
+    """Payload for a deprecated interjection (scoped to repo or workspace)."""
     message: str
+    """The interjection message."""
     repo: str | None = None
+    """Optional repository name to scope the interjection."""
 
 class RepoAddRequest(BaseModel):
+    """Payload for cloning/registering a new repository."""
     remote: str
+    """The remote URL or path of the repository to clone."""
     name: str | None = None
+    """Optional name for the repository. If omitted, it's inferred from the remote."""
 
 class ConfigPatchRequest(BaseModel):
+    """Payload for updating configuration keys."""
     values: dict[str, Any]
+    """A dictionary where keys are configuration field names and values are their new settings."""
 
 class TurnLimitResponseRequest(BaseModel):
+    """Payload for responding to a turn-limit block."""
     action: str          # "extend" | "respec" | "cancel"
+    """The action to take (extend turns, respec task, or cancel)."""
     note: str = ""       # required for respec, optional for extend/cancel
+    """An optional note providing context or instructions."""
     extend_by: int = 0   # only used when action="extend", 0 means use config default
+    """Number of additional turns to grant if action is 'extend'."""
 
 class WorkspaceInterjectionRequest(BaseModel):
+    """Payload for sending a message to the Manager at workspace level."""
     message: str
+    """The interjection message."""
 
 class RepoInterjectionRequest(BaseModel):
+    """Payload for sending a message to the Manager scoped to a repo."""
     message: str
+    """The interjection message."""
 
 class TaskInterjectionRequest(BaseModel):
+    """Payload for sending a message to a specific running task's agent."""
     message: str
+    """The interjection message."""
 
 class TaskAnswerRequest(BaseModel):
+    """Payload for answering a clarification question."""
     message: str
+    """The answer message."""
 
 class CriticReviewResponseRequest(BaseModel):
+    """Payload for human response to a Critic review task."""
     action: str          # "approve_task" | "extend_critic" | "block_task"
+    """The action to take (approve_task, extend_critic, or block_task)."""
     feedback: str = ""   # optional feedback appended to reviewed task context
+    """Optional feedback to provide."""
  
 class DecisionRequest(BaseModel):
+    """Payload for responding to any structured decision event."""
     decision_type: str   # maps to the emitted event name, e.g. "pr_approval_required"
+    """The type of decision being responded to."""
     choice: str          # one of the offered choice values, e.g. "approve"
+    """The chosen option from the decision, e.g. 'approve'"""
     note: str = ""       # optional free-form human text
+    """Optional free-form text for additional context."""
     metadata: dict = {}  # decision-type-specific structured data
+    """Metadata specific to the decision type."""
  
 # ---------------------------------------------------------------------------
 # Health
@@ -246,7 +327,11 @@ class DecisionRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Liveness check. Returns 200 when the server is up."""
+    """Liveness check.
+
+    Returns:
+        Dict with "ok" status and current UTC timestamp.
+    """
     return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
@@ -260,13 +345,15 @@ async def list_tasks(
     repo: str | None = None,
     all: bool = False,
 ):
-    """
-    List tasks.
+    """List tasks with optional filtering.
 
-    Query params:
-        status: Filter by status value (pending, active, blocked_by_task, etc.)
-        repo:   Filter by repo name.
-        all:    Include terminal tasks (complete, cancelled). Default false.
+    Args:
+        status: Filter by task status (pending, ready, running, etc.).
+        repo: Filter by repository name.
+        all: If True, include terminal tasks (complete, cancelled).
+
+    Returns:
+        Dict containing the list of tasks and the total count.
     """
     queue = _require_queue()
     tasks = queue.all_tasks()
@@ -292,7 +379,20 @@ async def list_tasks(
 
 @app.get("/tasks/{task_id}")
 async def get_task(task_id: str):
-    """Get full details of a single task."""
+    """Get full details of a single task.
+
+    Supports prefix matching: if `task_id` is a unique prefix of exactly
+    one task ID, that task is returned.
+
+    Args:
+        task_id: Full task ID or unique prefix.
+
+    Returns:
+        The task details as a dictionary.
+
+    Raises:
+        HTTPException: 400 if prefix is ambiguous, 404 if not found.
+    """
     queue = _require_queue()
 
     task = queue.get(task_id)
@@ -315,9 +415,18 @@ async def get_task(task_id: str):
 
 @app.post("/tasks", status_code=201)
 async def create_task(body: TaskCreateRequest):
-    """
-    Create a new task and add it to the queue.
+    """Create a new task and add it to the queue.
+
     Notifies the orchestrator immediately via the condition variable.
+
+    Args:
+        body: `TaskCreateRequest` payload.
+
+    Returns:
+        The created task details.
+
+    Raises:
+        HTTPException: 400 if title is empty or role is invalid.
     """
     from matrixmouse.task import Task, TaskStatus, AgentRole
 
@@ -361,7 +470,18 @@ async def create_task(body: TaskCreateRequest):
 
 @app.patch("/tasks/{task_id}")
 async def edit_task(task_id: str, body: TaskEditRequest):
-    """Edit mutable fields of an existing task."""
+    """Edit mutable fields of an existing task.
+
+    Args:
+        task_id: ID of the task to edit.
+        body: `TaskEditRequest` payload.
+
+    Returns:
+        The updated task details.
+
+    Raises:
+        HTTPException: 404 if not found, 400 if task is terminal or field is not editable.
+    """
     queue = _require_queue()
     task = queue.get(task_id)
     if task is None:
@@ -395,7 +515,17 @@ async def edit_task(task_id: str, body: TaskEditRequest):
 
 @app.delete("/tasks/{task_id}")
 async def cancel_task(task_id: str):
-    """Cancel a task."""
+    """Cancel a task.
+
+    Args:
+        task_id: ID of the task to cancel.
+
+    Returns:
+        Confirmation dict with "ok" status.
+
+    Raises:
+        HTTPException: 404 if not found.
+    """
     queue = _require_queue()
     task = queue.get(task_id)
     if task is None:
@@ -416,7 +546,11 @@ async def cancel_task(task_id: str):
 
 @app.get("/repos")
 async def list_repos():
-    """List registered repos."""
+    """List registered repositories.
+
+    Returns:
+        Dict containing the list of registered repositories.
+    """
     workspace = _require_workspace()
     repos_file = workspace / ".matrixmouse" / "repos.json"
 
@@ -431,10 +565,19 @@ async def list_repos():
 
 @app.post("/repos", status_code=201)
 async def add_repo(body: RepoAddRequest):
-    """
-    Clone or register a repo into the workspace.
+    """Clone or register a repository into the workspace.
+
     Runs synchronously — blocks until the clone completes.
-    Auto-inits the repo (workspace state dir only — repo tree untouched).
+    Automatically initialises the repository's workspace state.
+
+    Args:
+        body: `RepoAddRequest` payload.
+
+    Returns:
+        Confirmation dict with repository details.
+
+    Raises:
+        HTTPException: 400 if remote is empty, 409 if directory exists, 500 if clone fails.
     """
     import json
     from matrixmouse.init import setup_repo
@@ -514,9 +657,18 @@ async def add_repo(body: RepoAddRequest):
 
 @app.delete("/repos/{name}")
 async def remove_repo(name: str):
-    """
-    Remove a repo from the registry.
+    """Remove a repository from the registry.
+
     Does NOT delete the cloned directory — that requires manual action.
+
+    Args:
+        name: Name of the repository to remove.
+
+    Returns:
+        Confirmation dict with "ok" status.
+
+    Raises:
+        HTTPException: 404 if repository not found.
     """
     import json
 
@@ -552,21 +704,28 @@ async def remove_repo(name: str):
 
 @app.get("/status")
 async def get_status():
-    """Return the current agent status."""
+    """Return the current agent status dictionary.
+
+    Returns:
+        The status dict containing active task, role, model, turns, etc.
+    """
     return dict(_status)
 
 
 @app.get("/blocked")
 async def get_blocked():
-    """
-    Return a human-readable summary of all blocked and waiting tasks.
-    
+    """Return a summary of all blocked and waiting tasks.
+
     Includes:
-    - Tasks blocked by human intervention (BLOCKED_BY_HUMAN)
-    - Tasks blocked by dependencies (BLOCKED_BY_TASK)
-    - Tasks waiting on budget or time conditions (WAITING)
-    
-    This is the same output used by the web UI's status dashboard.
+    - Tasks blocked by human intervention (`BLOCKED_BY_HUMAN`)
+    - Tasks blocked by dependencies (`BLOCKED_BY_TASK`)
+    - Tasks waiting on budget or time conditions (`WAITING`)
+
+    Returns:
+        Dict containing the human-readable report.
+
+    Raises:
+        HTTPException: 503 if the scheduler is not configured.
     """
     if _scheduler is None:
         raise HTTPException(status_code=503, detail="Scheduler not configured.")
@@ -577,17 +736,13 @@ async def get_blocked():
 
 @app.get("/token_usage")
 async def get_token_usage():
-    """
-    Return current rolling-window token usage per provider.
-    
-    Returns usage totals for the past hour and past day for each
-    configured provider (anthropic, openai).
-    
-    Response format:
-    {
-        "anthropic": {"hour": 12345, "day": 67890},
-        "openai": {"hour": 0, "day": 0}
-    }
+    """Return rolling-window token usage per provider.
+
+    Returns:
+        Dict with hour and day totals for each configured provider.
+
+    Raises:
+        HTTPException: 503 if the budget tracker is not configured.
     """
     if _budget_tracker is None:
         raise HTTPException(status_code=503, detail="Budget tracker not configured.")
@@ -601,7 +756,11 @@ async def get_token_usage():
 
 @app.get("/pending")
 async def get_pending():
-    """Return the current pending clarification question, if any."""
+    """Return the current pending clarification question, if any.
+
+    Returns:
+        Dict containing the question text or None.
+    """
     from matrixmouse import comms as comms_module
     m = comms_module.get_manager()
     question = m.get_pending_question() if m else None
@@ -610,12 +769,18 @@ async def get_pending():
 
 @app.post("/interject")
 async def interject(body: InterjectionRequest):
-    """
-    Inject a human message into the agent loop.
-    If repo is set, the message is scoped to that repo's context.
-    Without repo, the message is workspace-wide.
+    """Inject a human message into the agent loop.
 
-    DEPRECATED: TODO: Remove this endpoint in favor of the new interject surface
+    Deprecated: Use specific interjection endpoints instead.
+
+    Args:
+        body: `InterjectionRequest` payload.
+
+    Returns:
+        Confirmation dict with "ok" status.
+
+    Raises:
+        HTTPException: 503 if comms not configured, 400 if message is empty.
     """
     from matrixmouse import comms as comms_module
     m = comms_module.get_manager()
@@ -638,14 +803,24 @@ async def _handle_turn_limit_response(
     note: str = "",
     extend_by: int = 0,
 ) -> dict:
-    """
-    Handle a turn limit decision for a blocked task.
- 
+    """Handle a turn limit decision for a blocked task.
+
     Actions:
-        extend  — grant additional turns. extend_by defaults to agent_max_turns.
-        respec  — append the note as a user message and reset the turn count.
-                  note is required for respec.
-        cancel  — mark the task CANCELLED.
+        - extend: grant additional turns.
+        - respec: append the note as a user message and reset the turn count.
+        - cancel: mark the task `CANCELLED`.
+
+    Args:
+        task_id: ID of the blocked task.
+        action: One of "extend", "respec", "cancel".
+        note: Required for respec, optional for others.
+        extend_by: Number of turns to add (0 uses default).
+
+    Returns:
+        Dict confirming the action taken.
+
+    Raises:
+        HTTPException: 404 if not found, 400 if status is invalid or action unknown.
     """
     from matrixmouse.task import TaskStatus
  
@@ -725,15 +900,19 @@ async def _handle_turn_limit_response(
 
 @app.post("/interject/workspace", status_code=201)
 async def interject_workspace(body: WorkspaceInterjectionRequest):
-    """
-    Send a workspace-scoped message directly to the Manager agent.
+    """Send a workspace-scoped message directly to the Manager agent.
 
-    Creates a Manager task with preempt=True so it is picked up at the
-    next inference boundary. Use this for cross-repo concerns, project-level
-    direction, or any message not scoped to a specific repo or task.
+    Creates a Manager task with `preempt=True` so it is picked up at the
+    next inference boundary.
 
-    The Manager interprets the message and creates tasks or adjusts the
-    task graph as appropriate.
+    Args:
+        body: `WorkspaceInterjectionRequest` payload.
+
+    Returns:
+        Dict with the created Manager task ID.
+
+    Raises:
+        HTTPException: 400 if message is empty.
     """
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
@@ -759,16 +938,19 @@ async def interject_workspace(body: WorkspaceInterjectionRequest):
 
 @app.post("/interject/repo/{repo_name}", status_code=201)
 async def interject_repo(repo_name: str, body: RepoInterjectionRequest):
-    """
-    Send a repo-scoped message to the Manager agent.
+    """Send a repo-scoped message to the Manager agent.
 
-    Creates a Manager task with preempt=True scoped to the named repo.
-    Use this to direct the Manager's attention to a specific repository —
-    for example, to request a refactor, report a bug, or ask a question
-    about ongoing work in that repo.
+    Creates a Manager task with `preempt=True` scoped to the named repository.
 
-    The Manager interprets the message in the context of the repo and
-    creates tasks or adjusts the task graph as appropriate.
+    Args:
+        repo_name: Name of the target repository.
+        body: `RepoInterjectionRequest` payload.
+
+    Returns:
+        Dict with the created Manager task ID.
+
+    Raises:
+        HTTPException: 400 if message or repo_name is empty.
     """
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
@@ -797,19 +979,19 @@ async def interject_repo(repo_name: str, body: RepoInterjectionRequest):
 
 @app.post("/tasks/{task_id}/interject")
 async def interject_task(task_id: str, body: TaskInterjectionRequest):
-    """
-    Send a message directly to a specific task's agent.
+    """Send a message directly to a specific task's agent.
 
-    Appends the message to the task's context_messages so the implementing
-    agent sees it on its next turn. Does not affect scheduling — the message
-    is picked up naturally when the task next gets a time slice.
+    Appends the message to the task's context messages.
 
-    Use this to provide mid-task guidance, correct a mistake you notice
-    in the streaming output, or supply additional context the agent asked
-    for informally.
+    Args:
+        task_id: ID of the target task.
+        body: `TaskInterjectionRequest` payload.
 
-    For answering a formal clarification question (where the task is
-    BLOCKED_BY_HUMAN), use POST /tasks/{task_id}/answer instead.
+    Returns:
+        Confirmation dict with "ok" status.
+
+    Raises:
+        HTTPException: 404 if not found, 400 if task is terminal or message empty.
     """
     queue = _require_queue()
     task = queue.get(task_id)
@@ -842,18 +1024,19 @@ async def interject_task(task_id: str, body: TaskInterjectionRequest):
 
 @app.post("/tasks/{task_id}/answer")
 async def answer_task(task_id: str, body: TaskAnswerRequest):
-    """
-    Answer a clarification question for a blocked task.
+    """Answer a clarification question for a blocked task.
 
-    Appends the answer to the task's context_messages, clears the
-    pending_question field, and unblocks the task (sets status to READY)
-    if it is currently BLOCKED_BY_HUMAN.
+    Appends the answer to the task's context messages and unblocks it if needed.
 
-    Also cancels any stale clarification Manager task that was created
-    automatically for this task, since the human has now answered directly.
+    Args:
+        task_id: ID of the blocked task.
+        body: `TaskAnswerRequest` payload.
 
-    Use this when a task is blocked waiting for your input. For general
-    mid-task guidance on a running task, use POST /tasks/{task_id}/interject.
+    Returns:
+        Dict confirming the answer was received and if the task was unblocked.
+
+    Raises:
+        HTTPException: 404 if not found, 400 if message is empty.
     """
     from matrixmouse.task import TaskStatus
 
@@ -919,47 +1102,28 @@ async def answer_task(task_id: str, body: TaskAnswerRequest):
  
 @app.post("/tasks/{task_id}/decision")
 async def task_decision(task_id: str, body: DecisionRequest):
-    """
-    Submit a human decision in response to a structured choice event.
- 
-    This is the unified endpoint for all multi-choice decision events
-    emitted by the orchestrator.  The frontend or CLI submits the human's
-    choice here; the handler dispatches on decision_type.
- 
-    decision_type maps 1:1 to the event name emitted by the orchestrator.
-    choice must be one of the values from the choices list in the emitted event.
-    note is optional free-form text shown to the agent or logged.
- 
-    Supported decision_types:
- 
-        pr_approval_required
-            choices: approve | reject
-            approve — push branch to origin and open a PR
-            reject  — keep task BLOCKED_BY_HUMAN, no PR created
- 
-        pr_rejection
-            choices: rework | manual
-            rework  — unblock task; agent reworks with PR feedback in context
-            manual  — keep task BLOCKED_BY_HUMAN for manual resolution
- 
-        critic_turn_limit_reached
-            choices: approve_task | extend_critic | block_task
-            (delegates to _handle_critic_review_response)
- 
-        turn_limit_reached
-            choices: extend | respec | cancel
-            (delegates to _handle_turn_limit_response)
- 
-        merge_conflict_resolution_turn_limit_reached
-            choices: extend | abort
-            extend — give Merge Agent more turns
-            abort  — cancel the merge, task stays complete on its own branch
- 
-        planning_turn_limit_reached
-            choices: extend | commit | cancel
-            extend — give Manager more planning turns
-            commit — accept partial plan as-is
-            cancel — cancel the Manager planning task
+    """Submit a human decision in response to a structured choice event.
+
+    Unified endpoint for multi-choice decision events emitted by the orchestrator.
+
+    Supported decision types:
+        - `pr_approval_required`: approve or reject a PR.
+        - `pr_rejection`: rework or manual resolution after PR closure.
+        - `critic_turn_limit_reached`: approve, extend, or block after review turns.
+        - `turn_limit_reached`: extend, respec, or cancel after agent turns.
+        - `merge_conflict_resolution_turn_limit_reached`: extend or abort merge.
+        - `planning_turn_limit_reached`: extend, commit, or cancel planning.
+        - `decomposition_confirmation_required`: allow or deny task decomposition.
+
+    Args:
+        task_id: ID of the blocked task.
+        body: `DecisionRequest` payload.
+
+    Returns:
+        Dict confirming the decision outcome.
+
+    Raises:
+        HTTPException: 404 if not found, 400 if status is invalid or choice is unknown.
     """
     from matrixmouse.task import TaskStatus, PRState
  
@@ -1371,13 +1535,14 @@ async def task_decision(task_id: str, body: DecisionRequest):
  
  
 def _parse_owner_repo_api(remote_url: str) -> str:
-    """
-    Extract owner/repo from a remote URL.  Mirrors the orchestrator helper
-    but lives in api.py to avoid a circular import.
- 
+    """Extract owner/repo from a remote URL.
+
+    Mirrors the orchestrator helper but lives in `api.py` to avoid a
+    circular import.
+
     Args:
-        remote_url: git remote URL string.
- 
+        remote_url: Git remote URL string.
+
     Returns:
         "owner/repo" string, or "" if unparseable.
     """
@@ -1399,15 +1564,23 @@ async def _handle_critic_review_response(
     action: str,
     feedback: str = "",
 ) -> dict:
-    """
-    Handle a Critic turn-limit decision.
- 
-    task_id is the Critic task ID (not the reviewed task).
- 
+    """Handle a Critic turn-limit decision.
+
     Actions:
-        approve_task   — Mark the reviewed task COMPLETE directly.
-        extend_critic  — Give the Critic another critic_max_turns turns.
-        block_task     — Cancel the Critic and move reviewed task to BLOCKED_BY_HUMAN.
+        - approve_task: mark the reviewed task `COMPLETE` directly.
+        - extend_critic: give the Critic more turns.
+        - block_task: cancel the Critic and move reviewed task to `BLOCKED_BY_HUMAN`.
+
+    Args:
+        task_id: ID of the Critic task (not the reviewed task).
+        action: One of "approve_task", "extend_critic", "block_task".
+        feedback: Optional feedback appended to reviewed task context.
+
+    Returns:
+        Dict confirming the action taken.
+
+    Raises:
+        HTTPException: 404 if not found, 400 if status is invalid or reviews_task_id missing.
     """
     from matrixmouse.task import TaskStatus
  
@@ -1518,14 +1691,12 @@ async def _handle_critic_review_response(
  
 @app.post("/stop")
 async def soft_stop():
-    """
-    Soft stop — request the orchestrator to stop after the current tool call
-    completes. Does not interrupt mid-tool to avoid inconsistent filesystem state.
+    """Request the orchestrator to stop after the current tool call completes.
 
     The flag is cleared automatically when the next task starts.
-    Use this for day-to-day interruption of runaway or misdirected agent loops.
 
-    For emergencies requiring immediate shutdown, use POST /kill instead.
+    Returns:
+        Confirmation dict with "ok" status.
     """
     _stop_requested.set()
     logger.info("Soft stop requested via API.")
@@ -1537,19 +1708,16 @@ async def soft_stop():
 
 @app.post("/kill")
 async def estop():
-    """
-    E-STOP — emergency stop.
+    """Emergency stop — immediately shuts down the service.
 
-    Writes an ESTOP lockfile to the workspace then sends SIGTERM to the
-    service process. Because the service exits with code 0, systemd will
-    NOT restart it (Restart=on-failure in the unit file).
+    Writes an `ESTOP` lockfile then sends `SIGTERM`. The service will not
+    restart until the lockfile is manually removed.
 
-    The service will remain stopped until a human operator resets the ESTOP
-    via POST /estop/reset (or CLI: matrixmouse estop reset) and manually
-    restarts the service with: sudo systemctl start matrixmouse
+    Returns:
+        Confirmation dict with "ok" status.
 
-    Use this only when the agent is doing something dangerous and must be
-    stopped immediately. Normal operational interruptions should use POST /stop.
+    Raises:
+        HTTPException: 503 if workspace not configured, 500 if lockfile write fails.
     """
     estop_file = _estop_path()
     if estop_file is None:
@@ -1584,11 +1752,10 @@ async def estop():
 
 @app.get("/estop")
 async def estop_status():
-    """
-    Return current E-STOP state.
+    """Return current E-STOP state.
 
-    Response:
-        { "engaged": bool, "message": str | null }
+    Returns:
+        Dict with "engaged" boolean and "message" details.
     """
     estop_file = _estop_path()
     if estop_file is None:
@@ -1606,14 +1773,13 @@ async def estop_status():
 
 @app.post("/estop/reset")
 async def estop_reset():
-    """
-    Reset the E-STOP — remove the lockfile so the service can start again.
+    """Reset the E-STOP — remove the lockfile so the service can start again.
 
-    After resetting, the service must be manually restarted:
-        sudo systemctl start matrixmouse
+    Returns:
+        Confirmation dict with "ok" status.
 
-    The web UI will be unreachable until the service restarts, so this
-    endpoint is primarily for CLI use: matrixmouse estop reset
+    Raises:
+        HTTPException: 503 if workspace not configured, 500 if removal fails.
     """
     estop_file = _estop_path()
     if estop_file is None:
@@ -1657,21 +1823,10 @@ def is_paused() -> bool:
 
 @app.post("/orchestrator/pause")
 async def pause_orchestrator():
-    """
-    Pause the orchestrator — prevent it from starting new tasks.
+    """Pause the orchestrator — prevent it from starting new tasks.
 
-    Any currently running task continues to completion (or until a soft
-    stop is requested via POST /stop). The orchestrator will not pick up
-    the next task until POST /orchestrator/resume is called.
-
-    Primary use case: post-ESTOP examination. After resetting an ESTOP
-    and restarting the service, call this endpoint before the orchestrator
-    has a chance to pick up the task that was running when ESTOP was engaged.
-    This gives you time to inspect and edit the task before resuming.
-
-    The paused state is in-memory only — it does not persist across service
-    restarts unless start_paused is set in config or the MATRIXMOUSE_START_PAUSED 
-    environment variable is set.
+    Returns:
+        Confirmation dict with "ok" status.
     """
     _orchestrator_paused.set()
     logger.info("Orchestrator paused via API.")
@@ -1687,11 +1842,10 @@ async def pause_orchestrator():
 
 @app.post("/orchestrator/resume")
 async def resume_orchestrator():
-    """
-    Resume the orchestrator after a pause.
+    """Resume the orchestrator after a pause.
 
-    Clears the pause flag and notifies the orchestrator's condition variable
-    so it wakes immediately rather than waiting for the next poll interval.
+    Returns:
+        Confirmation dict with "ok" status.
     """
     _orchestrator_paused.clear()
     notify_task_available()  # wake the orchestrator immediately
@@ -1705,7 +1859,11 @@ async def resume_orchestrator():
 
 @app.get("/orchestrator/status")
 async def orchestrator_status():
-    """Return pause state and current agent status together."""
+    """Return the orchestrator pause/stop state and agent status.
+
+    Returns:
+        Dict with "paused", "stopped" and "status" details.
+    """
     return {
         "paused":   is_paused(),
         "stopped":  is_stop_requested(),
@@ -1719,31 +1877,16 @@ async def orchestrator_status():
 
 @app.get("/context")
 async def get_context(repo: str | None = None):
-    """
-    Return the current agent context messages for display in the web UI.
+    """Return the current agent context messages for display.
 
-    The context is stored in the shared _status dict under the
-    'context_messages' key, which the orchestrator updates each turn
-    before calling the model.
+    The context is stored in the shared `_status` dict under the
+    `context_messages` key.
 
     Args:
-        repo: Optional repo name to scope the context. Currently the
-              orchestrator maintains a single active context — this
-              parameter is reserved for when per-repo context isolation
-              is implemented.
+        repo: Optional repository name to scope the context.
 
-    Response:
-        {
-            "messages": [
-                {"role": "system"|"user"|"assistant", "content": "..."},
-                ...
-            ],
-            "count":        int,
-            "estimated_tokens": int,
-        }
-
-    Returns an empty message list if no task is currently active or if
-    the orchestrator has not yet stored context in the status dict.
+    Returns:
+        Dict with "messages", "count", and "estimated_tokens".
     """
     messages = _status.get("context_messages") or []
 
@@ -1777,9 +1920,15 @@ async def get_context(repo: str | None = None):
 
 @app.get("/config")
 async def get_config():
-    """
-    Return the current merged configuration (workspace-level).
+    """Return the current merged configuration (workspace-level).
+
     Secrets are never included in the response.
+
+    Returns:
+        Dict containing safe configuration fields.
+
+    Raises:
+        HTTPException: 503 if configuration is not loaded.
     """
     if _config is None:
         raise HTTPException(status_code=503, detail="Config not loaded.")
@@ -1793,10 +1942,19 @@ async def get_config():
 
 @app.patch("/config")
 async def patch_config(body: ConfigPatchRequest):
-    """
-    Set one or more workspace-level config values.
-    Writes to <workspace>/.matrixmouse/config.toml (layer 2).
+    """Set one or more workspace-level config values.
+
+    Writes to `<workspace>/.matrixmouse/config.toml` (layer 2).
     Changes take effect after service restart.
+
+    Args:
+        body: `ConfigPatchRequest` payload.
+
+    Returns:
+        Dict with "ok" status and the patched values.
+
+    Raises:
+        HTTPException: 503 if workspace not configured.
     """
     workspace = _require_workspace()
     return _patch_config_file(
@@ -1807,15 +1965,16 @@ async def patch_config(body: ConfigPatchRequest):
 
 @app.get("/config/repos/{repo_name}")
 async def get_repo_config(repo_name: str):
-    """
-    Return repo-level config, showing both tracked and untracked layers.
+    """Return repo-level configuration, showing both tracked and untracked layers.
 
-    Response shape:
-        {
-            "local":     { ... }   # layer 3: workspace state dir (untracked)
-            "committed": { ... }   # layer 4: repo tree (tracked)
-            "merged":    { ... }   # layer 3 over layer 4 (effective values)
-        }
+    Args:
+        repo_name: Name of the repository.
+
+    Returns:
+        Dict with "local", "committed", and "merged" layers.
+
+    Raises:
+        HTTPException: 503 if workspace not configured.
     """
     workspace = _require_workspace()
 
@@ -1855,21 +2014,21 @@ async def patch_repo_config(
         ),
     ),
 ):
-    """
-    Set one or more repo-level config values.
+    """Set one or more repo-level config values.
 
-    Without ?commit=true (default):
-        Writes to <workspace>/.matrixmouse/<repo>/config.toml
-        Layer 3 — untracked, local machine only.
+    Without `commit=true` (default): writes to layer 3 (local, untracked).
+    With `commit=true`: writes to layer 4 (tracked in git).
 
-    With ?commit=true:
-        Writes to <workspace>/<repo>/.matrixmouse/config.toml
-        Layer 4 — tracked, in the git tree.
-        Creates <repo>/.matrixmouse/ if it doesn't exist.
+    Args:
+        repo_name: Name of the repository.
+        body: `ConfigPatchRequest` payload.
+        commit: Whether to write to the tracked repo config.
 
-    CLI equivalent:
-        matrixmouse config set <key> <value> --repo <name>           # layer 3
-        matrixmouse config set <key> <value> --repo <name> --commit  # layer 4
+    Returns:
+        Dict with "ok" status and the patched values.
+
+    Raises:
+        HTTPException: 503 if workspace not configured.
     """
     workspace = _require_workspace()
 
@@ -1895,14 +2054,15 @@ async def patch_repo_config(
 
 @app.post("/upgrade")
 async def upgrade():
-    """
-    Upgrade MatrixMouse to the latest version.
+    """Upgrade MatrixMouse to the latest version.
 
     Runs `uv tool upgrade matrixmouse` then rebuilds the test runner
-    Docker image if Dockerfile.testrunner has changed since the last build.
+    Docker image if `Dockerfile.testrunner` has changed.
 
     The service must be restarted after upgrading for changes to take effect.
-    The caller (CLI cmd_upgrade) is responsible for triggering the restart.
+
+    Returns:
+        Dict with "ok" status and results for each upgrade step.
     """
     results = {}
 
@@ -1965,6 +2125,14 @@ async def upgrade():
 # ---------------------------------------------------------------------------
 
 def _infer_repo_name(remote: str) -> str:
+    """Infer a repository name from its remote URL.
+
+    Args:
+        remote: Git remote URL or path.
+
+    Returns:
+        The inferred repository name.
+    """
     name = remote.rstrip("/").rsplit("/", 1)[-1]
     if name.endswith(".git"):
         name = name[:-4]
@@ -1972,8 +2140,15 @@ def _infer_repo_name(remote: str) -> str:
 
 
 def _git_env() -> dict:
+    """Build the environment dictionary for git subprocesses.
+
+    Includes `GIT_SSH_COMMAND` if an SSH key is configured.
+
+    Returns:
+        Environment dict copy.
+    """
     env = os.environ.copy()
-    
+
     from matrixmouse import config as config_module
     cfg = getattr(config_module, "_loaded_config", None)
     if cfg:
@@ -1991,12 +2166,17 @@ def _git_env() -> dict:
             )
 
     return env
-
-
 def _patch_config_file(config_path: Path, values: dict) -> dict:
-    """
-    Write key-value pairs into a TOML config file.
+    """Write key-value pairs into a TOML config file.
+
     Rejects secret-looking keys. Creates parent directories if needed.
+
+    Args:
+        config_path: Path to the TOML file.
+        values: Dictionary of values to set.
+
+    Returns:
+        Dict with "ok" status and the patched values.
     """
     SECRET_SUFFIXES = ("_token", "_key", "_file", "_secret", "_password")
     rejected = [k for k in values if any(k.endswith(s) for s in SECRET_SUFFIXES)]
@@ -2028,6 +2208,11 @@ def _patch_config_file(config_path: Path, values: dict) -> dict:
 
 
 def _find_testrunner_dockerfile() -> Path | None:
+    """Locate the test runner Dockerfile within the package.
+
+    Returns:
+        The `Path` to the Dockerfile, or None if not found.
+    """
     import matrixmouse
     package_dir = Path(matrixmouse.__file__).parent
     candidates = [
@@ -2041,11 +2226,27 @@ def _find_testrunner_dockerfile() -> Path | None:
 
 
 def _sha256(path: Path) -> str:
+    """Compute the SHA256 hash of a file.
+
+    Args:
+        path: Path to the file.
+
+    Returns:
+        The hex-encoded hash string.
+    """
     import hashlib
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _should_rebuild_testrunner(dockerfile_path: Path) -> tuple[bool, str]:
+    """Determine if the test runner Docker image should be rebuilt.
+
+    Args:
+        dockerfile_path: Path to the test runner Dockerfile.
+
+    Returns:
+        Tuple of (rebuild_needed, reason_string).
+    """
     if _workspace_root is None:
         return True, "No workspace root configured — rebuilding to be safe."
     hash_file = _workspace_root / ".matrixmouse" / "testrunner.image.sha256"
@@ -2062,6 +2263,11 @@ def _should_rebuild_testrunner(dockerfile_path: Path) -> tuple[bool, str]:
 
 
 def _record_testrunner_hash(dockerfile_path: Path) -> None:
+    """Persist the current Dockerfile hash to the workspace state.
+
+    Args:
+        dockerfile_path: Path to the test runner Dockerfile.
+    """
     if _workspace_root is None:
         logger.warning("No workspace root — cannot record testrunner hash.")
         return
@@ -2078,17 +2284,15 @@ def _inject_decomposition_response(
     approved: bool,
     reason: str,
 ) -> None:
-    """
-    Inject a decomposition confirmation response into the active Manager task.
+    """Inject a decomposition confirmation response into the active Manager task.
 
-    Finds the RUNNING or READY Manager task and appends a user message
-    so the Manager knows whether to proceed with the split or not.
+    Finds the `RUNNING` or `READY` Manager task and appends a user message.
 
     Args:
-        queue:           The TaskRepository.
-        confirmation_id: The confirmation ID from the original event.
-        approved:        Whether the operator approved the split.
-        reason:          Operator's reason (required on denial).
+        queue: The `TaskRepository`.
+        confirmation_id: The unique ID for the decomposition request.
+        approved: Whether the operator approved the split.
+        reason: Operator's reason (required on denial).
     """
     from matrixmouse.task import AgentRole, TaskStatus
 
@@ -2148,19 +2352,17 @@ def _build_interjection_task(
     repo: list[str],
     title_prefix: str,
 ) -> Task:
-    """
-    Build a Manager task from a human interjection message.
+    """Build a Manager task from a human interjection message.
 
-    The task is created with preempt=True so the scheduler picks it up
-    at the next inference boundary, ahead of normal READY tasks.
+    The task is created with `preempt=True` for high priority execution.
 
     Args:
-        message:      The human's message, already stripped.
-        repo:         Repo scope. Empty list for workspace-wide.
-        title_prefix: Prefix for the task title (e.g. '[Interjection]').
+        message: The human's message.
+        repo: Repository list scope (empty for workspace-wide).
+        title_prefix: Prefix for the task title.
 
     Returns:
-        Task: A READY, preempting Manager task. Not yet added to the queue.
+        A READY, preempting Manager `Task`.
     """
     from matrixmouse.task import AgentRole, Task, TaskStatus
 
