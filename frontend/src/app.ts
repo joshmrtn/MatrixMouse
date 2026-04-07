@@ -90,6 +90,31 @@ export class App {
     wsManager.on('status_update', () => {
       setState('wsConnected', true);
     });
+
+    // Decision modal events - dispatch as CustomEvents for components to listen
+    wsManager.on('decomposition_confirmation_required', (data) => {
+      window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', { detail: data }));
+    });
+
+    wsManager.on('pr_approval_required', (data) => {
+      window.dispatchEvent(new CustomEvent('pr_approval_required', { detail: data }));
+    });
+
+    wsManager.on('turn_limit_reached', (data) => {
+      window.dispatchEvent(new CustomEvent('turn_limit_reached', { detail: data }));
+    });
+
+    wsManager.on('planning_turn_limit_reached', (data) => {
+      window.dispatchEvent(new CustomEvent('planning_turn_limit_reached', { detail: data }));
+    });
+
+    wsManager.on('merge_conflict_resolution_turn_limit_reached', (data) => {
+      window.dispatchEvent(new CustomEvent('merge_conflict_resolution_turn_limit_reached', { detail: data }));
+    });
+
+    wsManager.on('critic_turn_limit_reached', (data) => {
+      window.dispatchEvent(new CustomEvent('critic_turn_limit_reached', { detail: data }));
+    });
   }
 
   /**

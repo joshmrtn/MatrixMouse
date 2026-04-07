@@ -41,12 +41,17 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=7.1.0",
     "pyright>=1.1.0",
+    "ruff>=0.4.0",
     "poethepoet>=0.25.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
+]
 markers = [
     "e2e: marks tests as end-to-end tests requiring server and browser (deselect with '-m \"not e2e\"')",
     "slow: marks tests as slow running (deselect with '-m \"not slow\"')",

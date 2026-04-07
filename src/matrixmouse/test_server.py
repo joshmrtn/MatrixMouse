@@ -747,7 +747,19 @@ def create_frontend_test_app() -> FastAPI:
             "created_at": "2024-01-01T00:00:00Z",
             "importance": 0.7,
             "urgency": 0.8,
-        }
+        },
+        {
+            "id": "task-decision",
+            "title": "Decision Test Task",
+            "status": "blocked_by_human",
+            "role": "manager",
+            "repo": ["main-repo"],
+            "description": "Task for testing decision modals",
+            "branch": "task/task-decision",
+            "created_at": "2024-01-01T00:00:00Z",
+            "importance": 0.5,
+            "urgency": 0.5,
+        },
     ]
     
     # Track API call counts for testing concurrent operations
@@ -881,6 +893,72 @@ def create_frontend_test_app() -> FastAPI:
         return {"pending": None}
 
     # =========================================================================
+    # Decision Endpoint - For testing decision modal integration
+    # =========================================================================
+
+    VALID_DECISIONS: dict[str, set[str]] = {
+        "decomposition_confirmation_required": {"allow", "deny"},
+        "pr_approval_required": {"approve", "reject"},
+        "turn_limit_reached": {"extend", "respec", "cancel"},
+        "planning_turn_limit_reached": {"extend", "commit", "cancel"},
+        "merge_conflict_resolution_turn_limit_reached": {"extend", "abort"},
+        "critic_turn_limit_reached": {"approve_task", "extend_critic", "block_task"},
+    }
+
+    @app.post("/tasks/{task_id}/decision")
+    async def submit_decision(task_id: str, body: dict):
+        """Submit a decision for a blocked task.
+
+        Mimics the real backend's decision validation:
+        - Validates decision_type against known types
+        - Validates choice against allowed values for that type
+        - Requires non-empty note for decomposition denial
+        - Transitions task status to 'ready' on success
+        """
+        # Find task
+        task = next((t for t in mock_tasks if t["id"] == task_id), None)
+        if not task:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"Task '{task_id}' not found."},
+            )
+
+        dt = body.get("decision_type", "")
+        choice = body.get("choice", "").lower()
+        note = body.get("note", "").strip()
+
+        # Validate decision_type
+        if dt not in VALID_DECISIONS:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"Unknown decision_type '{dt}'."},
+            )
+
+        # Validate choice
+        if choice not in VALID_DECISIONS[dt]:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"Invalid choice '{choice}' for {dt}. Valid: {', '.join(sorted(VALID_DECISIONS[dt]))}."},
+            )
+
+        # Validate note for decomposition denial
+        if dt == "decomposition_confirmation_required" and choice == "deny" and not note:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "note is required when denying decomposition — provide a reason for the Manager."},
+            )
+
+        # Transition task to ready (mimics real backend behavior)
+        task["status"] = "ready"
+
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "action": choice,
+            "decision_type": dt,
+        }
+
+    # =========================================================================
     # Test Control Endpoints
     # =========================================================================
 
@@ -951,7 +1029,19 @@ def create_frontend_test_app() -> FastAPI:
                 "created_at": "2024-01-01T00:00:00Z",
                 "importance": 0.7,
                 "urgency": 0.8,
-            }
+            },
+            {
+                "id": "task-decision",
+                "title": "Decision Test Task",
+                "status": "blocked_by_human",
+                "role": "manager",
+                "repo": ["main-repo"],
+                "description": "Task for testing decision modals",
+                "branch": "task/task-decision",
+                "created_at": "2024-01-01T00:00:00Z",
+                "importance": 0.5,
+                "urgency": 0.5,
+            },
         ])
         # Clear call counts
         api_call_counts.clear()

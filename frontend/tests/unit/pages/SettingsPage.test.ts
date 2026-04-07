@@ -1162,8 +1162,8 @@ describe('SettingsPage', () => {
       await page.render(container);
 
       const messageEl = container.querySelector('#settings-message');
-      expect(messageEl?.getAttribute('role')).toBe('status');
-      expect(messageEl?.getAttribute('aria-live')).toBe('polite');
+      expect(messageEl?.getAttribute('role')).toBe('alert');
+      expect(messageEl?.getAttribute('aria-live')).toBe('assertive');
     });
 
     it('has ARIA labels on save buttons', async () => {
@@ -1193,7 +1193,7 @@ describe('SettingsPage', () => {
       await pageAny.saveWorkspaceConfig();
 
       const messageEl = container.querySelector('#settings-message');
-      expect(messageEl?.getAttribute('aria-live')).toBe('polite');
+      expect(messageEl?.getAttribute('aria-live')).toBe('assertive');
       expect(messageEl?.textContent).toContain('Settings saved');
     });
   });

@@ -1,59 +1,62 @@
 /**
- * E2E Tests for Decision Modals
+ * E2E Tests for Decision Banner
  *
- * Tests decision/moderation modal display and functionality.
- * These modals appear for:
- * - Decomposition confirmation
- * - PR approval
- * - Turn limit reached
- *
- * Tests verify modal rendering, choices, text validation, and submission.
+ * Tests decision/approval banner display and functionality.
+ * The banner appears inline in the task conversation view when
+ * the agent requires human approval. It is NOT a blocking modal —
+ * users can still read conversation history and interact with the
+ * rest of the page while deciding.
  *
  * NOTE: These tests mock WebSocket events since we don't have a running backend.
  * In production, these events would come from the WebSocket connection.
- * 
- * ⚠️ STATUS (April 3, 2026): Tests are SKIPPED - the DecisionModal component
- * has not been implemented yet. These tests define the expected behavior for
- * future implementation. See PROJECT_HANDOFF.md "Decision Modals - Implementation Needed"
  */
 
 import { test, expect } from '@playwright/test';
 
-// SKIP: Component not implemented yet - tests define expected behavior
-test.describe.skip('Decision Modals', () => {
+test.describe('Decision Banner', () => {
+  const mockTask = {
+    id: 'test-123',
+    title: 'Test Task',
+    description: 'Test',
+    repo: ['test-repo'],
+    role: 'coder',
+    status: 'blocked_by_human',
+    branch: 'mm/test',
+    parent_task_id: null,
+    depth: 0,
+    importance: 0.5,
+    urgency: 0.5,
+    priority_score: 0.5,
+    preemptable: true,
+    preempt: false,
+    created_at: '2024-01-01T00:00:00Z',
+    last_modified: '2024-01-01T00:00:00Z',
+    context_messages: [],
+    pending_tool_calls: [],
+    decomposition_confirmed_depth: 0,
+    merge_resolution_decisions: [],
+  };
+
   test.beforeEach(async ({ page }) => {
-    // Mock API endpoints
     await page.route('**/repos', async route => {
       await route.fulfill({ json: { repos: [] } });
     });
     await page.route('**/tasks**', async route => {
       await route.fulfill({
-        json: {
-          tasks: [{
-            id: 'test-123',
-            title: 'Test Task',
-            description: 'Test',
-            repo: ['test-repo'],
-            role: 'coder',
-            status: 'ready',
-            branch: '',
-            parent_task_id: null,
-            depth: 0,
-            importance: 0.5,
-            urgency: 0.5,
-            priority_score: 0.5,
-            preemptable: true,
-            preempt: false,
-            created_at: '2024-01-01T00:00:00Z',
-            last_modified: '2024-01-01T00:00:00Z',
-            context_messages: [],
-            pending_tool_calls: [],
-            decomposition_confirmed_depth: 0,
-            merge_resolution_decisions: [],
-          }],
-          count: 1,
-        },
+        json: { tasks: [mockTask], count: 1 },
       });
+    });
+    await page.route('**/tasks/test-123', async route => {
+      await route.fulfill({ json: mockTask });
+    });
+    await page.route('**/tasks/abc-123', async route => {
+      await route.fulfill({ json: { ...mockTask, id: 'abc-123' } });
+    });
+    await page.route('**/tasks/*/dependencies', async route => {
+      await route.fulfill({ json: { task_id: 'test-123', dependencies: [], count: 0 } });
+    });
+    await page.route('**/context**', async route => {
+      await route.fulfill({ json: { messages: [], count: 0, estimated_tokens: 0 } });
     });
     await page.route('**/status', async route => {
       await route.fulfill({ json: { idle: true, stopped: false, blocked: false } });
@@ -63,249 +66,225 @@ test.describe.skip('Decision Modals', () => {
     });
   });
 
-  test.describe('Modal Display', () => {
-    test('decomposition modal displays with correct title and message', async ({ page }) => {
+  test.describe('Banner Display', () => {
+    test('decomposition banner displays with correct title and message', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger decomposition event via WebSocket simulation
-      await page.evaluate(() => {
-        const event = new CustomEvent('decomposition_confirmation_required', {
-          detail: {
-            task_id: 'test-123',
-            message: 'Allow splitting task into subtasks?',
-          },
-        });
-        window.dispatchEvent(event);
-      });
-
-      // Wait for modal to appear
-      const modal = page.locator('#confirmation-modal-overlay');
-      await expect(modal).toBeVisible({ timeout: 5000 });
-
-      // Verify modal title
-      const title = page.locator('#confirmation-modal-title');
-      await expect(title).toBeVisible();
-      await expect(title).toContainText(/decomposition|subtask/i);
-
-      // Verify modal body contains message
-      const body = page.locator('#confirmation-modal-body');
-      await expect(body).toBeVisible();
-      await expect(body).toContainText(/split|subtask/i);
-    });
-
-    test('decomposition modal shows Allow and Deny choices', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Trigger decomposition event
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Allow splitting?' },
+          detail: {
+            task_id: 'test-123',
+            task_title: 'Test Task',
+            current_depth: 1,
+            allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [
+              { value: 'allow', label: 'Allow further decomposition', description: 'Grant another 3 levels.' },
+              { value: 'deny', label: 'Do not decompose further', description: 'Complete within current depth.' },
+            ],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      const banner = page.locator('#decision-banner');
+      await expect(banner).toBeVisible({ timeout: 5000 });
 
-      // Verify Allow button
-      const allowBtn = page.locator('button:has-text("Allow"), button:has-text("Confirm")');
+      const title = page.locator('#decision-banner-title');
+      await expect(title).toBeVisible();
+      await expect(title).toContainText(/decomposition/i);
+
+      const body = page.locator('#decision-banner-body');
+      await expect(body).toBeVisible();
+      await expect(body).toContainText(/Test Task/i);
+      await expect(body).toContainText(/1/);
+    });
+
+    test('decomposition banner shows Allow and Deny choices', async ({ page }) => {
+      await page.goto('/task/test-123');
+      await page.waitForSelector('#task-page');
+
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [
+              { value: 'allow', label: 'Allow further decomposition', description: '' },
+              { value: 'deny', label: 'Do not decompose further', description: '' },
+            ],
+          },
+        }));
+      });
+
+      await expect(page.locator('#decision-banner')).toBeVisible();
+
+      const allowBtn = page.locator('#decision-banner-choices button:has-text("Allow further decomposition")');
       await expect(allowBtn).toBeVisible();
       await expect(allowBtn).toBeEnabled();
 
-      // Verify Deny button
-      const denyBtn = page.locator('button:has-text("Deny"), button:has-text("Cancel")');
+      const denyBtn = page.locator('#decision-banner-choices button:has-text("Do not decompose further")');
       await expect(denyBtn).toBeVisible();
       await expect(denyBtn).toBeEnabled();
     });
 
-    test('PR approval modal displays with correct title', async ({ page }) => {
-      await page.goto('/task/pr-123');
+    test('PR approval banner displays with correct title', async ({ page }) => {
+      await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger PR approval event
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('pr_approval_required', {
           detail: {
-            task_id: 'pr-123',
-            message: 'Approve this pull request?',
-            pr_url: 'https://github.com/test/repo/pull/123',
+            task_id: 'test-123',
+            task_title: 'Test Task',
+            branch: 'mm/test',
+            parent_branch: 'main',
+            repo: 'test-repo',
+            choices: [
+              { value: 'approve', label: 'Push branch and open PR', description: '' },
+              { value: 'reject', label: 'Block for manual resolution', description: '' },
+            ],
           },
         }));
       });
 
-      // Wait for modal
-      const modal = page.locator('#confirmation-modal-overlay');
-      await expect(modal).toBeVisible({ timeout: 5000 });
+      const banner = page.locator('#decision-banner');
+      await expect(banner).toBeVisible({ timeout: 5000 });
 
-      // Verify title mentions PR/approval
-      const title = page.locator('#confirmation-modal-title');
-      await expect(title).toContainText(/PR|pull.*request|approval/i);
+      const title = page.locator('#decision-banner-title');
+      await expect(title).toContainText(/pull request|approval/i);
     });
 
-    test('PR approval modal shows Approve and Reject choices', async ({ page }) => {
-      await page.goto('/task/pr-123');
+    test('PR approval banner shows Approve and Reject choices', async ({ page }) => {
+      await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger PR approval event
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('pr_approval_required', {
-          detail: { task_id: 'pr-123', message: 'Approve PR?' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', branch: 'mm/test',
+            parent_branch: 'main', repo: 'test-repo',
+            choices: [
+              { value: 'approve', label: 'Push branch and open PR', description: '' },
+              { value: 'reject', label: 'Block for manual resolution', description: '' },
+            ],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Verify Approve button
-      const approveBtn = page.locator('button:has-text("Approve"), button:has-text("Allow")');
+      const approveBtn = page.locator('#decision-banner-choices button:has-text("Push branch and open PR")');
       await expect(approveBtn).toBeVisible();
       await expect(approveBtn).toBeEnabled();
 
-      // Verify Reject button
-      const rejectBtn = page.locator('button:has-text("Reject"), button:has-text("Deny")');
+      const rejectBtn = page.locator('#decision-banner-choices button:has-text("Block for manual resolution")');
       await expect(rejectBtn).toBeVisible();
       await expect(rejectBtn).toBeEnabled();
     });
 
-    test('turn limit modal displays with correct choices', async ({ page }) => {
-      await page.goto('/task/limit-123');
+    test('turn limit banner displays with correct choices', async ({ page }) => {
+      await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger turn limit event
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('turn_limit_reached', {
           detail: {
-            task_id: 'limit-123',
-            message: 'Task has reached turn limit',
+            task_id: 'test-123',
+            task_title: 'Test Task',
+            role: 'coder',
             turns_taken: 10,
             turn_limit: 10,
+            choices: [
+              { value: 'extend', label: 'Extend turn limit', description: '' },
+              { value: 'respec', label: 'Respecify and reset', description: '' },
+              { value: 'cancel', label: 'Cancel task', description: '' },
+            ],
           },
         }));
       });
 
-      // Wait for modal
-      const modal = page.locator('#confirmation-modal-overlay');
-      await expect(modal).toBeVisible({ timeout: 5000 });
+      const banner = page.locator('#decision-banner');
+      await expect(banner).toBeVisible({ timeout: 5000 });
 
-      // Verify modal mentions turn limit
-      const title = page.locator('#confirmation-modal-title');
-      await expect(title).toContainText(/turn.*limit|maximum/i);
+      const title = page.locator('#decision-banner-title');
+      await expect(title).toContainText(/turn.*limit/i);
     });
 
-    test('turn limit modal shows Extend, Respect, and Cancel choices', async ({ page }) => {
-      await page.goto('/task/limit-123');
+    test('turn limit banner shows Extend, Respecify, and Cancel choices', async ({ page }) => {
+      await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger turn limit event
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('turn_limit_reached', {
-          detail: { task_id: 'limit-123', message: 'Turn limit reached' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', role: 'coder',
+            turns_taken: 10, turn_limit: 10,
+            choices: [
+              { value: 'extend', label: 'Extend turn limit', description: '' },
+              { value: 'respec', label: 'Respecify and reset', description: '' },
+              { value: 'cancel', label: 'Cancel task', description: '' },
+            ],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Should have at least 2-3 choice buttons
-      const choiceButtons = page.locator('#confirmation-modal-choices button, button:has-text("Extend"), button:has-text("Respect"), button:has-text("Cancel"), button:has-text("Allow"), button:has-text("Deny")');
-      await expect(choiceButtons).toHaveCount({ min: 2 });
+      const choiceButtons = page.locator('#decision-banner-choices button');
+      const count = await choiceButtons.count();
+      expect(count).toBeGreaterThanOrEqual(3);
     });
   });
 
-  test.describe('Modal Visibility and Structure', () => {
-    test('modal overlay covers entire viewport', async ({ page }) => {
+  test.describe('Non-blocking behavior', () => {
+    test('banner does not block interaction with conversation', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for overlay
-      const overlay = page.locator('#confirmation-modal-overlay');
-      await expect(overlay).toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Verify overlay dimensions
-      const overlayBox = await overlay.boundingBox();
-      const viewport = page.viewportSize();
-
-      expect(overlayBox).toBeTruthy();
-      expect(overlayBox!.width).toBeGreaterThanOrEqual(viewport!.width * 0.9);
-      expect(overlayBox!.height).toBeGreaterThanOrEqual(viewport!.height * 0.9);
+      // The task page and conversation should still be visible and interactable
+      await expect(page.locator('#task-page')).toBeVisible();
+      const bannerBox = await page.locator('#decision-banner').boundingBox();
+      const taskPageBox = await page.locator('#task-page').boundingBox();
+      expect(bannerBox).toBeTruthy();
+      expect(taskPageBox).toBeTruthy();
     });
 
-    test('modal has proper z-index (appears above all content)', async ({ page }) => {
+    test('banner can be collapsed and expanded', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for overlay
-      const overlay = page.locator('#confirmation-modal-overlay');
-      await expect(overlay).toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Verify overlay is on top by checking z-index
-      const zIndex = await overlay.evaluate(el => window.getComputedStyle(el).zIndex);
-      expect(zIndex).toMatch(/\d+/);
-      expect(parseInt(zIndex)).toBeGreaterThan(100);
-    });
+      // Collapse
+      await page.locator('.decision-collapse-btn').click();
+      await expect(page.locator('.decision-banner-body')).not.toBeVisible();
 
-    test('modal content is centered', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Trigger modal
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
-        }));
-      });
-
-      // Wait for modal content
-      const modalContent = page.locator('#confirmation-modal-content, #confirmation-modal-overlay > div').first();
-      await expect(modalContent).toBeVisible();
-
-      // Verify content is centered (check margin/padding)
-      const marginLeft = await modalContent.evaluate(el => window.getComputedStyle(el).marginLeft);
-      const marginRight = await modalContent.evaluate(el => window.getComputedStyle(el).marginRight);
-      
-      // Should have auto margins or equal margins
-      expect(marginLeft === 'auto' || marginRight === 'auto' || marginLeft === marginRight).toBeTruthy();
-    });
-
-    test('modal cannot be interacted with background content', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Get a background element
-      const backgroundElement = page.locator('#task-header, .task-title').first();
-      await expect(backgroundElement).toBeVisible();
-
-      // Trigger modal
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
-        }));
-      });
-
-      // Wait for overlay
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
-
-      // Try to click background element (should be blocked by overlay)
-      // The click should not navigate or trigger any action
-      await backgroundElement.click({ force: true, timeout: 1000 }).catch(() => {});
-
-      // Modal should still be visible
-      await expect(page.locator('#confirmation-modal-overlay')).toBeVisible();
+      // Expand
+      await page.locator('.decision-collapse-btn').click();
+      await expect(page.locator('.decision-banner-body')).toBeVisible();
     });
   });
 
@@ -314,165 +293,143 @@ test.describe.skip('Decision Modals', () => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger decomposition event
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Allow splitting?', require_text_for_deny: true },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Click Deny button
-      const denyBtn = page.locator('button:has-text("Deny"), button:has-text("Cancel")').first();
-      await denyBtn.click();
-
-      // Should show error or require text input
-      // Either a text area appears or an error message
-      const textInput = page.locator('textarea, input[type="text"], #confirmation-modal-note');
-      const errorMsg = page.locator('text=/required/i, text=/provide.*reason/i, .error-message');
-
-      // At least one should be visible
-      const hasTextInput = await textInput.count() > 0;
-      const hasError = await errorMsg.count() > 0;
-      
-      expect(hasTextInput || hasError).toBeTruthy();
+      const textInput = page.locator('#decision-banner #decision-banner-note');
+      await expect(textInput).toBeVisible();
     });
 
     test('empty text input is rejected', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger decomposition event with text requirement
+      let apiCalled = false;
+      await page.route('**/tasks/*/decision', async route => {
+        apiCalled = true;
+        await route.fulfill({ json: { success: true } });
+      });
+
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Allow splitting?', require_text_for_deny: true },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Find text input if it exists
-      const textInput = page.locator('textarea, input[type="text"], #confirmation-modal-note').first();
-      const textInputVisible = await textInput.count() > 0;
+      const textInput = page.locator('#decision-banner #decision-banner-note');
+      await textInput.clear();
+      await page.locator('#decision-banner-choices button:has-text("Deny")').click();
 
-      if (textInputVisible) {
-        // Try to submit with empty text
-        const submitBtn = page.locator('button:has-text("Submit"), button:has-text("Confirm"), button:has-text("Deny")').last();
-        await textInput.fill('');
-        await submitBtn.click();
-
-        // Should show error
-        const errorMsg = page.locator('.error-message, text=/required/i, text=/cannot.*empty/i');
-        await expect(errorMsg).toBeVisible({ timeout: 3000 });
-      }
+      await page.waitForTimeout(300);
+      expect(apiCalled).toBeFalsy();
     });
 
     test('whitespace-only text input is rejected', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Trigger event with text requirement
+      let apiCalled = false;
+      await page.route('**/tasks/*/decision', async route => {
+        apiCalled = true;
+        await route.fulfill({ json: { success: true } });
+      });
+
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test', require_text_for_deny: true },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Find text input
-      const textInput = page.locator('textarea, input[type="text"], #confirmation-modal-note').first();
-      const textInputVisible = await textInput.count() > 0;
+      const textInput = page.locator('#decision-banner #decision-banner-note');
+      await textInput.fill('   \n\t  ');
+      await page.locator('#decision-banner-choices button:has-text("Deny")').click();
 
-      if (textInputVisible) {
-        // Try to submit with whitespace only
-        const submitBtn = page.locator('button:has-text("Submit"), button:has-text("Confirm"), button:has-text("Deny")').last();
-        await textInput.fill('   \n\t  ');
-        await submitBtn.click();
-
-        // Should show error
-        const errorMsg = page.locator('.error-message, text=/required/i, text=/whitespace/i');
-        await expect(errorMsg).toBeVisible({ timeout: 3000 });
-      }
+      await page.waitForTimeout(300);
+      expect(apiCalled).toBeFalsy();
     });
 
     test('valid text input is accepted', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Track API calls
       let apiCallMade = false;
       await page.route('**/tasks/*/decision', async route => {
         apiCallMade = true;
         await route.fulfill({ json: { success: true } });
       });
 
-      // Trigger event with text requirement
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test', require_text_for_deny: true },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Find text input
-      const textInput = page.locator('textarea, input[type="text"], #confirmation-modal-note').first();
-      const textInputVisible = await textInput.count() > 0;
+      const textInput = page.locator('#decision-banner #decision-banner-note');
+      await textInput.fill('This is a valid reason for denial');
+      await page.locator('#decision-banner-choices button:has-text("Deny")').click();
 
-      if (textInputVisible) {
-        // Fill with valid text
-        await textInput.fill('This is a valid reason for denial');
-        
-        // Submit
-        const submitBtn = page.locator('button:has-text("Submit"), button:has-text("Confirm"), button:has-text("Deny")').last();
-        await submitBtn.click();
-
-        // Wait for API call
-        await page.waitForTimeout(500);
-        expect(apiCallMade).toBeTruthy();
-      }
+      await page.waitForTimeout(500);
+      expect(apiCallMade).toBeTruthy();
     });
   });
 
-  test.describe('Modal Submission', () => {
+  test.describe('Banner Submission', () => {
     test('submit decision triggers API call', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Track API calls
       let decisionApiCalled = false;
       await page.route('**/tasks/*/decision', async route => {
         decisionApiCalled = true;
         const postData = route.request().postDataJSON();
-        
-        // Verify request structure
+        const url = route.request().url();
         expect(postData).toHaveProperty('choice');
-        expect(postData).toHaveProperty('task_id');
-        
+        expect(url).toMatch(/\/tasks\/[^/]+\/decision/);
         await route.fulfill({ json: { success: true } });
       });
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Click Allow/Confirm button
-      const allowBtn = page.locator('button:has-text("Allow"), button:has-text("Confirm"), button:has-text("Yes")').first();
-      await allowBtn.click();
+      const allowBtn = page.locator('#decision-banner-choices button:has-text("Allow")');
+      await allowBtn.first().click();
 
-      // Wait for API call
       await page.waitForTimeout(500);
       expect(decisionApiCalled).toBeTruthy();
     });
@@ -481,32 +438,29 @@ test.describe.skip('Decision Modals', () => {
       await page.goto('/task/abc-123');
       await page.waitForSelector('#task-page');
 
-      // Track API calls
       let capturedTaskId: string | null = null;
       await page.route('**/tasks/*/decision', async route => {
         const url = route.request().url();
         const match = url.match(/\/tasks\/([^/]+)\/decision/);
-        if (match) {
-          capturedTaskId = match[1];
-        }
+        if (match) capturedTaskId = match[1];
         await route.fulfill({ json: { success: true } });
       });
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'abc-123', message: 'Test' },
+          detail: {
+            task_id: 'abc-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Click button
-      const allowBtn = page.locator('button:has-text("Allow"), button:has-text("Confirm")').first();
-      await allowBtn.click();
+      const allowBtn = page.locator('#decision-banner-choices button:has-text("Allow")');
+      await allowBtn.first().click();
 
-      // Wait for API call
       await page.waitForTimeout(500);
       expect(capturedTaskId).toBe('abc-123');
     });
@@ -515,7 +469,6 @@ test.describe.skip('Decision Modals', () => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Track API calls with choice verification
       let capturedChoice: string | null = null;
       await page.route('**/tasks/*/decision', async route => {
         const postData = route.request().postDataJSON();
@@ -523,263 +476,84 @@ test.describe.skip('Decision Modals', () => {
         await route.fulfill({ json: { success: true } });
       });
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Click Deny button
-      const denyBtn = page.locator('button:has-text("Deny"), button:has-text("Cancel"), button:has-text("No")').first();
+      const textInput = page.locator('#decision-banner #decision-banner-note');
+      await textInput.fill('Test reason');
+      const denyBtn = page.locator('#decision-banner-choices button:has-text("Deny")');
       await denyBtn.click();
 
-      // Wait for API call
       await page.waitForTimeout(500);
       expect(capturedChoice).toBeTruthy();
-      expect(capturedChoice!.toLowerCase()).toMatch(/deny|cancel|no|reject/);
+      expect(capturedChoice!.toLowerCase()).toMatch(/deny/);
     });
 
     test('submit decision with note includes metadata', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Track API calls
       let capturedNote: string | null = null;
       await page.route('**/tasks/*/decision', async route => {
         const postData = route.request().postDataJSON();
-        if (postData.note) {
-          capturedNote = postData.note;
-        }
+        capturedNote = postData.note;
         await route.fulfill({ json: { success: true } });
       });
 
-      // Trigger modal with note field
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test', show_note_field: true },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Fill note if field exists
-      const noteField = page.locator('textarea, #confirmation-modal-note, input[name="note"]').first();
-      const noteFieldVisible = await noteField.count() > 0;
+      const noteField = page.locator('#decision-banner #decision-banner-note');
+      await noteField.fill('Test note for decision');
+      await page.locator('#decision-banner-choices button:has-text("Deny")').click();
 
-      if (noteFieldVisible) {
-        await noteField.fill('Test note for decision');
-      }
-
-      // Submit
-      const submitBtn = page.locator('button:has-text("Submit"), button:has-text("Confirm"), button:has-text("Deny")').last();
-      await submitBtn.click();
-
-      // Wait for API call
       await page.waitForTimeout(500);
-      
-      // Note should be captured if field existed
-      if (noteFieldVisible) {
-        expect(capturedNote).toBe('Test note for decision');
-      }
+      expect(capturedNote).toBe('Test note for decision');
     });
 
-    test('modal closes after successful submission', async ({ page }) => {
+    test('banner hides after successful submission', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Mock successful API response
       await page.route('**/tasks/*/decision', async route => {
         await route.fulfill({ json: { success: true } });
       });
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Submit
-      const allowBtn = page.locator('button:has-text("Allow"), button:has-text("Confirm")').first();
-      await allowBtn.click();
+      const allowBtn = page.locator('#decision-banner-choices button:has-text("Allow")');
+      await allowBtn.first().click();
 
-      // Wait for modal to close
       await page.waitForTimeout(1000);
-      await expect(page.locator('#confirmation-modal-overlay')).not.toBeVisible();
-    });
-
-    test('cancel button closes modal without API call', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Track API calls
-      let apiCallMade = false;
-      await page.route('**/tasks/*/decision', async route => {
-        apiCallMade = true;
-        await route.fulfill({ json: { success: true } });
-      });
-
-      // Trigger modal
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
-        }));
-      });
-
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
-
-      // Click cancel/close button
-      const cancelBtn = page.locator('button:has-text("Cancel"), button:has-text("Close"), #confirmation-modal-close');
-      if (await cancelBtn.count() > 0) {
-        await cancelBtn.first().click();
-        
-        // Wait for modal to close
-        await page.waitForTimeout(500);
-        await expect(page.locator('#confirmation-modal-overlay')).not.toBeVisible();
-        
-        // API should not have been called
-        expect(apiCallMade).toBeFalsy();
-      }
-    });
-
-    test('clicking overlay closes modal', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Trigger modal
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
-        }));
-      });
-
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
-
-      // Click on overlay (not modal content)
-      await page.locator('#confirmation-modal-overlay').click({ position: { x: 10, y: 10 } });
-
-      // Wait for modal to close
-      await page.waitForTimeout(500);
-      await expect(page.locator('#confirmation-modal-overlay')).not.toBeVisible();
-    });
-
-    test('Escape key closes modal', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Trigger modal
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
-        }));
-      });
-
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
-
-      // Press Escape
-      await page.keyboard.press('Escape');
-
-      // Wait for modal to close
-      await page.waitForTimeout(500);
-      await expect(page.locator('#confirmation-modal-overlay')).not.toBeVisible();
-    });
-  });
-
-  test.describe('Edge Cases', () => {
-    test('modal handles rapid event triggering', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Trigger multiple events rapidly
-      await page.evaluate(() => {
-        for (let i = 0; i < 5; i++) {
-          window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-            detail: { task_id: `test-${i}`, message: `Event ${i}` },
-          }));
-        }
-      });
-
-      // Should only show one modal (or handle gracefully)
-      const modals = page.locator('#confirmation-modal-overlay');
-      const count = await modals.count();
-      
-      // Should have at most 1 modal visible
-      expect(count).toBeLessThanOrEqual(1);
-    });
-
-    test('modal handles missing event data gracefully', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Trigger event with minimal/missing data
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: {},
-        }));
-      });
-
-      // Should either show modal with defaults or not crash
-      await page.waitForTimeout(1000);
-      
-      // Page should still be functional
-      await expect(page.locator('#task-page')).toBeVisible();
-    });
-
-    test('modal handles unknown event type', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Trigger unknown event type
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('unknown_event_type', {
-          detail: { task_id: 'test-123' },
-        }));
-      });
-
-      // Should not crash
-      await page.waitForTimeout(500);
-      await expect(page.locator('#task-page')).toBeVisible();
-    });
-
-    test('modal appearance does not break page layout', async ({ page }) => {
-      await page.goto('/task/test-123');
-      await page.waitForSelector('#task-page');
-
-      // Get initial layout
-      const initialLayout = await page.locator('#task-page').boundingBox();
-
-      // Trigger modal
-      await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
-        }));
-      });
-
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
-
-      // Page layout should not shift dramatically
-      const modalLayout = await page.locator('#task-page').boundingBox();
-
-      expect(initialLayout).toBeTruthy();
-      expect(modalLayout).toBeTruthy();
-
-      // Layout should be similar (within 10% tolerance)
-      if (initialLayout && modalLayout) {
-        const widthDiff = Math.abs(initialLayout.width - modalLayout.width) / initialLayout.width;
-        expect(widthDiff).toBeLessThan(0.1);
-      }
+      await expect(page.locator('#decision-banner')).not.toBeVisible();
     });
   });
 
@@ -788,90 +562,222 @@ test.describe.skip('Decision Modals', () => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Mock API error
       await page.route('**/tasks/*/decision', async route => {
-        await route.fulfill({ status: 500, json: { error: 'Failed to submit decision' } });
+        await route.fulfill({ status: 500, json: { error: 'Failed' } });
       });
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Click Allow button
-      const allowBtn = page.locator('button:has-text("Allow"), button:has-text("Confirm")').first();
-      await allowBtn.click();
+      const allowBtn = page.locator('#decision-banner-choices button:has-text("Allow")');
+      await allowBtn.first().click();
 
-      // Wait for API response
       await page.waitForTimeout(500);
-
-      // Modal should still be open (not closed on error)
-      await expect(page.locator('#confirmation-modal-overlay')).toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
     });
 
     test('handles network timeout on decision submission', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Mock network abort
       await page.route('**/tasks/*/decision', async route => {
         route.abort('failed');
       });
 
-      // Trigger modal
       await page.evaluate(() => {
         window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+          detail: {
+            task_id: 'test-123', task_title: 'Test Task', current_depth: 1, allowed_depth: 3,
+            proposed_subtasks: [],
+            choices: [{ value: 'allow', label: 'Allow', description: '' }, { value: 'deny', label: 'Deny', description: '' }],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      await expect(page.locator('#decision-banner')).toBeVisible();
 
-      // Click Allow button
-      const allowBtn = page.locator('button:has-text("Allow"), button:has-text("Confirm")').first();
-      await allowBtn.click();
+      const allowBtn = page.locator('#decision-banner-choices button:has-text("Allow")');
+      await allowBtn.first().click();
 
-      // Wait for timeout
       await page.waitForTimeout(1000);
-
-      // Page should still be functional
       await expect(page.locator('#task-page')).toBeVisible();
     });
+  });
 
-    test('handles malformed API response', async ({ page }) => {
+  test.describe('Additional Modal Types', () => {
+    test('planning turn limit banner displays', async ({ page }) => {
       await page.goto('/task/test-123');
       await page.waitForSelector('#task-page');
 
-      // Mock malformed response
-      await page.route('**/tasks/*/decision', async route => {
-        await route.fulfill({ status: 200, body: 'Invalid JSON' });
-      });
-
-      // Trigger modal
       await page.evaluate(() => {
-        window.dispatchEvent(new CustomEvent('decomposition_confirmation_required', {
-          detail: { task_id: 'test-123', message: 'Test' },
+        window.dispatchEvent(new CustomEvent('planning_turn_limit_reached', {
+          detail: {
+            task_id: 'test-123', task_title: 'Plan Feature', turns_taken: 10,
+            choices: [
+              { value: 'extend', label: 'Extend', description: '' },
+              { value: 'commit', label: 'Commit', description: '' },
+              { value: 'cancel', label: 'Cancel', description: '' },
+            ],
+          },
         }));
       });
 
-      // Wait for modal
-      await page.locator('#confirmation-modal-overlay').toBeVisible();
+      const banner = page.locator('#decision-banner');
+      await expect(banner).toBeVisible({ timeout: 5000 });
+      await expect(page.locator('#decision-banner-title')).toContainText(/planning.*turn/i);
+      await expect(page.locator('#decision-banner-body')).toContainText(/Plan Feature/i);
+      expect(await page.locator('#decision-banner-choices button').count()).toBeGreaterThanOrEqual(3);
+    });
 
-      // Click Allow button
-      const allowBtn = page.locator('button:has-text("Allow"), button:has-text("Confirm")').first();
-      await allowBtn.click();
+    test('merge turn limit banner displays', async ({ page }) => {
+      await page.goto('/task/test-123');
+      await page.waitForSelector('#task-page');
 
-      // Wait for response
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('merge_conflict_resolution_turn_limit_reached', {
+          detail: {
+            task_id: 'test-123', task_title: 'Resolve Conflicts', turns_taken: 5,
+            parent_branch: 'main', resolved_so_far: [{ file: 'a.txt', resolution: 'ours' }],
+            choices: [
+              { value: 'extend', label: 'Extend', description: '' },
+              { value: 'abort', label: 'Abort', description: '' },
+            ],
+          },
+        }));
+      });
+
+      const banner = page.locator('#decision-banner');
+      await expect(banner).toBeVisible({ timeout: 5000 });
+      await expect(page.locator('#decision-banner-title')).toContainText(/merge/i);
+      await expect(page.locator('#decision-banner-body')).toContainText(/main/i);
+      await expect(page.locator('#decision-banner-body')).toContainText(/a.txt/i);
+      expect(await page.locator('#decision-banner-choices button').count()).toBeGreaterThanOrEqual(2);
+    });
+
+    test('critic turn limit banner displays', async ({ page }) => {
+      await page.goto('/task/test-123');
+      await page.waitForSelector('#task-page');
+
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('critic_turn_limit_reached', {
+          detail: {
+            task_id: 'test-123', task_title: 'Review Code', reviewed_task_id: 'task-001',
+            turns_taken: 15, critic_max_turns: 20,
+            choices: [
+              { value: 'approve_task', label: 'Approve', description: '' },
+              { value: 'extend_critic', label: 'Extend', description: '' },
+              { value: 'block_task', label: 'Block', description: '' },
+            ],
+          },
+        }));
+      });
+
+      const banner = page.locator('#decision-banner');
+      await expect(banner).toBeVisible({ timeout: 5000 });
+      await expect(page.locator('#decision-banner-title')).toContainText(/critic.*turn/i);
+      await expect(page.locator('#decision-banner-body')).toContainText(/Review Code/i);
+      await expect(page.locator('#decision-banner-body')).toContainText(/task-001/i);
+      expect(await page.locator('#decision-banner-choices button').count()).toBeGreaterThanOrEqual(3);
+    });
+
+    test('planning turn limit submit decision', async ({ page }) => {
+      await page.goto('/task/test-123');
+      await page.waitForSelector('#task-page');
+
+      let captured: any = {};
+      await page.route('**/tasks/*/decision', async route => {
+        captured = route.request().postDataJSON();
+        await route.fulfill({ json: { ok: true } });
+      });
+
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('planning_turn_limit_reached', {
+          detail: {
+            task_id: 'test-123', task_title: 'Plan', turns_taken: 10,
+            choices: [
+              { value: 'extend', label: 'Extend', description: '' },
+              { value: 'commit', label: 'Commit', description: '' },
+              { value: 'cancel', label: 'Cancel', description: '' },
+            ],
+          },
+        }));
+      });
+
+      await page.locator('#decision-banner').waitFor({ state: 'visible' });
+      await page.locator('#decision-banner-choices button:has-text("Commit")').click();
       await page.waitForTimeout(500);
+      expect(captured.choice).toBe('commit');
+      expect(captured.decision_type).toBe('planning_turn_limit_reached');
+    });
 
-      // Page should handle gracefully
-      await expect(page.locator('#task-page')).toBeVisible();
+    test('merge turn limit submit decision', async ({ page }) => {
+      await page.goto('/task/test-123');
+      await page.waitForSelector('#task-page');
+
+      let captured: any = {};
+      await page.route('**/tasks/*/decision', async route => {
+        captured = route.request().postDataJSON();
+        await route.fulfill({ json: { ok: true } });
+      });
+
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('merge_conflict_resolution_turn_limit_reached', {
+          detail: {
+            task_id: 'test-123', task_title: 'Merge', turns_taken: 5, parent_branch: 'main',
+            resolved_so_far: [],
+            choices: [
+              { value: 'extend', label: 'Extend', description: '' },
+              { value: 'abort', label: 'Abort', description: '' },
+            ],
+          },
+        }));
+      });
+
+      await page.locator('#decision-banner').waitFor({ state: 'visible' });
+      await page.locator('#decision-banner-choices button:has-text("Abort")').click();
+      await page.waitForTimeout(500);
+      expect(captured.choice).toBe('abort');
+      expect(captured.decision_type).toBe('merge_conflict_resolution_turn_limit_reached');
+    });
+
+    test('critic turn limit submit decision', async ({ page }) => {
+      await page.goto('/task/test-123');
+      await page.waitForSelector('#task-page');
+
+      let captured: any = {};
+      await page.route('**/tasks/*/decision', async route => {
+        captured = route.request().postDataJSON();
+        await route.fulfill({ json: { ok: true } });
+      });
+
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('critic_turn_limit_reached', {
+          detail: {
+            task_id: 'test-123', task_title: 'Critic', reviewed_task_id: 'r-1',
+            turns_taken: 15, critic_max_turns: 20,
+            choices: [
+              { value: 'approve_task', label: 'Approve', description: '' },
+              { value: 'extend_critic', label: 'Extend', description: '' },
+              { value: 'block_task', label: 'Block', description: '' },
+            ],
+          },
+        }));
+      });
+
+      await page.locator('#decision-banner').waitFor({ state: 'visible' });
+      await page.locator('#decision-banner-choices button:has-text("Approve")').click();
+      await page.waitForTimeout(500);
+      expect(captured.choice).toBe('approve_task');
+      expect(captured.decision_type).toBe('critic_turn_limit_reached');
     });
   });
 });

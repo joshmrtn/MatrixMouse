@@ -2208,3 +2208,142 @@
     width: 100%;
   }
 }
+
+
+/* ============================================================================
+   Shared Button Styles (used by DecisionBanner and other components)
+   ============================================================================ */
+
+/* Modal buttons */
+.modal-btn-primary {
+  background: var(--green2);
+  color: var(--text);
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.modal-btn-primary:hover {
+  background: var(--green);
+  color: var(--bg);
+}
+
+.modal-btn-secondary {
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.modal-btn-secondary:hover {
+  background: var(--border);
+}
+
+.modal-btn-danger {
+  background: var(--red2);
+  color: var(--text);
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.modal-btn-danger:hover {
+  background: var(--red);
+  color: var(--bg);
+}
+
+.modal-btn-primary:disabled,
+.modal-btn-secondary:disabled,
+.modal-btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .modal-btn-primary,
+  .modal-btn-secondary,
+  .modal-btn-danger {
+    min-height: 44px;
+    padding: 12px 16px;
+  }
+}
+
+/* ============================================================================
+   Decision Banner (non-blocking, inline banner in task conversation)
+   ============================================================================ */
+
+#decision-banner {
+  background: var(--amber2);
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+}
+
+#decision-banner .decision-banner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#decision-banner .decision-banner-header h3 {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--amber);
+  font-weight: 600;
+}
+
+#decision-banner .decision-collapse-btn {
+  background: none;
+  border: none;
+  color: var(--amber);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  line-height: 1;
+}
+
+#decision-banner .decision-collapse-btn:hover {
+  color: var(--text);
+}
+
+#decision-banner .decision-banner-body {
+  margin-top: var(--spacing-sm);
+}
+
+#decision-banner #decision-banner-body {
+  font-size: 0.8125rem;
+  color: var(--text);
+  margin-bottom: var(--spacing-sm);
+}
+
+#decision-banner #decision-banner-body p {
+  margin: 0 0 4px 0;
+}
+
+#decision-banner #decision-banner-choices {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#decision-banner .decision-banner-error {
+  background: rgba(255, 102, 136, 0.15);
+  border: 1px solid var(--red2);
+  color: var(--red);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  margin-bottom: 8px;
+}

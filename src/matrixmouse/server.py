@@ -35,9 +35,10 @@ import asyncio
 import json
 import logging
 import threading
+from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 
 from matrixmouse.config import MatrixMouseConfig, MatrixMousePaths
 
@@ -153,21 +154,17 @@ def _register_routes(app, comms_module: Any) -> None:
             raise HTTPException(status_code=404)
         return HTMLResponse(build_html())
 
-    @app.on_event("startup")
-    async def _start_broadcaster():
-        """
-        Start the fan-out broadcaster as a background asyncio task.
-        Reads from app.state.broadcaster_queue and copies each payload
-        to every connected client's queue.
-        """
+    # -----------------------------------------------------------------------
+    # Lifespan — replaces deprecated @app.on_event("startup")
+    # -----------------------------------------------------------------------
+    @asynccontextmanager
+    async def _lifespan(application):
+        """Start the fan-out broadcaster as a background asyncio task."""
         async def _broadcaster():
-            # Wait until broadcaster_queue is available on app.state.
-            # It's set in _run() before uvicorn starts, so this is just
-            # a defensive poll for the rare race at startup.
-            while not hasattr(app.state, "broadcaster_queue"):
+            while not hasattr(application.state, "broadcaster_queue"):
                 await asyncio.sleep(0.05)
 
-            queue: asyncio.Queue = app.state.broadcaster_queue
+            queue: asyncio.Queue = application.state.broadcaster_queue
             while True:
                 try:
                     payload = await queue.get()
@@ -177,13 +174,17 @@ def _register_routes(app, comms_module: Any) -> None:
                         try:
                             q.put_nowait(payload)
                         except asyncio.QueueFull:
-                            pass  # slow client — drop rather than block
+                            pass
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
                     logger.debug("Broadcaster error: %s", e)
 
-        asyncio.create_task(_broadcaster(), name="matrixmouse-broadcaster")
+        task = asyncio.create_task(_broadcaster(), name="matrixmouse-broadcaster")
+        yield
+        task.cancel()
+
+    app.router.lifespan_context = _lifespan
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):

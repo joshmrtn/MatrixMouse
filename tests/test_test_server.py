@@ -350,3 +350,218 @@ class TestMatrixMouseTestServerAPIEndpoints:
             
             data = resp.json()
             assert len(data["report"]["human"]) == 1
+
+
+class TestFrontendTestServerDecisionEndpoint:
+    """Tests for the /tasks/{task_id}/decision endpoint in create_frontend_test_app.
+
+    These tests use a direct FastAPI TestClient to avoid network/port issues
+    and ensure fast, reliable testing.
+    """
+
+    @pytest.fixture
+    def app(self):
+        from matrixmouse.test_server import create_frontend_test_app
+        return create_frontend_test_app()
+
+    @pytest.fixture
+    def client(self, app):
+        from fastapi.testclient import TestClient
+        return TestClient(app)
+
+    def test_decision_decomposition_allow(self, client):
+        """Test allowing decomposition returns success and transitions task."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "decomposition_confirmation_required",
+            "choice": "allow",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "allow"
+        assert data["task_id"] == "task-decision"
+        assert data["decision_type"] == "decomposition_confirmation_required"
+
+        # Task should be transitioned to ready
+        get_resp = client.get("/tasks/task-decision")
+        assert get_resp.json()["status"] == "ready"
+
+    def test_decision_decomposition_deny_with_note(self, client):
+        """Test denying decomposition with a note returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "decomposition_confirmation_required",
+            "choice": "deny",
+            "note": "Complete this task within the current depth.",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "deny"
+
+    def test_decision_decomposition_deny_without_note_returns_400(self, client):
+        """Test denying decomposition without a note returns 400."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "decomposition_confirmation_required",
+            "choice": "deny",
+            "note": "",
+        })
+        assert resp.status_code == 400
+        data = resp.json()
+        assert "note is required" in data["detail"]
+
+    def test_decision_pr_approval_approve(self, client):
+        """Test approving a PR returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "pr_approval_required",
+            "choice": "approve",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "approve"
+
+    def test_decision_pr_approval_reject(self, client):
+        """Test rejecting a PR returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "pr_approval_required",
+            "choice": "reject",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "reject"
+
+    def test_decision_turn_limit_extend(self, client):
+        """Test extending turn limit returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "turn_limit_reached",
+            "choice": "extend",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "extend"
+
+    def test_decision_turn_limit_respec(self, client):
+        """Test respec choice returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "turn_limit_reached",
+            "choice": "respec",
+            "note": "Please re-read and adjust your approach.",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "respec"
+
+    def test_decision_turn_limit_cancel(self, client):
+        """Test canceling on turn limit returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "turn_limit_reached",
+            "choice": "cancel",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "cancel"
+
+    def test_decision_unknown_type_returns_400(self, client):
+        """Test unknown decision_type returns 400."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "unknown_type",
+            "choice": "allow",
+            "note": "",
+        })
+        assert resp.status_code == 400
+        data = resp.json()
+        assert "Unknown decision_type" in data["detail"]
+
+    def test_decision_invalid_choice_returns_400(self, client):
+        """Test invalid choice returns 400."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "decomposition_confirmation_required",
+            "choice": "maybe",
+            "note": "",
+        })
+        assert resp.status_code == 400
+        data = resp.json()
+        assert "Invalid choice" in data["detail"]
+
+    def test_decision_task_not_found_returns_404(self, client):
+        """Test non-existent task returns 404."""
+        resp = client.post("/tasks/nonexistent/decision", json={
+            "decision_type": "decomposition_confirmation_required",
+            "choice": "allow",
+            "note": "",
+        })
+        assert resp.status_code == 404
+
+    def test_decision_case_insensitive_choice(self, client):
+        """Test that choices are case-insensitive."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "decomposition_confirmation_required",
+            "choice": "ALLOW",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["action"] == "allow"
+
+    def test_decision_task_transitions_to_ready(self, client):
+        """Test that successful decision transitions task status to ready."""
+        # Verify task starts as blocked
+        get_resp = client.get("/tasks/task-decision")
+        assert get_resp.json()["status"] == "blocked_by_human"
+
+        # Submit decision
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "turn_limit_reached",
+            "choice": "extend",
+            "note": "",
+        })
+        assert resp.status_code == 200
+
+        # Verify task is now ready
+        get_resp = client.get("/tasks/task-decision")
+        assert get_resp.json()["status"] == "ready"
+
+    def test_decision_planning_turn_limit(self, client):
+        """Test planning turn limit returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "planning_turn_limit_reached",
+            "choice": "commit",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "commit"
+
+    def test_decision_merge_turn_limit(self, client):
+        """Test merge turn limit returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "merge_conflict_resolution_turn_limit_reached",
+            "choice": "abort",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "abort"
+
+    def test_decision_critic_turn_limit(self, client):
+        """Test critic turn limit returns success."""
+        resp = client.post("/tasks/task-decision/decision", json={
+            "decision_type": "critic_turn_limit_reached",
+            "choice": "extend_critic",
+            "note": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["action"] == "extend_critic"

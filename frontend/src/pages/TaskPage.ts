@@ -9,6 +9,7 @@ import { getState, setState, subscribe } from '../state';
 import { formatStatus, formatRole, escapeHtml } from '../utils';
 import { Conversation } from '../components/Conversation';
 import { TaskEditForm } from '../components/TaskEditForm';
+import { DecisionBanner } from '../components/DecisionModal';
 import type { Task } from '../types';
 
 export class TaskPage {
@@ -17,6 +18,7 @@ export class TaskPage {
   private task: Task | null = null;
   private conversation: Conversation | null = null;
   private editForm: TaskEditForm | null = null;
+  private decisionBanner: DecisionBanner | null = null;
   private isEditing = false;
 
   constructor(taskId: string) {
@@ -79,7 +81,9 @@ export class TaskPage {
       </div>
       
       <div id="task-edit-container"></div>
-      
+
+      <div id="task-decision-banner"></div>
+
       <div id="task-conversation-container"></div>
     `;
 
@@ -207,6 +211,17 @@ export class TaskPage {
     });
 
     container.appendChild(this.conversation.render());
+
+    // Render decision banner
+    const bannerContainer = this.element.querySelector('#task-decision-banner');
+    if (bannerContainer) {
+      // Destroy previous banner if it exists to prevent listener accumulation
+      if (this.decisionBanner) {
+        this.decisionBanner.destroy();
+      }
+      this.decisionBanner = new DecisionBanner();
+      this.decisionBanner.render(bannerContainer);
+    }
   }
 
   private updateHeader(): void {
