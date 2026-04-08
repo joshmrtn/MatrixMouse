@@ -18,7 +18,7 @@ import type { ContextMessage } from '../types';
 export class ChannelPage {
   private element: HTMLElement | null = null;
   private logEl: HTMLElement | null = null;
-  private inputEl: HTMLInputElement | null = null;
+  private inputEl: HTMLTextAreaElement | null = null;
   private sendBtn: HTMLElement | null = null;
   private scope: string;
   private isLoading: boolean = false;
@@ -47,7 +47,7 @@ export class ChannelPage {
         <div id="clarification-banner" role="alert" aria-live="assertive">
           <div class="clar-q">🔔 Awaiting your answer...</div>
           <div class="clar-row">
-            <input id="clar-input" type="text" placeholder="Type your answer..." aria-label="Answer clarification question" />
+            <textarea id="clar-input" placeholder="Type your answer..." aria-label="Answer clarification question"></textarea>
             <button id="clar-answer-btn" aria-label="Submit clarification answer">Answer</button>
           </div>
         </div>
@@ -59,7 +59,7 @@ export class ChannelPage {
         </div>
 
         <div id="channel-input">
-          <input type="text" placeholder="Message ${escapeHtml(this.scope)}..." aria-label="Message input for ${escapeHtml(this.scope)} channel" />
+          <textarea placeholder="Message ${escapeHtml(this.scope)}..." aria-label="Message input for ${escapeHtml(this.scope)} channel"></textarea>
           <button aria-label="Send message">Send</button>
         </div>
       </div>
@@ -67,7 +67,7 @@ export class ChannelPage {
 
     this.element = container.querySelector('#channel-page');
     this.logEl = this.element?.querySelector('#conversation-log');
-    this.inputEl = this.element?.querySelector('#channel-input input');
+    this.inputEl = this.element?.querySelector('#channel-input textarea') as HTMLTextAreaElement;
     this.sendBtn = this.element?.querySelector('#channel-input button');
 
     // Setup event listeners
@@ -108,26 +108,36 @@ export class ChannelPage {
     // Send interjection on button click
     this.sendBtn?.addEventListener('click', () => this.sendInterjection(), { signal });
 
-    // Send interjection on Enter key
+    // Send interjection on Enter key (Shift+Enter inserts newline)
     this.inputEl?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();  // Prevent default newline insertion
         this.sendInterjection();
       }
+      // If Shift+Enter: let default behavior insert newline
     }, { signal });
 
+    // Setup auto-resize for channel textarea
+    this.inputEl?.addEventListener('input', () => this.autoResizeTextarea(this.inputEl), { signal });
+
     // Clarification answer on button click
-    const clarInput = this.element.querySelector('#clar-input') as HTMLInputElement;
+    const clarInput = this.element.querySelector('#clar-input') as HTMLTextAreaElement;
     const clarBtn = this.element.querySelector('#clar-answer-btn');
     clarBtn?.addEventListener('click', () => {
       if (clarInput) this.sendClarificationAnswer(clarInput.value);
     }, { signal });
 
-    // Clarification answer on Enter key
+    // Clarification answer on Enter key (Shift+Enter inserts newline)
     clarInput?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && clarInput.value.trim()) {
+      if (e.key === 'Enter' && !e.shiftKey && clarInput.value.trim()) {
+        e.preventDefault();  // Prevent default newline insertion
         this.sendClarificationAnswer(clarInput.value);
       }
+      // If Shift+Enter: let default behavior insert newline
     }, { signal });
+
+    // Setup auto-resize for clarification textarea
+    clarInput?.addEventListener('input', () => this.autoResizeTextarea(clarInput), { signal });
   }
 
   private setupWebSocketHandlers(): void {
@@ -309,6 +319,29 @@ export class ChannelPage {
     `;
   }
 
+  /**
+   * Auto-resize textarea to fit content (up to max-height)
+   */
+  private autoResizeTextarea(textarea: HTMLTextAreaElement | null): void {
+    if (!textarea) return;
+
+    // Reset height to 'auto' first to get accurate scrollHeight
+    textarea.style.height = 'auto';
+
+    // Cap height at max-height (200px)
+    const newHeight = Math.min(textarea.scrollHeight, 200);
+    textarea.style.height = `${newHeight}px`;
+  }
+
+  /**
+   * Reset textarea height to initial state
+   */
+  private resetTextareaHeight(): void {
+    if (this.inputEl) {
+      this.inputEl.style.height = 'auto';
+    }
+  }
+
   private async sendInterjection(): Promise<void> {
     if (!this.inputEl || this.isSending) return;
 
@@ -321,6 +354,9 @@ export class ChannelPage {
 
     // Clear input immediately (optimistic UI)
     this.inputEl.value = '';
+    this.resetTextareaHeight();
+    // Trigger input event to ensure auto-resize fires on empty content
+    this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
 
     // Add user message to conversation optimistically
     this.addMessage({ role: 'user', content: message });
@@ -368,7 +404,7 @@ export class ChannelPage {
     if (!answer.trim()) return;
 
     // Store answer for potential recovery
-    const clarInput = this.element?.querySelector('#clar-input') as HTMLInputElement;
+    const clarInput = this.element?.querySelector('#clar-input') as HTMLTextAreaElement;
     const originalValue = clarInput?.value || '';
 
     try {
@@ -377,6 +413,8 @@ export class ChannelPage {
 
       // Only clear input and hide banner on success
       if (clarInput) clarInput.value = '';
+      // Reset textarea height
+      if (clarInput) clarInput.style.height = 'auto';
       this.hideClarificationBanner();
       this.addMessage({ role: 'user', content: answer });
     } catch (error) {
@@ -430,7 +468,7 @@ export class ChannelPage {
 
     const banner = this.element.querySelector('#clarification-banner');
     const questionEl = this.element.querySelector('.clar-q');
-    const input = this.element.querySelector('#clar-input') as HTMLInputElement;
+    const input = this.element.querySelector('#clar-input') as HTMLTextAreaElement;
 
     if (banner && questionEl && input) {
       banner.classList.add('active');

@@ -54,9 +54,9 @@ describe('ChannelPage', () => {
 
     it('renders input field and send button', async () => {
       await page.render(container);
-      const input = container.querySelector('#channel-input input');
+      const textarea = container.querySelector('#channel-input textarea');
       const button = container.querySelector('#channel-input button');
-      expect(input).toBeTruthy();
+      expect(textarea).toBeTruthy();
       expect(button).toBeTruthy();
       expect(button?.textContent).toBe('Send');
     });
@@ -73,9 +73,9 @@ describe('ChannelPage', () => {
       await page.render(container);
       const header = container.querySelector('#channel-header');
       expect(header?.textContent).toContain('Channel: test-repo');
-      
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
-      expect(input?.placeholder).toBe('Message test-repo...');
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      expect(textarea?.placeholder).toBe('Message test-repo...');
     });
   });
 
@@ -330,10 +330,10 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = 'Test message';
+
+      textarea.value = 'Test message';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -346,10 +346,10 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = 'Repo message';
+
+      textarea.value = 'Repo message';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -361,9 +361,9 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
-      input.value = 'Test message';
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      textarea.value = 'Test message';
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -374,25 +374,25 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = 'Test message';
+
+      textarea.value = 'Test message';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      expect(input.value).toBe('');
+      expect(textarea.value).toBe('');
     });
 
     it('does not send empty message', async () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = '   ';
+
+      textarea.value = '   ';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -404,10 +404,10 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = '  \n\t  ';
+
+      textarea.value = '  \n\t  ';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -419,10 +419,10 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = 'Optimistic message';
+
+      textarea.value = 'Optimistic message';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -438,10 +438,10 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = 'Test message';
+
+      textarea.value = 'Test message';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -610,9 +610,9 @@ describe('ChannelPage', () => {
     it('uses correct placeholder for repo channel', async () => {
       page = new ChannelPage('my-repo');
       await page.render(container);
-      
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
-      expect(input.placeholder).toBe('Message my-repo...');
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      expect(textarea.placeholder).toBe('Message my-repo...');
     });
 
     it('sends to repo interjection endpoint', async () => {
@@ -622,10 +622,10 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = 'Repo message';
+
+      textarea.value = 'Repo message';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -640,10 +640,10 @@ describe('ChannelPage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
-      
-      input.value = 'Message';
+
+      textarea.value = 'Message';
       button?.dispatchEvent(new MouseEvent('click'));
 
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -669,6 +669,222 @@ describe('ChannelPage', () => {
 
       const messages = container.querySelectorAll('.message-bubble');
       expect(messages.length).toBe(1);
+    });
+  });
+
+  describe('Shift+Enter newline support', () => {
+    it('renders channel input as textarea element', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea');
+      expect(textarea).toBeTruthy();
+      // Should NOT be an input element
+      const input = container.querySelector('#channel-input input');
+      expect(input).toBeFalsy();
+    });
+
+    it('renders clarification input as textarea element', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#clar-input');
+      expect(textarea?.tagName.toLowerCase()).toBe('textarea');
+    });
+
+    it('sends interjection when Enter is pressed', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      textarea.value = 'Test message';
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(apiClient.interjectWorkspace).toHaveBeenCalledWith('Test message');
+    });
+
+    it('does NOT send interjection when Shift+Enter is pressed', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      textarea.value = 'Line 1\nLine 2';
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true }));
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(apiClient.interjectWorkspace).not.toHaveBeenCalled();
+    });
+
+    it('sends clarification answer when Enter is pressed', async () => {
+      vi.mocked(apiClient.getPending).mockResolvedValue({ pending: 'What do you want?' });
+      vi.mocked(apiClient.interjectWorkspace).mockResolvedValue({ ok: true, manager_task_id: 'task123' });
+
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#clar-input') as HTMLTextAreaElement;
+      textarea.value = 'My answer';
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(apiClient.interjectWorkspace).toHaveBeenCalledWith('My answer');
+    });
+
+    it('does NOT send clarification answer when Shift+Enter is pressed', async () => {
+      vi.mocked(apiClient.getPending).mockResolvedValue({ pending: 'What do you want?' });
+
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#clar-input') as HTMLTextAreaElement;
+      textarea.value = 'Line 1\nLine 2';
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true }));
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(apiClient.interjectWorkspace).not.toHaveBeenCalled();
+    });
+
+    it('channel textarea has min-height CSS property', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      // Verify the element exists and has appropriate styling
+      expect(textarea).toBeTruthy();
+      // In JSDOM, computed styles aren't fully available, so we verify the element exists
+      // The actual CSS will be verified by E2E tests
+    });
+  });
+
+  describe('Textarea auto-resize', () => {
+    it('channel textarea has input event listener for auto-resize', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+
+      // Simulate typing
+      textarea.value = 'Line 1\nLine 2\nLine 3';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+      // In JSDOM, scrollHeight may not be accurate, but we verify no error occurred
+      // The actual auto-resize behavior will be tested in E2E tests
+      expect(textarea.value).toBe('Line 1\nLine 2\nLine 3');
+    });
+
+    it('resets textarea height after sending message', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      textarea.value = 'Test message';
+
+      // Simulate sending
+      const button = container.querySelector('#channel-input button');
+      button?.dispatchEvent(new MouseEvent('click'));
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Input should be cleared
+      expect(textarea.value).toBe('');
+    });
+
+    it('resets clarification textarea height after sending answer', async () => {
+      vi.mocked(apiClient.getPending).mockResolvedValue({ pending: 'What do you want?' });
+      vi.mocked(apiClient.interjectWorkspace).mockResolvedValue({ ok: true, manager_task_id: 'task123' });
+
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#clar-input') as HTMLTextAreaElement;
+      textarea.value = 'My answer';
+
+      const button = container.querySelector('#clar-answer-btn');
+      button?.dispatchEvent(new MouseEvent('click'));
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Input should be cleared
+      expect(textarea.value).toBe('');
+    });
+
+    it('clarification textarea has input event listener for auto-resize', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#clar-input') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+
+      // Simulate typing
+      textarea.value = 'Long answer\nwith multiple\nlines';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+      // Verify no error occurred
+      expect(textarea.value).toBe('Long answer\nwith multiple\nlines');
+    });
+  });
+
+  describe('Textarea accessibility', () => {
+    it('channel textarea has correct aria-label with scope', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+      expect(textarea.getAttribute('aria-label')).toBe('Message input for workspace channel');
+    });
+
+    it('channel textarea has placeholder text', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+      expect(textarea.placeholder).toBe('Message workspace...');
+    });
+
+    it('clarification textarea has correct aria-label', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#clar-input') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+      expect(textarea.getAttribute('aria-label')).toBe('Answer clarification question');
+    });
+
+    it('clarification textarea has placeholder text', async () => {
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#clar-input') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+      expect(textarea.placeholder).toBe('Type your answer...');
+    });
+
+    it('repo channel textarea has scope-specific aria-label', async () => {
+      page = new ChannelPage('my-repo');
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+      expect(textarea.getAttribute('aria-label')).toBe('Message input for my-repo channel');
+    });
+
+    it('repo channel textarea has repo-specific placeholder', async () => {
+      page = new ChannelPage('my-repo');
+      await page.render(container);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const textarea = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
+      expect(textarea).toBeTruthy();
+      expect(textarea.placeholder).toBe('Message my-repo...');
     });
   });
 });

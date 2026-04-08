@@ -302,7 +302,7 @@ test.describe('Channel Page', () => {
   });
 
   test.describe('Workspace Interjections', () => {
-    test('displays input field and send button', async ({ page }) => {
+    test('displays textarea field and send button', async ({ page }) => {
       await page.route('**/context', async route => {
         await route.fulfill({ json: mockContextResponse });
       });
@@ -310,20 +310,20 @@ test.describe('Channel Page', () => {
       await page.goto('/');
       await page.waitForSelector('#channel-input');
 
-      await expect(page.locator('#channel-input input')).toBeVisible();
+      await expect(page.locator('#channel-input textarea')).toBeVisible();
       await expect(page.locator('#channel-input button')).toBeVisible();
       await expect(page.locator('#channel-input button')).toHaveText('Send');
     });
 
-    test('input placeholder shows workspace', async ({ page }) => {
+    test('textarea placeholder shows workspace', async ({ page }) => {
       await page.route('**/context', async route => {
         await route.fulfill({ json: mockContextResponse });
       });
 
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      await expect(page.locator('#channel-input input')).toHaveAttribute('placeholder', 'Message workspace...');
+      await expect(page.locator('#channel-input textarea')).toHaveAttribute('placeholder', 'Message workspace...');
     });
 
     test('sends interjection on button click', async ({ page }) => {
@@ -340,10 +340,10 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
       // Type message and click send
-      await page.fill('#channel-input input', 'Test workspace message');
+      await page.fill('#channel-input textarea', 'Test workspace message');
       await page.click('#channel-input button');
       await page.waitForTimeout(200);
 
@@ -363,14 +363,46 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
       // Type message and press Enter
-      await page.fill('#channel-input input', 'Test Enter key');
-      await page.press('#channel-input input', 'Enter');
+      await page.fill('#channel-input textarea', 'Test Enter key');
+      await page.press('#channel-input textarea', 'Enter');
       await page.waitForTimeout(200);
 
       expect(interjectionReceived).toBe(true);
+    });
+
+    test('Shift+Enter does NOT send interjection, inserts newline', async ({ page }) => {
+      let interjectionReceived = false;
+
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+      await page.route('**/interject/workspace', async route => {
+        interjectionReceived = true;
+        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      // Type multi-line message with Shift+Enter
+      await page.click('#channel-input textarea');
+      await page.keyboard.type('Line 1');
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Shift');
+      await page.keyboard.type('Line 2');
+      await page.waitForTimeout(100);
+
+      // Verify newline was inserted
+      const textareaValue = await page.locator('#channel-input textarea').inputValue();
+      expect(textareaValue).toContain('\n');
+      expect(textareaValue).toBe('Line 1\nLine 2');
+
+      // Verify message was NOT sent
+      expect(interjectionReceived).toBe(false);
     });
 
     test('clears input after sending message', async ({ page }) => {
@@ -382,13 +414,13 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      await page.fill('#channel-input input', 'Test message');
+      await page.fill('#channel-input textarea', 'Test message');
       await page.click('#channel-input button');
       await page.waitForTimeout(200);
 
-      await expect(page.locator('#channel-input input')).toHaveValue('');
+      await expect(page.locator('#channel-input textarea')).toHaveValue('');
     });
 
     test('does not send empty message', async ({ page }) => {
@@ -403,10 +435,10 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
       // Try to send empty message
-      await page.fill('#channel-input input', '   ');
+      await page.fill('#channel-input textarea', '   ');
       await page.click('#channel-input button');
       await page.waitForTimeout(200);
 
@@ -423,9 +455,9 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      await page.fill('#channel-input input', 'Optimistic message');
+      await page.fill('#channel-input textarea', 'Optimistic message');
       await page.click('#channel-input button');
 
       // Should see user message immediately (before API responds)
@@ -444,9 +476,9 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      await page.fill('#channel-input input', 'Test message');
+      await page.fill('#channel-input textarea', 'Test message');
       await page.click('#channel-input button');
       await page.waitForTimeout(300);
 
@@ -455,18 +487,51 @@ test.describe('Channel Page', () => {
       await expect(errorMsg).toBeVisible();
       await expect(errorMsg).toContainText('Error');
     });
+
+    test('sends multi-line message with newlines preserved', async ({ page }) => {
+      let interjectionReceived = false;
+      let interjectionMessage = '';
+
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+      await page.route('**/interject/workspace', async route => {
+        interjectionReceived = true;
+        interjectionMessage = route.request().postDataJSON()?.message || '';
+        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      // Type multi-line message
+      await page.click('#channel-input textarea');
+      await page.keyboard.type('Line 1');
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Shift');
+      await page.keyboard.type('Line 2');
+      await page.waitForTimeout(100);
+
+      // Send with Enter
+      await page.press('#channel-input textarea', 'Enter');
+      await page.waitForTimeout(200);
+
+      expect(interjectionReceived).toBe(true);
+      expect(interjectionMessage).toBe('Line 1\nLine 2');
+    });
   });
 
   test.describe('Repo Interjections', () => {
-    test('input placeholder shows repo name', async ({ page }) => {
+    test('textarea placeholder shows repo name', async ({ page }) => {
       await page.route('**/context?repo=test-repo', async route => {
         await route.fulfill({ json: mockContextResponse });
       });
 
       await page.goto('/channel/test-repo');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      await expect(page.locator('#channel-input input')).toHaveAttribute('placeholder', 'Message test-repo...');
+      await expect(page.locator('#channel-input textarea')).toHaveAttribute('placeholder', 'Message test-repo...');
     });
 
     test('sends to repo interjection endpoint', async ({ page }) => {
@@ -485,9 +550,9 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/channel/test-repo');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      await page.fill('#channel-input input', 'Test repo message');
+      await page.fill('#channel-input textarea', 'Test repo message');
       await page.click('#channel-input button');
       await page.waitForTimeout(200);
 
@@ -504,14 +569,14 @@ test.describe('Channel Page', () => {
       });
 
       await page.goto('/channel/my-special_repo');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      await page.fill('#channel-input input', 'Message');
+      await page.fill('#channel-input textarea', 'Message');
       await page.click('#channel-input button');
       await page.waitForTimeout(200);
 
       // Should not error - URL encoding should work
-      await expect(page.locator('#channel-input input')).toHaveValue('');
+      await expect(page.locator('#channel-input textarea')).toHaveValue('');
     });
   });
 
@@ -692,23 +757,195 @@ test.describe('Channel Page', () => {
       await page.waitForSelector('#channel-page');
 
       await expect(page.locator('#channel-page')).toBeVisible();
-      await expect(page.locator('#channel-input input')).toBeVisible();
+      await expect(page.locator('#channel-input textarea')).toBeVisible();
       await expect(page.locator('#channel-input button')).toBeVisible();
     });
 
-    test('input is touch-friendly on mobile', async ({ page }) => {
+    test('textarea is touch-friendly on mobile', async ({ page }) => {
       await page.route('**/context', async route => {
         await route.fulfill({ json: mockContextResponse });
       });
 
       await page.setViewportSize({ width: 375, height: 667 });
       await page.goto('/');
-      await page.waitForSelector('#channel-input input');
+      await page.waitForSelector('#channel-input textarea');
 
-      const input = page.locator('#channel-input input');
-      const box = await input.boundingBox();
+      const textarea = page.locator('#channel-input textarea');
+      const box = await textarea.boundingBox();
       expect(box).toBeTruthy();
       expect(box!.height).toBeGreaterThanOrEqual(44); // Touch-friendly height
+    });
+  });
+
+  test.describe('Textarea Auto-Resize', () => {
+    test('textarea grows when typing multiple lines', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      const textarea = page.locator('#channel-input textarea');
+
+      // Type multiple lines using fill instead of keyboard for reliability
+      await page.fill('#channel-input textarea', 'Line 1\nLine 2\nLine 3');
+      await page.waitForTimeout(200);
+
+      // Verify the textarea contains the multi-line content
+      const value = await textarea.inputValue();
+      expect(value).toBe('Line 1\nLine 2\nLine 3');
+    });
+
+    test('textarea resets after sending message', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+      await page.route('**/interject/workspace', async route => {
+        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      // Type multi-line message
+      await page.fill('#channel-input textarea', 'Line 1\nLine 2');
+      await page.waitForTimeout(100);
+
+      // Verify textarea has content
+      const beforeValue = await page.locator('#channel-input textarea').inputValue();
+      expect(beforeValue).toBe('Line 1\nLine 2');
+
+      // Send message
+      await page.press('#channel-input textarea', 'Enter');
+      await page.waitForTimeout(200);
+
+      // Verify textarea is cleared
+      const afterValue = await page.locator('#channel-input textarea').inputValue();
+      expect(afterValue).toBe('');
+    });
+
+    test('textarea handles large content without errors', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      // Type many lines (would exceed max-height if there was no cap)
+      const lines = Array.from({ length: 15 }, (_, i) => `Line ${i + 1}`).join('\n');
+      await page.fill('#channel-input textarea', lines);
+      await page.waitForTimeout(200);
+
+      const textarea = page.locator('#channel-input textarea');
+      const value = await textarea.inputValue();
+      expect(value).toBe(lines);
+
+      // Verify textarea is still visible and functional
+      await expect(textarea).toBeVisible();
+    });
+  });
+
+  test.describe('Textarea Accessibility & Keyboard UX', () => {
+    test('channel textarea has aria-label', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      const textarea = page.locator('#channel-input textarea');
+      await expect(textarea).toHaveAttribute('aria-label', 'Message input for workspace channel');
+    });
+
+    test('channel textarea has placeholder', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      await expect(page.locator('#channel-input textarea')).toHaveAttribute('placeholder', 'Message workspace...');
+    });
+
+    test('clarification textarea has aria-label', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+      await page.route('**/pending', async route => {
+        await route.fulfill({ json: { pending: 'Please clarify' } });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#clarification-banner');
+
+      const textarea = page.locator('#clar-input');
+      await expect(textarea).toHaveAttribute('aria-label', 'Answer clarification question');
+    });
+
+    test('clarification textarea has placeholder', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+      await page.route('**/pending', async route => {
+        await route.fulfill({ json: { pending: 'Please clarify' } });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#clarification-banner');
+
+      await expect(page.locator('#clar-input')).toHaveAttribute('placeholder', 'Type your answer...');
+    });
+
+    test('Tab key moves focus from textarea to send button', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      // Focus the textarea
+      await page.click('#channel-input textarea');
+      await expect(page.locator('#channel-input textarea')).toBeFocused();
+
+      // Press Tab to move to send button
+      await page.keyboard.press('Tab');
+      await expect(page.locator('#channel-input button')).toBeFocused();
+    });
+
+    test('Shift+Tab moves focus from send button back to textarea', async ({ page }) => {
+      await page.route('**/context', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+
+      await page.goto('/');
+      await page.waitForSelector('#channel-input textarea');
+
+      // Focus the send button
+      await page.click('#channel-input button');
+      await expect(page.locator('#channel-input button')).toBeFocused();
+
+      // Press Shift+Tab to move back to textarea
+      await page.keyboard.press('Shift+Tab');
+      await expect(page.locator('#channel-input textarea')).toBeFocused();
+    });
+
+    test('repo channel textarea has repo-specific aria-label', async ({ page }) => {
+      await page.route('**/context?repo=test-repo', async route => {
+        await route.fulfill({ json: mockContextResponse });
+      });
+
+      await page.goto('/channel/test-repo');
+      await page.waitForSelector('#channel-input textarea');
+
+      await expect(page.locator('#channel-input textarea')).toHaveAttribute(
+        'aria-label',
+        'Message input for test-repo channel'
+      );
     });
   });
 });

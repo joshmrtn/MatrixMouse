@@ -103,7 +103,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       
       const button = container.querySelector('#channel-input button');
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       
       page.destroy();
       
@@ -225,7 +225,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#clar-input') as HTMLInputElement;
+      const input = container.querySelector('#clar-input') as HTMLTextAreaElement;
       const button = container.querySelector('#clar-answer-btn');
       
       input.value = 'Answer';
@@ -245,7 +245,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#clar-input') as HTMLInputElement;
+      const input = container.querySelector('#clar-input') as HTMLTextAreaElement;
       const button = container.querySelector('#clar-answer-btn');
       
       input.value = 'My answer text';
@@ -264,7 +264,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#clar-input') as HTMLInputElement;
+      const input = container.querySelector('#clar-input') as HTMLTextAreaElement;
       const button = container.querySelector('#clar-answer-btn');
       
       input.value = 'Answer';
@@ -283,7 +283,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#clar-input') as HTMLInputElement;
+      const input = container.querySelector('#clar-input') as HTMLTextAreaElement;
       const button = container.querySelector('#clar-answer-btn');
       
       input.value = 'Answer text';
@@ -300,7 +300,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#clar-input') as HTMLInputElement;
+      const input = container.querySelector('#clar-input') as HTMLTextAreaElement;
       const button = container.querySelector('#clar-answer-btn');
       
       input.value = '   ';
@@ -430,7 +430,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
       
       // First message
@@ -474,7 +474,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
       
       input.value = 'Slow message';
@@ -713,7 +713,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button');
       
       input.value = 'Test message';
@@ -744,7 +744,7 @@ describe('ChannelPage - Additional Coverage', () => {
       await page.render(container);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const input = container.querySelector('#channel-input input') as HTMLInputElement;
+      const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
       const button = container.querySelector('#channel-input button') as HTMLButtonElement;
       
       input.value = 'Test';
@@ -834,7 +834,7 @@ describe('ChannelPage - Additional Coverage', () => {
         expect(newController.signal.aborted).toBe(false);
         
         // Should be able to interact with the page
-        const input = container.querySelector('#channel-input input') as HTMLInputElement;
+        const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
         const button = container.querySelector('#channel-input button');
         
         input.value = 'Test after re-render';
@@ -862,7 +862,7 @@ describe('ChannelPage - Additional Coverage', () => {
         await page.render(container);
         
         // Event listeners should work (not immediately aborted)
-        const input = container.querySelector('#channel-input input') as HTMLInputElement;
+        const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
         const button = container.querySelector('#channel-input button');
         
         input.value = 'Post-destroy message';
@@ -979,7 +979,7 @@ describe('ChannelPage - Additional Coverage', () => {
         await page.render(container);
         await new Promise((resolve) => setTimeout(resolve, 10));
 
-        const input = container.querySelector('#channel-input input') as HTMLInputElement;
+        const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
         const button = container.querySelector('#channel-input button');
         
         // Start sending
@@ -1024,7 +1024,7 @@ describe('ChannelPage - Additional Coverage', () => {
         await page.render(container);
         await new Promise((resolve) => setTimeout(resolve, 10));
 
-        const input = container.querySelector('#clar-input') as HTMLInputElement;
+        const input = container.querySelector('#clar-input') as HTMLTextAreaElement;
         const button = container.querySelector('#clar-answer-btn');
         
         // Show clarification banner first
@@ -1069,7 +1069,7 @@ describe('ChannelPage - Additional Coverage', () => {
         await page.render(container);
         await new Promise((resolve) => setTimeout(resolve, 10));
 
-        const input = container.querySelector('#channel-input input') as HTMLInputElement;
+        const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
         const button = container.querySelector('#channel-input button');
         
         // Trigger multiple sends as rapidly as possible
@@ -1109,7 +1109,7 @@ describe('ChannelPage - Additional Coverage', () => {
         await page.render(container);
         await new Promise((resolve) => setTimeout(resolve, 10));
 
-        const input = container.querySelector('#channel-input input') as HTMLInputElement;
+        const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
         const button = container.querySelector('#channel-input button');
         
         input.value = 'Race test';
@@ -1266,7 +1266,7 @@ describe('ChannelPage - Additional Coverage', () => {
         await page.render(container);
         await new Promise((resolve) => setTimeout(resolve, 10));
 
-        const input = container.querySelector('#channel-input input') as HTMLInputElement;
+        const input = container.querySelector('#channel-input textarea') as HTMLTextAreaElement;
         const button = container.querySelector('#channel-input button');
         
         // Start API call

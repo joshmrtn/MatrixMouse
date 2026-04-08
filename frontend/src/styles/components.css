@@ -232,7 +232,7 @@
   gap: var(--spacing-sm);
 }
 
-.clar-row input {
+.clar-row textarea {
   flex: 1;
   background: var(--bg1);
   border: 1px solid var(--amber);
@@ -242,6 +242,10 @@
   font-size: 12px;
   outline: none;
   min-width: 0;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 150px;
+  line-height: 1.5;
 }
 
 .clar-row button {
@@ -1034,7 +1038,7 @@
   flex-shrink: 0;
 }
 
-#channel-input input {
+#channel-input textarea {
   flex: 1;
   background: transparent;
   border: none;
@@ -1044,6 +1048,15 @@
   font-size: 12px;
   outline: none;
   min-width: 0;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 200px;
+  line-height: 1.5;
+}
+
+#channel-input textarea::placeholder {
+  color: inherit;
+  opacity: 0.5;
 }
 
 #channel-input button {
