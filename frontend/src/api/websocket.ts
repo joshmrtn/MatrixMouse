@@ -1,19 +1,13 @@
 /**
  * WebSocket connection manager for real-time events
+ *
+ * Unified handler API: use on(eventType, handler) / off(eventType, handler)
+ * for all event types. No specialized methods needed.
  */
 
 import type {
   WebSocketEvent,
   WebSocketEventType,
-  StatusUpdateData,
-  TaskTreeUpdateData,
-  ClarificationRequestData,
-  TokenData,
-  ThinkingData,
-  ContentData,
-  ToolCallData,
-  ToolResultData,
-  ContextMessage,
 } from '../types';
 
 /**
@@ -28,14 +22,6 @@ export class WebSocketManager {
   private ws: WebSocket | null = null;
   private reconnectDelay = 3000;
   private handlers = new Map<WebSocketEventType, Set<EventHandler>>();
-  private statusHandlers = new Set<EventHandler<StatusUpdateData>>();
-  private clarificationHandlers = new Set<EventHandler<ClarificationRequestData>>();
-  private tokenHandlers = new Set<EventHandler<TokenData>>();
-  private thinkingHandlers = new Set<EventHandler<ThinkingData>>();
-  private contentHandlers = new Set<EventHandler<ContentData>>();
-  private toolCallHandlers = new Set<EventHandler<ToolCallData>>();
-  private toolResultHandlers = new Set<EventHandler<ToolResultData>>();
-  private messageReceivedHandlers = new Set<EventHandler<{ message: ContextMessage; scope?: string }>>();
 
   /**
    * Connect to WebSocket server
@@ -75,58 +61,6 @@ export class WebSocketManager {
    * Handle incoming WebSocket event
    */
   private handleEvent(event: WebSocketEvent): void {
-    // Handle specific event types
-    switch (event.type) {
-      case 'status_update':
-        this.statusHandlers.forEach((handler) =>
-          handler(event.data as StatusUpdateData)
-        );
-        break;
-
-      case 'clarification_request':
-        this.clarificationHandlers.forEach((handler) =>
-          handler(event.data as ClarificationRequestData)
-        );
-        break;
-
-      case 'token':
-        this.tokenHandlers.forEach((handler) =>
-          handler(event.data as TokenData)
-        );
-        break;
-
-      case 'thinking':
-        this.thinkingHandlers.forEach((handler) =>
-          handler(event.data as ThinkingData)
-        );
-        break;
-
-      case 'content':
-        this.contentHandlers.forEach((handler) =>
-          handler(event.data as ContentData)
-        );
-        break;
-
-      case 'tool_call':
-        this.toolCallHandlers.forEach((handler) =>
-          handler(event.data as ToolCallData)
-        );
-        break;
-
-      case 'tool_result':
-        this.toolResultHandlers.forEach((handler) =>
-          handler(event.data as ToolResultData)
-        );
-        break;
-
-      case 'message_received':
-        this.messageReceivedHandlers.forEach((handler) =>
-          handler(event.data as { message: ContextMessage; scope?: string })
-        );
-        break;
-    }
-
-    // Call generic handlers for this event type
     const typeHandlers = this.handlers.get(event.type);
     if (typeHandlers) {
       typeHandlers.forEach((handler) => handler(event.data));
@@ -134,7 +68,11 @@ export class WebSocketManager {
   }
 
   /**
-   * Register event handler
+   * Register event handler for a specific event type.
+   *
+   * @example
+   * wsManager.on('token', (data) => console.log(data.text));
+   * wsManager.on('status_update', (data) => updateStatus(data));
    */
   on<T = unknown>(eventType: WebSocketEventType, handler: EventHandler<T>): void {
     if (!this.handlers.has(eventType)) {
@@ -144,111 +82,16 @@ export class WebSocketManager {
   }
 
   /**
-   * Unregister event handler
+   * Unregister event handler.
+   *
+   * @example
+   * wsManager.off('token', myHandler);
    */
   off<T = unknown>(eventType: WebSocketEventType, handler: EventHandler<T>): void {
     const typeHandlers = this.handlers.get(eventType);
     if (typeHandlers) {
       typeHandlers.delete(handler as EventHandler);
     }
-  }
-
-  /**
-   * Register status update handler
-   */
-  onStatusUpdate(handler: EventHandler<StatusUpdateData>): void {
-    this.statusHandlers.add(handler);
-  }
-
-  /**
-   * Register clarification request handler
-   */
-  onClarificationRequest(handler: EventHandler<ClarificationRequestData>): void {
-    this.clarificationHandlers.add(handler);
-  }
-
-  /**
-   * Register token stream handler
-   */
-  onToken(handler: EventHandler<TokenData>): void {
-    this.tokenHandlers.add(handler);
-  }
-
-  /**
-   * Unregister token stream handler
-   */
-  offToken(handler: EventHandler<TokenData>): void {
-    this.tokenHandlers.delete(handler);
-  }
-
-  /**
-   * Register thinking stream handler
-   */
-  onThinking(handler: EventHandler<ThinkingData>): void {
-    this.thinkingHandlers.add(handler);
-  }
-
-  /**
-   * Unregister thinking stream handler
-   */
-  offThinking(handler: EventHandler<ThinkingData>): void {
-    this.thinkingHandlers.delete(handler);
-  }
-
-  /**
-   * Register content handler
-   */
-  onContent(handler: EventHandler<ContentData>): void {
-    this.contentHandlers.add(handler);
-  }
-
-  /**
-   * Unregister content handler
-   */
-  offContent(handler: EventHandler<ContentData>): void {
-    this.contentHandlers.delete(handler);
-  }
-
-  /**
-   * Register tool call handler
-   */
-  onToolCall(handler: EventHandler<ToolCallData>): void {
-    this.toolCallHandlers.add(handler);
-  }
-
-  /**
-   * Unregister tool call handler
-   */
-  offToolCall(handler: EventHandler<ToolCallData>): void {
-    this.toolCallHandlers.delete(handler);
-  }
-
-  /**
-   * Register tool result handler
-   */
-  onToolResult(handler: EventHandler<ToolResultData>): void {
-    this.toolResultHandlers.add(handler);
-  }
-
-  /**
-   * Unregister tool result handler
-   */
-  offToolResult(handler: EventHandler<ToolResultData>): void {
-    this.toolResultHandlers.delete(handler);
-  }
-
-  /**
-   * Register message received handler (for conversation updates)
-   */
-  onMessageReceived(handler: EventHandler<{ message: ContextMessage; scope?: string }>): void {
-    this.messageReceivedHandlers.add(handler);
-  }
-
-  /**
-   * Unregister message received handler
-   */
-  offMessageReceived(handler: EventHandler<{ message: ContextMessage; scope?: string }>): void {
-    this.messageReceivedHandlers.delete(handler);
   }
 
   /**

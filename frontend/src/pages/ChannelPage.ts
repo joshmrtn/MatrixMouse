@@ -23,12 +23,8 @@ export class ChannelPage {
   private scope: string;
   private isLoading: boolean = false;
   private isSending: boolean = false;  // Track sending state
-  private scrollPending: boolean = false;  // Throttle scroll updates
   private error: string | null = null;
   private abortController = new AbortController();
-  private messageIds = new Set<string>();
-  private pendingCheckFailures = 0;
-  private readonly MAX_MESSAGE_IDS = 1000;  // LRU cache limit (~100KB memory footprint for typical messages)
 
   constructor(scope: string) {
     this.scope = scope;
@@ -91,13 +87,6 @@ export class ChannelPage {
     this.logEl = null;
     this.inputEl = null;
     this.sendBtn = null;
-    this.messageIds.clear();
-    
-    // Clean up WebSocket handlers
-    wsManager.offToken(this.handleToken);
-    wsManager.offContent(this.handleContent);
-    wsManager.offToolCall(this.handleToolCall);
-    wsManager.offToolResult(this.handleToolResult);
   }
 
   private setupEventListeners(): void {
@@ -142,18 +131,12 @@ export class ChannelPage {
 
   private setupWebSocketHandlers(): void {
     // Register WebSocket handlers for real-time streaming
-    wsManager.onToken(this.handleToken);
-    wsManager.onContent(this.handleContent);
-    wsManager.onToolCall(this.handleToolCall);
-    wsManager.onToolResult(this.handleToolResult);
+    wsManager.on('content', this.handleContent);
+    wsManager.on('tool_call', this.handleToolCall);
+    wsManager.on('tool_result', this.handleToolResult);
   }
 
   // WebSocket event handlers
-  private handleToken = (data: { text: string }): void => {
-    // Intentionally empty: token-by-token streaming is handled via content events
-    // Keep this handler registered for API completeness and future token-streaming implementation
-  };
-
   private handleContent = (data: { text: string }): void => {
     try {
       // Validate event data structure from backend
@@ -223,23 +206,18 @@ export class ChannelPage {
   private async checkPendingQuestion(): Promise<void> {
     try {
       const data = await getPending();
-      this.pendingCheckFailures = 0;  // Reset on success
-      
+
       // Validate response structure
       if (!data || typeof data.pending === 'undefined') {
         console.error('[ChannelPage] Invalid pending response');
         return;
       }
-      
+
       if (data.pending) {
         this.showClarificationBanner(data.pending);
       }
     } catch (error) {
-      this.pendingCheckFailures++;
-      // Only log first 3 failures to avoid spam
-      if (this.pendingCheckFailures <= 3) {
-        console.error('[ChannelPage] Failed to check pending question:', error);
-      }
+      console.error('[ChannelPage] Failed to check pending question:', error);
     }
   }
 
@@ -365,7 +343,8 @@ export class ChannelPage {
       await this.sendToChannel(message);
     } catch (error) {
       console.error('[ChannelPage] Failed to send interjection:', error);
-      this.addMessage({ role: 'system', content: this.formatErrorMessage(error, 'Error') });
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      this.addMessage({ role: 'system', content: `Error: ${msg}` });
     } finally {
       // Clear sending state
       this.isSending = false;
@@ -382,14 +361,6 @@ export class ChannelPage {
     } else {
       await interjectRepo(this.scope, message);
     }
-  }
-
-  /**
-   * Format error message for display
-   */
-  private formatErrorMessage(error: unknown, prefix = 'Error'): string {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    return `${prefix}: ${msg}`;
   }
 
   private updateSendButtonState(): void {
@@ -419,7 +390,8 @@ export class ChannelPage {
       this.addMessage({ role: 'user', content: answer });
     } catch (error) {
       console.error('[ChannelPage] Failed to send clarification answer:', error);
-      this.addMessage({ role: 'system', content: this.formatErrorMessage(error, 'Failed to send answer') });
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      this.addMessage({ role: 'system', content: `Failed to send answer: ${msg}` });
 
       // Restore input value on failure (only if component still exists)
       if (clarInput && this.element) {
@@ -431,19 +403,6 @@ export class ChannelPage {
 
   private addMessage(msg: ContextMessage): void {
     if (!this.logEl) return;
-
-    // Deduplicate messages by role + content + tool_call_id (use :: delimiter to prevent collisions)
-    // Including tool_call_id prevents deduplicating distinct tool calls with same content
-    const msgId = `${msg.role}::${msg.content}::${msg.tool_call_id || ''}`;
-    if (this.messageIds.has(msgId)) return;
-
-    this.messageIds.add(msgId);
-
-    // Prevent unbounded growth of messageIds set (LRU eviction)
-    if (this.messageIds.size > this.MAX_MESSAGE_IDS) {
-      const firstKey = this.messageIds.keys().next().value;
-      if (firstKey) this.messageIds.delete(firstKey);
-    }
 
     // Remove "no conversation" placeholder if present
     const placeholder = this.logEl.querySelector('.empty-message');
@@ -488,14 +447,8 @@ export class ChannelPage {
   }
 
   private scrollToBottom(): void {
-    if (this.logEl && !this.scrollPending) {
-      this.scrollPending = true;
-      requestAnimationFrame(() => {
-        if (this.logEl) {
-          this.logEl.scrollTop = this.logEl.scrollHeight;
-        }
-        this.scrollPending = false;
-      });
+    if (this.logEl) {
+      this.logEl.scrollTop = this.logEl.scrollHeight;
     }
   }
 }

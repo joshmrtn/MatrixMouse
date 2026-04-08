@@ -125,14 +125,6 @@ describe('CreateTaskForm', () => {
   });
 
   describe('validation', () => {
-    beforeEach(() => {
-      vi.useFakeTimers();
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
     it('shows error on empty title', () => {
       form = new CreateTaskForm({});
       form.render(container);
@@ -140,12 +132,8 @@ describe('CreateTaskForm', () => {
       const titleInput = container.querySelector('#task-title') as HTMLInputElement;
       const errorEl = container.querySelector('#title-error') as HTMLElement;
 
-      // Trigger validation by typing
       titleInput.value = '';
       titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
 
       expect(errorEl.style.display).toBe('block');
       expect(errorEl.textContent).toBe('Title is required');
@@ -161,9 +149,6 @@ describe('CreateTaskForm', () => {
       titleInput.value = 'Test Task';
       titleInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
-
       expect(errorEl.style.display).toBe('none');
     });
 
@@ -176,9 +161,6 @@ describe('CreateTaskForm', () => {
 
       importanceInput.value = '-0.5';
       importanceInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
 
       expect(errorEl.style.display).toBe('block');
       expect(errorEl.textContent).toBe('Must be between 0 and 1');
@@ -194,9 +176,6 @@ describe('CreateTaskForm', () => {
       importanceInput.value = '1.5';
       importanceInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
-
       expect(errorEl.style.display).toBe('block');
       expect(errorEl.textContent).toBe('Must be between 0 and 1');
     });
@@ -210,9 +189,6 @@ describe('CreateTaskForm', () => {
 
       urgencyInput.value = '-0.5';
       urgencyInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
 
       expect(errorEl.style.display).toBe('block');
       expect(errorEl.textContent).toBe('Must be between 0 and 1');
@@ -228,9 +204,6 @@ describe('CreateTaskForm', () => {
       urgencyInput.value = '1.5';
       urgencyInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
-
       expect(errorEl.style.display).toBe('block');
       expect(errorEl.textContent).toBe('Must be between 0 and 1');
     });
@@ -244,9 +217,6 @@ describe('CreateTaskForm', () => {
 
       titleInput.value = 'Test Task';
       titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
 
       expect(submitBtn.disabled).toBe(false);
     });
@@ -459,8 +429,6 @@ describe('CreateTaskForm', () => {
     });
 
     it('clears error messages', () => {
-      vi.useFakeTimers();
-      
       form = new CreateTaskForm({});
       form.render(container);
 
@@ -469,17 +437,12 @@ describe('CreateTaskForm', () => {
       titleInput.value = '';
       titleInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-      // Fast-forward debounce timer
-      vi.advanceTimersByTime(150);
-
       const errorEl = container.querySelector('#title-error') as HTMLElement;
       expect(errorEl.style.display).toBe('block');
 
       form.reset();
 
       expect(errorEl.style.display).toBe('none');
-      
-      vi.useRealTimers();
     });
 
     it('clears form message', () => {
@@ -959,97 +922,8 @@ describe('CreateTaskForm', () => {
     });
   });
 
-  describe('Phase 6 - Unsaved changes warning', () => {
-    it('marks form as dirty on input change', () => {
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      titleInput.value = 'Test';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Form should be dirty
-      expect((form as any).isDirty).toBe(true);
-    });
-
-    it('marks form as dirty on repo selection', () => {
-      resetState();
-      setState('repos', [
-        { name: 'repo1', remote: 'https://github.com/test/repo1.git', local_path: '/test/repo1', added: '2024-01-01' },
-      ] as Repo[]);
-
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const repoSelect = container.querySelector('#repo-select') as HTMLSelectElement;
-      repoSelect.value = 'repo1';
-      repoSelect.dispatchEvent(new Event('change', { bubbles: true }));
-
-      // Form should be dirty
-      expect((form as any).isDirty).toBe(true);
-    });
-
-    it('resets dirty flag on successful submission', async () => {
-      const mockTask = {
-        id: 'test-123',
-        title: 'Test Task',
-        description: '',
-        repo: [],
-        role: 'coder' as const,
-        status: 'ready' as const,
-        branch: '',
-        parent_task_id: null,
-        depth: 0,
-        importance: 0.5,
-        urgency: 0.5,
-        priority_score: 0.5,
-        preemptable: true,
-        preempt: false,
-        created_at: '2024-01-01T00:00:00Z',
-        last_modified: '2024-01-01T00:00:00Z',
-        context_messages: [],
-        pending_tool_calls: [],
-        decomposition_confirmed_depth: 0,
-        merge_resolution_decisions: [],
-      };
-
-      vi.mocked(createTask).mockResolvedValue(mockTask);
-
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      titleInput.value = 'Test Task';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      expect((form as any).isDirty).toBe(true);
-
-      const formEl = container.querySelector('#create-task-form') as HTMLFormElement;
-      formEl.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Dirty flag should be reset after success
-      expect((form as any).isDirty).toBe(false);
-    });
-
-    it('cleans up beforeunload handler on destroy', () => {
-      const addEventListenerSpy = vi.spyOn(window, 'addEventListener');
-      const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');
-
-      form = new CreateTaskForm({});
-      form.render(container);
-      form.destroy();
-
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('beforeunload', expect.any(Function));
-
-      addEventListenerSpy.mockRestore();
-      removeEventListenerSpy.mockRestore();
-    });
-  });
-
   describe('Phase 6 - Enhanced error messages', () => {
-    it('shows network error message', async () => {
+    it('shows error message on API failure', async () => {
       vi.mocked(createTask).mockRejectedValue(new Error('Network error'));
 
       form = new CreateTaskForm({});
@@ -1065,7 +939,7 @@ describe('CreateTaskForm', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
 
       const messageEl = container.querySelector('#form-message') as HTMLElement;
-      expect(messageEl.textContent).toContain('connect');
+      expect(messageEl.textContent).toBe('Network error');
     });
 
     it('shows API detail message when available', async () => {
@@ -1087,145 +961,6 @@ describe('CreateTaskForm', () => {
 
       const messageEl = container.querySelector('#form-message') as HTMLElement;
       expect(messageEl.textContent).toBe('Title is too long');
-    });
-  });
-
-  describe('Input sanitization', () => {
-    it('sanitizes HTML entities in title', async () => {
-      const mockTask = {
-        id: 'test-123',
-        title: 'Test',
-        description: '',
-        repo: [],
-        role: 'coder' as const,
-        status: 'ready' as const,
-        branch: '',
-        parent_task_id: null,
-        depth: 0,
-        importance: 0.5,
-        urgency: 0.5,
-        priority_score: 0.5,
-        preemptable: true,
-        preempt: false,
-        created_at: '2024-01-01T00:00:00Z',
-        last_modified: '2024-01-01T00:00:00Z',
-        context_messages: [],
-        pending_tool_calls: [],
-        decomposition_confirmed_depth: 0,
-        merge_resolution_decisions: [],
-      };
-
-      vi.mocked(createTask).mockResolvedValue(mockTask);
-
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      titleInput.value = '<script>alert("xss")</script>';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      const formEl = container.querySelector('#create-task-form') as HTMLFormElement;
-      formEl.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Verify sanitization encodes HTML entities including /
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        title: expect.stringContaining('&lt;script&gt;'),
-      }));
-    });
-
-    it('sanitizes quotes in description', async () => {
-      const mockTask = {
-        id: 'test-123',
-        title: 'Test',
-        description: '',
-        repo: [],
-        role: 'coder' as const,
-        status: 'ready' as const,
-        branch: '',
-        parent_task_id: null,
-        depth: 0,
-        importance: 0.5,
-        urgency: 0.5,
-        priority_score: 0.5,
-        preemptable: true,
-        preempt: false,
-        created_at: '2024-01-01T00:00:00Z',
-        last_modified: '2024-01-01T00:00:00Z',
-        context_messages: [],
-        pending_tool_calls: [],
-        decomposition_confirmed_depth: 0,
-        merge_resolution_decisions: [],
-      };
-
-      vi.mocked(createTask).mockResolvedValue(mockTask);
-
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      titleInput.value = 'Test';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      const descInput = container.querySelector('#task-description') as HTMLTextAreaElement;
-      descInput.value = 'Test "quoted" and \'apostrophe\'';
-
-      const formEl = container.querySelector('#create-task-form') as HTMLFormElement;
-      formEl.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        description: expect.stringContaining('&quot;quoted&quot;'),
-      }));
-    });
-
-    it('sanitizes forward slashes', async () => {
-      const mockTask = {
-        id: 'test-123',
-        title: 'Test',
-        description: '',
-        repo: [],
-        role: 'coder' as const,
-        status: 'ready' as const,
-        branch: '',
-        parent_task_id: null,
-        depth: 0,
-        importance: 0.5,
-        urgency: 0.5,
-        priority_score: 0.5,
-        preemptable: true,
-        preempt: false,
-        created_at: '2024-01-01T00:00:00Z',
-        last_modified: '2024-01-01T00:00:00Z',
-        context_messages: [],
-        pending_tool_calls: [],
-        decomposition_confirmed_depth: 0,
-        merge_resolution_decisions: [],
-      };
-
-      vi.mocked(createTask).mockResolvedValue(mockTask);
-
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      titleInput.value = 'Test';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      const descInput = container.querySelector('#task-description') as HTMLTextAreaElement;
-      descInput.value = 'Path: <script/src=evil.js>';
-
-      const formEl = container.querySelector('#create-task-form') as HTMLFormElement;
-      formEl.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      // Verify forward slashes are encoded
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        description: expect.stringContaining('&#x2F;'),
-      }));
     });
   });
 
@@ -1352,159 +1087,46 @@ describe('CreateTaskForm', () => {
     });
   });
 
-  describe('Keyboard shortcuts', () => {
-    it('has keyboard shortcut handler registered', () => {
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      // Verify keyboard handler is stored
-      expect((form as any).keyboardHandler).toBeDefined();
-      expect(typeof (form as any).keyboardHandler).toBe('function');
-    });
-
-    it('cleans up keyboard handler on destroy', () => {
-      const removeEventListenerSpy = vi.spyOn(document, 'removeEventListener');
-      
-      form = new CreateTaskForm({});
-      form.render(container);
-      form.destroy();
-
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('keydown', expect.any(Function));
-      
-      removeEventListenerSpy.mockRestore();
-    });
-
-    it('does not throw when keyboard event is triggered', () => {
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const event = new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true });
-      
-      // Should not throw even if form is not focused
-      expect(() => document.dispatchEvent(event)).not.toThrow();
-    });
-  });
-
-  describe('Debounced validation', () => {
-    beforeEach(() => {
-      vi.useFakeTimers();
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
-    it('debounces title validation', () => {
+  describe('Immediate validation', () => {
+    it('validates title immediately on input', () => {
       form = new CreateTaskForm({});
       form.render(container);
 
       const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      const validateTitleSpy = vi.spyOn(form as any, 'validateTitle');
+      const errorEl = container.querySelector('#title-error') as HTMLElement;
 
-      // Rapid typing
-      titleInput.value = 'T';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-      titleInput.value = 'Te';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-      titleInput.value = 'Tes';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-      titleInput.value = 'Test';
+      titleInput.value = '';
       titleInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-      // Validation should not have been called yet
-      expect(validateTitleSpy).not.toHaveBeenCalled();
-
-      // Fast-forward time
-      vi.advanceTimersByTime(150);
-
-      // Validation should be called once
-      expect(validateTitleSpy).toHaveBeenCalledTimes(1);
-
-      validateTitleSpy.mockRestore();
+      // Validation happens immediately, no debounce
+      expect(errorEl.style.display).toBe('block');
     });
 
-    it('debounces importance validation', () => {
+    it('validates importance immediately on input', () => {
       form = new CreateTaskForm({});
       form.render(container);
 
       const importanceInput = container.querySelector('#task-importance') as HTMLInputElement;
-      const validateImportanceSpy = vi.spyOn(form as any, 'validateImportance');
+      const errorEl = container.querySelector('#importance-error') as HTMLElement;
 
-      importanceInput.value = '0.5';
-      importanceInput.dispatchEvent(new Event('input', { bubbles: true }));
-      importanceInput.value = '0.6';
+      importanceInput.value = '1.5';
       importanceInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-      expect(validateImportanceSpy).not.toHaveBeenCalled();
-
-      vi.advanceTimersByTime(150);
-
-      expect(validateImportanceSpy).toHaveBeenCalledTimes(1);
-
-      validateImportanceSpy.mockRestore();
+      expect(errorEl.style.display).toBe('block');
     });
 
-    it('clears validation timers on destroy', () => {
+    it('validates urgency immediately on input', () => {
       form = new CreateTaskForm({});
       form.render(container);
 
-      const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      titleInput.value = 'Test';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+      const urgencyInput = container.querySelector('#task-urgency') as HTMLInputElement;
+      const errorEl = container.querySelector('#urgency-error') as HTMLElement;
 
-      // Destroy before timer completes
-      form.destroy();
+      urgencyInput.value = '-0.5';
+      urgencyInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-      // Fast-forward time
-      vi.advanceTimersByTime(150);
-
-      // Should not throw
-      expect(() => {}).not.toThrow();
+      expect(errorEl.style.display).toBe('block');
     });
   });
 
-  describe('Error logging', () => {
-    it('logs errors to console in development', () => {
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      // Access private method for testing
-      (form as any).logError('Test error', new Error('Test'));
-
-      expect(consoleErrorSpy).toHaveBeenCalled();
-      const callArgs = consoleErrorSpy.mock.calls[0];
-      expect(callArgs[0]).toContain('[CreateTaskForm]');
-      expect(callArgs[0]).toContain('Test error');
-      expect(callArgs[1]).toBeInstanceOf(Error);
-
-      consoleErrorSpy.mockRestore();
-    });
-
-    it('logs submission errors', async () => {
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      
-      vi.mocked(createTask).mockRejectedValue(new Error('API failed'));
-
-      form = new CreateTaskForm({});
-      form.render(container);
-
-      const titleInput = container.querySelector('#task-title') as HTMLInputElement;
-      titleInput.value = 'Test';
-      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      const formEl = container.querySelector('#create-task-form') as HTMLFormElement;
-      formEl.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(consoleErrorSpy).toHaveBeenCalled();
-      const callArgs = consoleErrorSpy.mock.calls[0];
-      expect(callArgs[0]).toContain('Form submission failed');
-      expect(callArgs[1]).toBeInstanceOf(Error);
-
-      consoleErrorSpy.mockRestore();
-    });
-  });
 });

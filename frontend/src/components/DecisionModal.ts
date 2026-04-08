@@ -34,6 +34,165 @@ import type {
 /** Primary actions get the primary button style */
 const PRIMARY_ACTIONS = new Set(['allow', 'approve', 'extend', 'extend_critic']);
 
+/**
+ * Maps WebSocket event names to internal decision types
+ */
+const EVENT_NAME_TO_TYPE: Record<string, DecisionModalType> = {
+  decomposition_confirmation_required: 'decomposition',
+  pr_approval_required: 'pr_approval',
+  turn_limit_reached: 'turn_limit',
+  planning_turn_limit_reached: 'planning_turn_limit',
+  merge_conflict_resolution_turn_limit_reached: 'merge_turn_limit',
+  critic_turn_limit_reached: 'critic_turn_limit',
+};
+
+/**
+ * Maps internal decision types to WebSocket event names (for API submission)
+ */
+const TYPE_TO_EVENT_NAME: Record<DecisionModalType, string> = {
+  decomposition: 'decomposition_confirmation_required',
+  pr_approval: 'pr_approval_required',
+  turn_limit: 'turn_limit_reached',
+  planning_turn_limit: 'planning_turn_limit_reached',
+  merge_turn_limit: 'merge_conflict_resolution_turn_limit_reached',
+  critic_turn_limit: 'critic_turn_limit_reached',
+};
+
+/**
+ * Configuration for a single decision type.
+ * bodyFields: each entry is either a raw HTML string, or a function that returns
+ * HTML (the function result will be wrapped in <p>). If the function returns
+ * null/undefined, that field is skipped.
+ */
+interface BannerConfig {
+  /** Banner title text */
+  title: string;
+  /** Fields to render in the body. */
+  bodyFields: Array<string | ((e: DecisionEventData) => string | null)>;
+  /** If true, show denial textarea and require text for deny choice */
+  showNote: boolean;
+  /** Value that triggers denial flow (requires note if showNote is true) */
+  denyChoiceValue?: string;
+  /** Label for the denial textarea */
+  noteLabel?: string;
+}
+
+/**
+ * Data-driven configuration for all 6 decision banner types.
+ * Each config specifies title, body fields, and whether a denial note is required.
+ */
+const BANNER_CONFIG: Record<DecisionModalType, BannerConfig> = {
+  decomposition: {
+    title: '\u26A0\uFE0F Decision Required: Task Decomposition',
+    bodyFields: [
+      (e) => {
+        const d = e as DecompositionEventData;
+        return 'Agent wants to split <strong>' + escapeHtml(d.task_title || d.task_id) + '</strong> into subtasks.';
+      },
+      (e) => {
+        const d = e as DecompositionEventData;
+        return 'Depth: <strong>' + (d.current_depth ?? 0) + '</strong> / <strong>' + (d.allowed_depth ?? 3) + '</strong> allowed';
+      },
+    ],
+    showNote: true,
+    denyChoiceValue: 'deny',
+    noteLabel: 'Please explain why you are denying this decomposition:',
+  },
+  pr_approval: {
+    title: '\u26A0\uFE0F Decision Required: Pull Request Approval',
+    bodyFields: [
+      (e) => {
+        const d = e as PRApprovalEventData;
+        return '<strong>' + escapeHtml(d.task_title || d.task_id) + '</strong>';
+      },
+      (e) => {
+        const d = e as PRApprovalEventData;
+        return 'Branch: <code>' + escapeHtml(d.branch) + '</code> &rarr; <code>' + escapeHtml(d.parent_branch) + '</code>';
+      },
+      (e) => {
+        const d = e as PRApprovalEventData;
+        return 'Repo: <code>' + escapeHtml(d.repo) + '</code>';
+      },
+    ],
+    showNote: false,
+  },
+  turn_limit: {
+    title: '\u26A0\uFE0F Decision Required: Turn Limit Reached',
+    bodyFields: [
+      (e) => {
+        const d = e as TurnLimitEventData;
+        return '<strong>' + escapeHtml(d.task_title || d.task_id) + '</strong>';
+      },
+      (e) => {
+        const d = e as TurnLimitEventData;
+        return 'Role: ' + escapeHtml(d.role || 'unknown');
+      },
+      (e) => {
+        const d = e as TurnLimitEventData;
+        return 'Turns: <strong>' + d.turns_taken + '</strong> / <strong>' + d.turn_limit + '</strong>';
+      },
+    ],
+    showNote: false,
+  },
+  planning_turn_limit: {
+    title: '\u26A0\uFE0F Decision Required: Planning Turn Limit',
+    bodyFields: [
+      (e) => {
+        const d = e as PlanningTurnLimitEventData;
+        return '<strong>' + escapeHtml(d.task_title || d.task_id) + '</strong>';
+      },
+      (e) => {
+        const d = e as PlanningTurnLimitEventData;
+        return 'Turns: <strong>' + d.turns_taken + '</strong>';
+      },
+    ],
+    showNote: false,
+  },
+  merge_turn_limit: {
+    title: '\u26A0\uFE0F Decision Required: Merge Turn Limit',
+    bodyFields: [
+      (e) => {
+        const d = e as MergeTurnLimitEventData;
+        return '<strong>' + escapeHtml(d.task_title || d.task_id) + '</strong>';
+      },
+      (e) => {
+        const d = e as MergeTurnLimitEventData;
+        return 'Turns: <strong>' + d.turns_taken + '</strong>';
+      },
+      (e) => {
+        const d = e as MergeTurnLimitEventData;
+        return 'Parent: <code>' + escapeHtml(d.parent_branch) + '</code>';
+      },
+      (e) => {
+        const d = e as MergeTurnLimitEventData;
+        if (d.resolved_so_far && d.resolved_so_far.length > 0) {
+          return 'Resolved so far: ' + escapeHtml(d.resolved_so_far.map((r: { file: string }) => r.file).join(', '));
+        }
+        return null;
+      },
+    ],
+    showNote: false,
+  },
+  critic_turn_limit: {
+    title: '\u26A0\uFE0F Decision Required: Critic Turn Limit',
+    bodyFields: [
+      (e) => {
+        const d = e as CriticTurnLimitEventData;
+        return '<strong>' + escapeHtml(d.task_title || d.task_id) + '</strong>';
+      },
+      (e) => {
+        const d = e as CriticTurnLimitEventData;
+        return 'Turns: <strong>' + d.turns_taken + '</strong> / <strong>' + d.critic_max_turns + '</strong>';
+      },
+      (e) => {
+        const d = e as CriticTurnLimitEventData;
+        return 'Reviewed task: <code>' + escapeHtml(d.reviewed_task_id) + '</code>';
+      },
+    ],
+    showNote: false,
+  },
+};
+
 export class DecisionBanner {
   private element: HTMLElement | null = null;
   private titleEl: HTMLElement | null = null;
@@ -166,12 +325,9 @@ export class DecisionBanner {
    * Clean up event listeners and references
    */
   destroy(): void {
-    window.removeEventListener('decomposition_confirmation_required', this.handleDecompositionEvent);
-    window.removeEventListener('pr_approval_required', this.handlePREvent);
-    window.removeEventListener('turn_limit_reached', this.handleTurnLimitEvent);
-    window.removeEventListener('planning_turn_limit_reached', this.handlePlanningTurnLimitEvent);
-    window.removeEventListener('merge_conflict_resolution_turn_limit_reached', this.handleMergeTurnLimitEvent);
-    window.removeEventListener('critic_turn_limit_reached', this.handleCriticTurnLimitEvent);
+    for (const eventName of Object.keys(EVENT_NAME_TO_TYPE)) {
+      window.removeEventListener(eventName, this.handleGenericEvent);
+    }
 
     if (this.element && this.element.parentNode) {
       this.element.parentNode.removeChild(this.element);
@@ -189,12 +345,9 @@ export class DecisionBanner {
   // ============================================================================
 
   private setupEventListeners(): void {
-    window.addEventListener('decomposition_confirmation_required', this.handleDecompositionEvent);
-    window.addEventListener('pr_approval_required', this.handlePREvent);
-    window.addEventListener('turn_limit_reached', this.handleTurnLimitEvent);
-    window.addEventListener('planning_turn_limit_reached', this.handlePlanningTurnLimitEvent);
-    window.addEventListener('merge_conflict_resolution_turn_limit_reached', this.handleMergeTurnLimitEvent);
-    window.addEventListener('critic_turn_limit_reached', this.handleCriticTurnLimitEvent);
+    for (const eventName of Object.keys(EVENT_NAME_TO_TYPE)) {
+      window.addEventListener(eventName, this.handleGenericEvent);
+    }
   }
 
   private toggleCollapse(): void {
@@ -209,142 +362,42 @@ export class DecisionBanner {
   }
 
   /**
-   * Render banner content based on type. Each modal renders contextual body
-   * text and buttons driven by event.choices from the backend.
+   * Render banner content based on type using the data-driven BANNER_CONFIG.
    */
   private renderBannerContent(): void {
-    if (!this.titleEl || !this.bodyEl || !this.choicesEl) return;
+    if (!this.titleEl || !this.bodyEl || !this.choicesEl || !this.currentType || !this.currentEvent) return;
 
-    switch (this.currentType) {
-      case 'decomposition':
-        this.renderDecompositionBanner();
-        break;
-      case 'pr_approval':
-        this.renderPRApprovalBanner();
-        break;
-      case 'turn_limit':
-        this.renderTurnLimitBanner();
-        break;
-      case 'planning_turn_limit':
-        this.renderPlanningTurnLimitBanner();
-        break;
-      case 'merge_turn_limit':
-        this.renderMergeTurnLimitBanner();
-        break;
-      case 'critic_turn_limit':
-        this.renderCriticTurnLimitBanner();
-        break;
-      default: {
-        const _exhaustiveCheck: never = this.currentType;
-        throw new Error('Unknown decision banner type: ' + _exhaustiveCheck);
-      }
-    }
-  }
-
-  // ---- Decomposition ----
-
-  private renderDecompositionBanner(): void {
-    if (!this.titleEl || !this.bodyEl || !this.choicesEl || !this.currentEvent) return;
-
-    const event = this.currentEvent as DecompositionEventData;
-
-    this.titleEl.textContent = '\u26A0\uFE0F Decision Required: Task Decomposition';
-    this.bodyEl.innerHTML =
-      '<p>Agent wants to split <strong>' + escapeHtml(event.task_title || event.task_id) + '</strong> into subtasks.</p>' +
-      '<p>Depth: <strong>' + (event.current_depth ?? 0) + '</strong> / <strong>' + (event.allowed_depth ?? 3) + '</strong> allowed</p>';
-
-    this.requireTextForDeny = true;
-    this.pendingChoice = 'deny';
-
-    this.renderChoiceButtonsFromEvent(event.choices, 'deny');
-    this.showNoteInputInline('Please explain why you are denying this decomposition:');
-  }
-
-  // ---- PR Approval ----
-
-  private renderPRApprovalBanner(): void {
-    if (!this.titleEl || !this.bodyEl || !this.choicesEl || !this.currentEvent) return;
-
-    const event = this.currentEvent as PRApprovalEventData;
-
-    this.titleEl.textContent = '\u26A0\uFE0F Decision Required: Pull Request Approval';
-    this.bodyEl.innerHTML =
-      '<p><strong>' + escapeHtml(event.task_title || event.task_id) + '</strong></p>' +
-      '<p>Branch: <code>' + escapeHtml(event.branch) + '</code> &rarr; <code>' + escapeHtml(event.parent_branch) + '</code></p>' +
-      '<p>Repo: <code>' + escapeHtml(event.repo) + '</code></p>';
-
-    this.renderChoiceButtonsFromEvent(event.choices);
-  }
-
-  // ---- Turn Limit (generic - Coder, Writer) ----
-
-  private renderTurnLimitBanner(): void {
-    if (!this.titleEl || !this.bodyEl || !this.choicesEl || !this.currentEvent) return;
-
-    const event = this.currentEvent as TurnLimitEventData;
-
-    this.titleEl.textContent = '\u26A0\uFE0F Decision Required: Turn Limit Reached';
-    this.bodyEl.innerHTML =
-      '<p><strong>' + escapeHtml(event.task_title || event.task_id) + '</strong></p>' +
-      '<p>Role: ' + escapeHtml(event.role || 'unknown') + '</p>' +
-      '<p>Turns: <strong>' + event.turns_taken + '</strong> / <strong>' + event.turn_limit + '</strong></p>';
-
-    this.renderChoiceButtonsFromEvent(event.choices);
-  }
-
-  // ---- Planning Turn Limit (Manager) ----
-
-  private renderPlanningTurnLimitBanner(): void {
-    if (!this.titleEl || !this.bodyEl || !this.choicesEl || !this.currentEvent) return;
-
-    const event = this.currentEvent as PlanningTurnLimitEventData;
-
-    this.titleEl.textContent = '\u26A0\uFE0F Decision Required: Planning Turn Limit';
-    this.bodyEl.innerHTML =
-      '<p><strong>' + escapeHtml(event.task_title || event.task_id) + '</strong></p>' +
-      '<p>Turns: <strong>' + event.turns_taken + '</strong></p>';
-
-    this.renderChoiceButtonsFromEvent(event.choices);
-  }
-
-  // ---- Merge Turn Limit (Merge agent) ----
-
-  private renderMergeTurnLimitBanner(): void {
-    if (!this.titleEl || !this.bodyEl || !this.choicesEl || !this.currentEvent) return;
-
-    const event = this.currentEvent as MergeTurnLimitEventData;
-
-    let resolvedText = '';
-    if (event.resolved_so_far && event.resolved_so_far.length > 0) {
-      resolvedText = '<p>Resolved so far: ' + escapeHtml(
-        event.resolved_so_far.map((r: { file: string; resolution: string }) => r.file).join(', ')
-      ) + '</p>';
+    const config = BANNER_CONFIG[this.currentType];
+    if (!config) {
+      throw new Error('Unknown decision banner type: ' + this.currentType);
     }
 
-    this.titleEl.textContent = '\u26A0\uFE0F Decision Required: Merge Turn Limit';
-    this.bodyEl.innerHTML =
-      '<p><strong>' + escapeHtml(event.task_title || event.task_id) + '</strong></p>' +
-      '<p>Turns: <strong>' + event.turns_taken + '</strong></p>' +
-      '<p>Parent: <code>' + escapeHtml(event.parent_branch) + '</code></p>' +
-      resolvedText;
+    // Set title
+    this.titleEl.textContent = config.title;
 
-    this.renderChoiceButtonsFromEvent(event.choices);
-  }
+    // Build body HTML from configured fields
+    const event = this.currentEvent;
+    const bodyHtml = config.bodyFields
+      .map((field) => {
+        if (typeof field === 'string') return field;
+        const value = field(event);
+        return value != null ? '<p>' + value + '</p>' : '';
+      })
+      .filter(Boolean)
+      .join('');
+    this.bodyEl.innerHTML = bodyHtml;
 
-  // ---- Critic Turn Limit ----
-
-  private renderCriticTurnLimitBanner(): void {
-    if (!this.titleEl || !this.bodyEl || !this.choicesEl || !this.currentEvent) return;
-
-    const event = this.currentEvent as CriticTurnLimitEventData;
-
-    this.titleEl.textContent = '\u26A0\uFE0F Decision Required: Critic Turn Limit';
-    this.bodyEl.innerHTML =
-      '<p><strong>' + escapeHtml(event.task_title || event.task_id) + '</strong></p>' +
-      '<p>Turns: <strong>' + event.turns_taken + '</strong> / <strong>' + event.critic_max_turns + '</strong></p>' +
-      '<p>Reviewed task: <code>' + escapeHtml(event.reviewed_task_id) + '</code></p>';
-
-    this.renderChoiceButtonsFromEvent(event.choices);
+    // Render buttons and optional note input
+    const choices = this.currentEvent.choices;
+    if (config.showNote && config.denyChoiceValue) {
+      this.requireTextForDeny = true;
+      this.pendingChoice = config.denyChoiceValue;
+      this.renderChoiceButtonsFromEvent(choices, config.denyChoiceValue);
+      this.showNoteInputInline(config.noteLabel || 'Please explain your reason:');
+    } else {
+      this.requireTextForDeny = false;
+      this.renderChoiceButtonsFromEvent(choices);
+    }
   }
 
   // ---- Button rendering ----
@@ -369,7 +422,7 @@ export class DecisionBanner {
       } else {
         btn.addEventListener('click', () => this.submitDecision(choice.value));
       }
-      this.choicesEl.appendChild(btn);
+      this.choicesEl!.appendChild(btn);
     });
   }
 
@@ -377,8 +430,6 @@ export class DecisionBanner {
 
   private showNoteInputInline(label: string): void {
     if (!this.choicesEl) return;
-
-    this.pendingChoice = 'deny';
 
     const labelEl = document.createElement('label');
     labelEl.setAttribute('for', 'decision-banner-note');
@@ -430,9 +481,9 @@ export class DecisionBanner {
     submitBtn.textContent = 'Submit';
     submitBtn.addEventListener('click', () => this.handleNoteSubmit());
 
-    this.choicesEl.appendChild(labelEl);
-    this.choicesEl.appendChild(this.noteArea);
-    this.choicesEl.appendChild(submitBtn);
+    this.choicesEl!.appendChild(labelEl);
+    this.choicesEl!.appendChild(this.noteArea);
+    this.choicesEl!.appendChild(submitBtn);
 
     this.noteArea.focus();
   }
@@ -467,48 +518,20 @@ export class DecisionBanner {
     }
   }
 
-  // ---- Event handlers ----
+  // ---- Generic event handler ----
 
-  private handleDecompositionEvent = (e: Event): void => {
-    const event = e as CustomEvent;
-    if (event.detail) {
-      this.show('decomposition', event.detail);
-    }
-  };
+  private handleGenericEvent = (e: Event): void => {
+    const customEvent = e as CustomEvent;
+    if (!customEvent.detail) return;
 
-  private handlePREvent = (e: Event): void => {
-    const event = e as CustomEvent;
-    if (event.detail) {
-      this.show('pr_approval', event.detail);
+    const eventName = e.type;
+    const decisionType = EVENT_NAME_TO_TYPE[eventName];
+    if (!decisionType) {
+      console.warn('[DecisionBanner] Unknown event type:', eventName);
+      return;
     }
-  };
 
-  private handleTurnLimitEvent = (e: Event): void => {
-    const event = e as CustomEvent;
-    if (event.detail) {
-      this.show('turn_limit', event.detail);
-    }
-  };
-
-  private handlePlanningTurnLimitEvent = (e: Event): void => {
-    const event = e as CustomEvent;
-    if (event.detail) {
-      this.show('planning_turn_limit', event.detail);
-    }
-  };
-
-  private handleMergeTurnLimitEvent = (e: Event): void => {
-    const event = e as CustomEvent;
-    if (event.detail) {
-      this.show('merge_turn_limit', event.detail);
-    }
-  };
-
-  private handleCriticTurnLimitEvent = (e: Event): void => {
-    const event = e as CustomEvent;
-    if (event.detail) {
-      this.show('critic_turn_limit', event.detail);
-    }
+    this.show(decisionType, customEvent.detail);
   };
 
   // ---- API submission ----
@@ -517,17 +540,8 @@ export class DecisionBanner {
     if (!this.currentEvent) return;
     if (this.isSubmitting) return;
 
-    const taskId = (this.currentEvent as any).task_id;
-
-    const decisionTypeMap: Record<string, string> = {
-      decomposition: 'decomposition_confirmation_required',
-      pr_approval: 'pr_approval_required',
-      turn_limit: 'turn_limit_reached',
-      planning_turn_limit: 'planning_turn_limit_reached',
-      merge_turn_limit: 'merge_conflict_resolution_turn_limit_reached',
-      critic_turn_limit: 'critic_turn_limit_reached',
-    };
-    const apiDecisionType = (this.currentType && decisionTypeMap[this.currentType]) || 'unknown';
+    const taskId = (this.currentEvent as unknown as Record<string, unknown>).task_id as string;
+    const apiDecisionType = this.currentType ? TYPE_TO_EVENT_NAME[this.currentType] : 'unknown';
 
     this.isSubmitting = true;
 
@@ -555,7 +569,8 @@ export class DecisionBanner {
 
     let errorMessage = 'Failed to submit decision. Please try again.';
     if (error instanceof Error && 'detail' in error) {
-      errorMessage = (error as any).detail;
+      const detail = (error as Record<string, string | undefined>).detail;
+      if (detail) errorMessage = detail;
     } else if (error instanceof Error) {
       errorMessage = error.message;
     }
@@ -574,15 +589,17 @@ export class DecisionBanner {
     if (!this.choicesEl || !this.currentType || !this.currentEvent) return;
     this.choicesEl.innerHTML = '';
 
-    const choices = (this.currentEvent as any).choices;
+    const choices = (this.currentEvent as unknown as Record<string, unknown>).choices as Array<{ value: string; label: string; description?: string }> | undefined;
     if (choices && Array.isArray(choices)) {
-      const specialChoice = this.currentType === 'decomposition' ? 'deny' : undefined;
+      const config = BANNER_CONFIG[this.currentType];
+      const specialChoice: string | undefined = config?.denyChoiceValue;
       this.renderChoiceButtonsFromEvent(choices, specialChoice);
     }
 
     // For decomposition, re-add the textarea since innerHTML cleared it
     if (this.currentType === 'decomposition') {
-      this.showNoteInputInline('Please explain why you are denying this decomposition:');
+      const config = BANNER_CONFIG.decomposition;
+      this.showNoteInputInline(config.noteLabel || 'Please explain why you are denying this decomposition:');
     }
   }
 }

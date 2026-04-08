@@ -27,13 +27,13 @@
 
 /* Use CSS content for arrow characters based on data attribute */
 .sidebar-collapse[data-direction="collapse"]::after {
-  content: '«';
+  content: '\00AB';
   font-size: 18px;
   line-height: 1;
 }
 
 .sidebar-collapse[data-direction="expand"]::after {
-  content: '»';
+  content: '\00BB';
   font-size: 18px;
   line-height: 1;
 }
@@ -60,7 +60,7 @@
   align-items: center;
   justify-content: center;
   transition: color var(--transition-fast);
-  z-index: 100; /* Always on top of sidebar */
+  z-index: 100;
 }
 
 #sidebar-toggle:hover {
@@ -69,24 +69,8 @@
 
 /* Header - ensure it's always on top */
 #header {
-  z-index: 50; /* Above sidebar on mobile */
+  z-index: 50;
   position: relative;
-}
-
-/* On mobile, header should be fixed and always on top */
-@media (max-width: 600px) {
-  #header {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 100; /* Always on top of sidebar */
-  }
-  
-  /* Main content starts below header on mobile */
-  #main {
-    padding-top: var(--header-h);
-  }
 }
 
 /* Header */
@@ -122,25 +106,13 @@
   display: none;
 }
 
-/* Show mini logo on mobile, hide full logo */
-@media (max-width: 600px) {
-  .h-logo-full {
-    display: none;
-  }
-  
-  .h-logo-mini {
-    display: inline;
-    font-size: 16px;  /* Slightly larger for touch target */
-  }
-}
-
 .h-fields {
   display: flex;
   gap: 0;
   flex: 1;
   overflow: hidden;
   min-width: 0;
-  max-width: 60%;  /* Leave room for controls */
+  max-width: 60%;
 }
 
 .h-field {
@@ -212,7 +184,6 @@
 #sb-channels {
   flex: 1;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
 }
 
 .sb-section-label {
@@ -364,21 +335,95 @@
   min-width: 0;
 }
 
-/* Mobile responsive */
+/* ============================================================================
+   Mobile responsive — single consolidated @media (max-width: 600px) block
+   ============================================================================ */
 @media (max-width: 600px) {
+  /* Root variables */
   :root {
     --sidebar-w: 0px;
     --header-h: 48px;
   }
 
+  /* Header fixed on top */
+  #header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+  }
+
+  /* Main content starts below header */
+  #main {
+    padding-top: var(--header-h);
+    padding: var(--spacing-sm);
+  }
+
+  /* Logo: hide full, show mini */
+  .h-logo-full {
+    display: none;
+  }
+
+  .h-logo-mini {
+    display: inline;
+    font-size: 16px;
+  }
+
+  .h-logo {
+    padding-right: var(--spacing-sm);
+    border-right: none;
+    margin-right: 0;
+  }
+
+  /* Hide status field on mobile to make room for E-STOP */
+  .h-field {
+    display: none;
+  }
+
+  .h-field.h-always {
+    display: flex;
+  }
+
+  /* Hide connection label on mobile - just show dot */
+  #conn-label {
+    display: none;
+  }
+
+  /* Make E-STOP button priority - keep it visible */
+  #btn-kill {
+    font-size: 9px;
+    padding: var(--spacing-xs) 6px;
+    flex-shrink: 0;
+  }
+
+  /* Stop button can shrink slightly */
+  #btn-stop {
+    font-size: 8px;
+    padding: var(--spacing-xs) 4px;
+  }
+
+  /* Reduce connection indicator size */
+  #conn-dot {
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+  }
+
+  /* Ensure controls stay on one line */
+  #h-controls {
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+
   /* Mobile sidebar starts collapsed */
   #sidebar {
     position: fixed;
-    top: var(--header-h);  /* Start BELOW header */
+    top: var(--header-h);
     left: 0;
     width: 220px;
-    height: calc(100dvh - var(--header-h));  /* Full height minus header */
-    z-index: 1;  /* Below header */
+    height: calc(100dvh - var(--header-h));
+    z-index: 1;
     transform: translateX(-100%);
     transition: transform var(--transition-normal);
   }
@@ -388,52 +433,7 @@
     transform: translateX(0);
   }
 
-  /* Adjust header for mobile */
-  @media (max-width: 600px) {
-    .h-logo {
-      padding-right: var(--spacing-sm);
-      border-right: none;  /* Remove border on mobile */
-      margin-right: 0;
-    }
-    
-    /* Hide status field on mobile to make room for E-STOP */
-    .h-field {
-      display: none;
-    }
-    
-    /* Hide connection label on mobile - just show dot */
-    #conn-label {
-      display: none;
-    }
-    
-    /* Make E-STOP button priority - keep it visible */
-    #btn-kill {
-      font-size: 9px;
-      padding: var(--spacing-xs) 6px;
-      flex-shrink: 0;  /* Don't shrink */
-    }
-    
-    /* Stop button can shrink slightly */
-    #btn-stop {
-      font-size: 8px;
-      padding: var(--spacing-xs) 4px;
-    }
-    
-    /* Reduce connection indicator size */
-    #conn-dot {
-      width: 8px;
-      height: 8px;
-      flex-shrink: 0;
-    }
-    
-    /* Ensure controls stay on one line */
-    #h-controls {
-      flex-wrap: nowrap;
-      gap: 4px;
-    }
-  }
-
-  /* Desktop collapse button - inside sidebar header */
+  /* Sidebar header padding */
   .sidebar-header {
     padding: var(--spacing-sm);
   }
@@ -447,19 +447,6 @@
     display: none !important;
   }
 
-  .h-field {
-    display: none;
-  }
-
-  .h-field.h-always {
-    display: flex;
-  }
-
-  /* Main content adjustment for mobile */
-  #main {
-    padding: var(--spacing-sm);
-  }
-
   /* Ensure touch-friendly tap targets */
   .sb-item,
   .task-link,
@@ -471,6 +458,6 @@
 
   input, select, textarea {
     min-height: 44px;
-    font-size: 16px; /* Prevents zoom on iOS */
+    font-size: 16px;
   }
 }

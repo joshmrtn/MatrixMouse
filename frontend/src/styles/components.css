@@ -297,7 +297,6 @@
 #conversation-log {
   flex: 1;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
   padding: var(--spacing-sm) 0;
 }
 
@@ -384,7 +383,9 @@
   border-bottom-left-radius: var(--radius-sm);
 }
 
-.message-bubble.system {
+/* Shared styles for muted/system bubbles */
+.message-bubble.system,
+.message-bubble.thinking {
   align-self: center;
   background: var(--bg3);
   color: var(--text3);
@@ -394,12 +395,6 @@
 }
 
 .message-bubble.thinking {
-  align-self: center;
-  background: var(--bg3);
-  color: var(--text3);
-  font-size: 10px;
-  font-style: italic;
-  border: 1px dashed var(--border2);
   max-width: 95%;
 }
 
@@ -426,7 +421,9 @@
 }
 
 /* Loading and Error States */
-.loading-state {
+/* Shared muted text style for loading/empty states */
+.loading-state,
+.empty-message {
   padding: var(--spacing-lg);
   text-align: center;
   color: var(--text3);
@@ -434,12 +431,19 @@
   font-style: italic;
 }
 
+/* Shared empty message style — used across conversation, status page */
 .empty-message {
   padding: var(--spacing-lg);
   text-align: center;
   color: var(--text3);
   font-size: 11px;
   font-style: italic;
+}
+
+/* Status page variant: smaller font */
+.status-section-content .empty-message {
+  font-size: 10px;
+  padding: 0;
 }
 
 .error-message {
@@ -461,7 +465,9 @@
   font-family: var(--font-mono);
 }
 
-.retry-btn {
+/* Base retry button style — used across all components */
+.retry-btn,
+.blocker-retry-btn {
   background: var(--amber);
   color: #000;
   border: none;
@@ -476,8 +482,16 @@
   transition: background var(--transition-fast);
 }
 
-.retry-btn:hover {
+.retry-btn:hover,
+.blocker-retry-btn:hover {
   background: var(--amber2);
+}
+
+/* Blocker-specific: smaller padding for compact inline placement */
+.blocker-retry-btn {
+  padding: 2px 8px;
+  font-size: 9px;
+  flex-shrink: 0;
 }
 
 .message-content h1,
@@ -854,25 +868,9 @@
 
 .blockers-list .dependency-link {
   display: block;
-  padding: var(--spacing-xs) var(--spacing-sm);
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 10px;
-  color: var(--text);
-  text-decoration: none;
-  margin-right: 0;
-  margin-bottom: var(--spacing-xs);
-  transition: border-color var(--transition-fast), color var(--transition-fast);
-  font-family: var(--font-mono);
-  /* Allow link to grow to show more title text */
   width: 100%;
-}
-
-.blockers-list .dependency-link:hover {
-  border-color: var(--green2);
-  color: var(--green);
-  text-decoration: none;
+  margin-right: 0;
+  /* Inherits base .dependency-link styles; only block-level overrides here */
 }
 
 .blocker-id {
@@ -959,25 +957,6 @@
 
 .blocker-error-message {
   flex: 1;
-}
-
-.blocker-retry-btn {
-  background: var(--amber);
-  color: #000;
-  border: none;
-  padding: 2px 8px;
-  font-size: 9px;
-  font-weight: 700;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  flex-shrink: 0;
-  transition: background var(--transition-fast);
-}
-
-.blocker-retry-btn:hover {
-  background: var(--amber2);
 }
 
 .dep-id {
@@ -1185,11 +1164,7 @@
   padding-left: var(--spacing-md);
 }
 
-.empty-message {
-  font-size: 10px;
-  color: var(--text3);
-  font-style: italic;
-}
+/* .empty-message defined in shared section above */
 
 /* ============================================================================
    Tasks Page Component
@@ -1531,22 +1506,7 @@
   margin: 0 0 var(--spacing-sm) 0;
 }
 
-.retry-btn {
-  background: var(--bg2);
-  border: 1px solid var(--border2);
-  color: var(--text);
-  padding: var(--spacing-xs) var(--spacing-md);
-  font-family: var(--font-ui);
-  font-size: 10px;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: border-color var(--transition-fast), color var(--transition-fast);
-}
-
-.retry-btn:hover {
-  border-color: var(--green2);
-  color: var(--green);
-}
+/* .retry-btn defined in shared section above */
 
 /* ============================================================================
    Settings Page Component

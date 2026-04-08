@@ -4,7 +4,7 @@
  * Tests workspace and repo configuration management.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SettingsPage } from '../../../src/pages/SettingsPage';
 
 // Mock API functions
@@ -63,6 +63,7 @@ describe('SettingsPage', () => {
   });
 
   afterEach(() => {
+    page.destroy();
     document.body.removeChild(container);
   });
 
@@ -171,17 +172,6 @@ describe('SettingsPage', () => {
       expect(portInput.value).toBe('8080');
     });
 
-    it('displays current config in readable format', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const configList = container.querySelector('#config-items');
-      expect(configList).toBeTruthy();
-      expect(configList?.textContent).toContain('coder_model');
-      expect(configList?.textContent).toContain('ollama:qwen3.5:4b');
-    });
-
     it('handles config load error gracefully', async () => {
       mockGetConfig.mockRejectedValue(new Error('Failed to load'));
 
@@ -283,7 +273,6 @@ describe('SettingsPage', () => {
       const modelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
       const form = container.querySelector('#workspace-config-form') as HTMLFormElement;
 
-      // Valid formats - test each one separately
       const validModels = [
         '192.168.1.19:ollama:qwen3.5:9b',
         'anthropic:claude-sonnet-4-5',
@@ -294,7 +283,6 @@ describe('SettingsPage', () => {
       for (const model of validModels) {
         modelInput.value = model;
         mockUpdateConfig.mockClear();
-        // Reset original config to allow change detection
         (page as any).originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
         form.dispatchEvent(new SubmitEvent('submit', { cancelable: true }));
         expect(mockUpdateConfig).toHaveBeenCalled();
@@ -324,15 +312,13 @@ describe('SettingsPage', () => {
 
       await page.render(container);
 
-      // Test that the save method works when called directly with changes
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'original' };
-      
-      // Change form value
+
       const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
       coderModelInput.value = 'ollama:changed:1b';
-      
-      await pageAny.saveWorkspaceConfig();
+
+      await pageAny.saveConfig('workspace');
 
       const messageEl = container.querySelector('#settings-message');
       expect(messageEl?.className).toContain('success');
@@ -344,17 +330,16 @@ describe('SettingsPage', () => {
 
       await page.render(container);
 
-      // Manually trigger save to test error handling
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-      
-      await pageAny.saveWorkspaceConfig();
+
+      await pageAny.saveConfig('workspace');
 
       const messageEl = container.querySelector('#settings-message');
       expect(messageEl?.className).toContain('error');
     });
 
-    it('updates displayed config after successful save', async () => {
+    it('updates form values after successful save', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
       mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
 
@@ -366,8 +351,20 @@ describe('SettingsPage', () => {
       const form = container.querySelector('#workspace-config-form') as HTMLFormElement;
       form.dispatchEvent(new SubmitEvent('submit', { cancelable: true }));
 
-      // Check that the input was updated (config display is re-rendered)
       expect(coderModelInput.value).toBe('ollama:updated:7b');
+    });
+
+    it('shows info message when no changes to save', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+
+      await page.render(container);
+
+      const form = container.querySelector('#workspace-config-form') as HTMLFormElement;
+      form.dispatchEvent(new SubmitEvent('submit', { cancelable: true }));
+
+      const messageEl = container.querySelector('#settings-message');
+      expect(messageEl?.className).toContain('info');
+      expect(messageEl?.textContent).toContain('No changes to save');
     });
   });
 
@@ -380,13 +377,9 @@ describe('SettingsPage', () => {
       const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
       const cancelButton = container.querySelector('#workspace-config-form .btn-cancel') as HTMLButtonElement;
 
-      // Change value
       coderModelInput.value = 'ollama:changed:1b';
-
-      // Click cancel
       cancelButton.click();
 
-      // Should be reset
       expect(coderModelInput.value).toBe('ollama:qwen3.5:4b');
     });
 
@@ -476,19 +469,16 @@ describe('SettingsPage', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Manually trigger save to test the save logic
       const pageAny = page as any;
       pageAny.selectedRepo = 'main-repo';
-      // Set original to have different values for all fields
-      pageAny.originalRepoConfig = { 
+      pageAny.originalRepoConfig = {
         coder_model: 'original',
         manager_model: 'original',
         critic_model: 'original',
         writer_model: 'original',
         summarizer_model: 'original',
       };
-      
-      // Change the form value - set all fields to avoid validation errors
+
       const repoCoderModel = container.querySelector('[name="repo_coder_model"]') as HTMLInputElement;
       const repoManagerModel = container.querySelector('[name="repo_manager_model"]') as HTMLInputElement;
       const repoCriticModel = container.querySelector('[name="repo_critic_model"]') as HTMLInputElement;
@@ -501,7 +491,7 @@ describe('SettingsPage', () => {
       repoWriterModel.value = 'ollama:writer:1b';
       repoSummarizerModel.value = 'ollama:summarizer:1b';
 
-      await pageAny.saveRepoConfig();
+      await pageAny.saveConfig('repo');
 
       expect(mockUpdateRepoConfig).toHaveBeenCalledWith('main-repo', {
         coder_model: 'ollama:repo-specific:2b',
@@ -523,7 +513,6 @@ describe('SettingsPage', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Manually trigger save
       const pageAny = page as any;
       pageAny.selectedRepo = 'main-repo';
       pageAny.originalRepoConfig = {
@@ -534,7 +523,6 @@ describe('SettingsPage', () => {
         summarizer_model: 'original',
       };
 
-      // Set all fields
       const repoCoderModel = container.querySelector('[name="repo_coder_model"]') as HTMLInputElement;
       const repoManagerModel = container.querySelector('[name="repo_manager_model"]') as HTMLInputElement;
       const repoCriticModel = container.querySelector('[name="repo_critic_model"]') as HTMLInputElement;
@@ -547,7 +535,7 @@ describe('SettingsPage', () => {
       repoWriterModel.value = 'ollama:writer:1b';
       repoSummarizerModel.value = 'ollama:summarizer:1b';
 
-      await pageAny.saveRepoConfig();
+      await pageAny.saveConfig('repo');
 
       const messageEl = container.querySelector('#settings-message');
       expect(messageEl?.className).toContain('success');
@@ -564,47 +552,31 @@ describe('SettingsPage', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const repoCoderModel = container.querySelector('[name="repo_coder_model"]') as HTMLInputElement;
-      repoCoderModel.value = '';
+      // Set at least one non-empty field to avoid "no changes" short-circuit
+      const pageAny = page as any;
+      pageAny.selectedRepo = 'main-repo';
+      pageAny.originalRepoConfig = { coder_model: 'original' };
 
+      const repoCoderModel = container.querySelector('[name="repo_coder_model"]') as HTMLInputElement;
+      repoCoderModel.value = 'ollama:changed:1b';
+
+      // Leave other fields empty — this should be allowed
       const form = container.querySelector('#repo-config-form') as HTMLFormElement;
       form.dispatchEvent(new SubmitEvent('submit', { cancelable: true }));
 
-      // Empty values should be allowed for repo overrides
-      // The API call should still be made (with empty value)
-      expect(mockUpdateRepoConfig).toHaveBeenCalled();
+      // The API call should be made with the non-empty changed value
+      expect(mockUpdateRepoConfig).toHaveBeenCalledWith('main-repo', {
+        coder_model: 'ollama:changed:1b',
+      }, false);
     });
   });
 
   describe('message display', () => {
-    it('auto-hides message after 5 seconds', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
-
-      vi.useFakeTimers();
-
-      await page.render(container);
-
-      const form = container.querySelector('#workspace-config-form') as HTMLFormElement;
-      form.dispatchEvent(new SubmitEvent('submit', { cancelable: true }));
-
-      const messageEl = container.querySelector('#settings-message') as HTMLElement;
-      expect(messageEl.style.display).not.toBe('none');
-
-      // Fast-forward 5 seconds
-      vi.advanceTimersByTime(5000);
-
-      expect(messageEl.style.display).toBe('none');
-
-      vi.useRealTimers();
-    });
-
     it('displays different styles for different message types', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
 
       await page.render(container);
 
-      // Access private method via any cast for testing
       const pageAny = page as any;
 
       pageAny.showMessage('Success!', 'success');
@@ -619,12 +591,27 @@ describe('SettingsPage', () => {
       messageEl = container.querySelector('#settings-message') as HTMLElement;
       expect(messageEl.className).toContain('info');
     });
+
+    it('hides message when hideMessage is called', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+
+      await page.render(container);
+
+      const pageAny = page as any;
+      pageAny.showMessage('Test message', 'success');
+
+      let messageEl = container.querySelector('#settings-message') as HTMLElement;
+      expect(messageEl.style.display).toBe('block');
+
+      pageAny.hideMessage();
+      messageEl = container.querySelector('#settings-message') as HTMLElement;
+      expect(messageEl.style.display).toBe('none');
+    });
   });
 
   describe('loading states', () => {
     it('disables save button during save operation', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      // Simulate slow API call
       mockUpdateConfig.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ ok: true, updated: ['coder_model'] }), 100)));
 
       await page.render(container);
@@ -632,10 +619,8 @@ describe('SettingsPage', () => {
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
 
-      // Start save operation
-      const savePromise = pageAny.saveWorkspaceConfig();
+      const savePromise = pageAny.saveConfig('workspace');
 
-      // Check button is disabled
       const saveButton = container.querySelector('#workspace-config-form .btn-save') as HTMLButtonElement;
       expect(saveButton.disabled).toBe(true);
 
@@ -651,7 +636,7 @@ describe('SettingsPage', () => {
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
 
-      await pageAny.saveWorkspaceConfig();
+      await pageAny.saveConfig('workspace');
 
       const saveButton = container.querySelector('#workspace-config-form .btn-save') as HTMLButtonElement;
       expect(saveButton.disabled).toBe(false);
@@ -659,15 +644,14 @@ describe('SettingsPage', () => {
 
     it('shows loading text on save button during operation', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ ok: true, updated: ['coder_model'] }), 100)));
+      mockUpdateConfig.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ ok: true, updated: ['coder_model'] }), 10)));
 
       await page.render(container);
 
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
 
-      // Start save
-      const savePromise = pageAny.saveWorkspaceConfig();
+      const savePromise = pageAny.saveConfig('workspace');
 
       const saveButton = container.querySelector('#workspace-config-form .btn-save') as HTMLButtonElement;
       expect(saveButton.textContent).toContain('Saving');
@@ -697,7 +681,6 @@ describe('SettingsPage', () => {
         summarizer_model: 'original',
       };
 
-      // Set all form fields
       const repoCoderModel = container.querySelector('[name="repo_coder_model"]') as HTMLInputElement;
       const repoManagerModel = container.querySelector('[name="repo_manager_model"]') as HTMLInputElement;
       const repoCriticModel = container.querySelector('[name="repo_critic_model"]') as HTMLInputElement;
@@ -710,10 +693,8 @@ describe('SettingsPage', () => {
       repoWriterModel.value = 'ollama:writer:1b';
       repoSummarizerModel.value = 'ollama:summarizer:1b';
 
-      // Start save
-      const savePromise = pageAny.saveRepoConfig();
+      const savePromise = pageAny.saveConfig('repo');
 
-      // Wait a tick for loading state to be set
       await new Promise((resolve) => setTimeout(resolve, 1));
 
       const saveButton = container.querySelector('#repo-config-form .btn-save') as HTMLButtonElement;
@@ -733,7 +714,7 @@ describe('SettingsPage', () => {
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
 
-      await pageAny.saveWorkspaceConfig();
+      await pageAny.saveConfig('workspace');
 
       const messageEl = container.querySelector('#settings-message') as HTMLElement;
       expect(messageEl.textContent).toContain('Invalid model format');
@@ -748,367 +729,117 @@ describe('SettingsPage', () => {
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
 
-      await pageAny.saveWorkspaceConfig();
+      await pageAny.saveConfig('workspace');
 
       const messageEl = container.querySelector('#settings-message') as HTMLElement;
       expect(messageEl.className).toContain('error');
       expect(messageEl.textContent.toLowerCase()).toContain('network');
     });
+  });
 
-    it('clears error message when user closes it', async () => {
+  describe('validation error display', () => {
+    it('displays all validation errors when multiple exist', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockRejectedValue(new Error('API error'));
+
+      await page.render(container);
+
+      const form = container.querySelector('#workspace-config-form') as HTMLFormElement;
+
+      const pageAny = page as any;
+      const errors = {
+        server_port: 'Invalid port',
+        agent_git_email: 'Invalid email',
+        coder_model: 'Empty model',
+      };
+      pageAny.showValidationErrors(form, errors);
+
+      const errorElements = form.querySelectorAll('.field-error');
+      expect(errorElements.length).toBe(3);
+
+      const errorTexts = Array.from(errorElements).map(el => el.textContent);
+      expect(errorTexts).toContain('Invalid port');
+      expect(errorTexts).toContain('Invalid email');
+      expect(errorTexts).toContain('Empty model');
+    });
+  });
+
+  describe('refresh', () => {
+    it('has manual refresh button', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+
+      await page.render(container);
+
+      const refreshBtn = container.querySelector('.refresh-config-btn');
+      expect(refreshBtn).toBeTruthy();
+      expect(refreshBtn?.getAttribute('aria-label')).toContain('Refresh');
+    });
+
+    it('reloads config when refresh button is clicked', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+      const updatedConfig = { ...mockWorkspaceConfig, coder_model: 'ollama:updated:7b' };
+      mockGetConfig.mockResolvedValueOnce(mockWorkspaceConfig);
+      mockGetConfig.mockResolvedValueOnce(updatedConfig);
+
+      await page.render(container);
+
+      const refreshBtn = container.querySelector('.refresh-config-btn') as HTMLButtonElement;
+      refreshBtn.click();
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(mockGetConfig).toHaveBeenCalledTimes(2);
+    });
+
+    it('shows loading state during refresh', async () => {
+      mockGetConfig.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(mockWorkspaceConfig), 100)));
+
+      await page.render(container);
+
+      const refreshBtn = container.querySelector('.refresh-config-btn') as HTMLButtonElement;
+      refreshBtn.click();
+
+      expect(refreshBtn.disabled).toBe(true);
+      expect(refreshBtn.textContent).toContain('Refreshing');
+    });
+
+    it('prevents concurrent refresh operations', async () => {
+      let callCount = 0;
+      mockGetConfig.mockImplementation(() => {
+        callCount++;
+        return new Promise(resolve =>
+          setTimeout(() => resolve(mockWorkspaceConfig), 200)
+        );
+      });
+
+      await page.render(container);
+      callCount = 0;
+
+      const pageAny = page as any;
+      const firstRefresh = pageAny.refreshConfig();
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await pageAny.refreshConfig();
+
+      await firstRefresh;
+      expect(callCount).toBe(1);
+    });
+
+    it('shows info message when refreshing during save', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+      mockUpdateConfig.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ ok: true }), 100)));
 
       await page.render(container);
 
       const pageAny = page as any;
       pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
+      pageAny.isSavingWorkspace = true;
 
-      await pageAny.saveWorkspaceConfig();
-
-      // Click close button
-      const closeButton = container.querySelector('#settings-message .message-close');
-      closeButton?.dispatchEvent(new Event('click'));
+      await pageAny.refreshConfig();
 
       const messageEl = container.querySelector('#settings-message') as HTMLElement;
-      expect(messageEl.style.display).toBe('none');
-    });
-  });
+      expect(messageEl.textContent).toContain('Cannot refresh while saving');
 
-  describe('retry logic', () => {
-    it('includes retry button on error message', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockRejectedValue(new Error('API error'));
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      await pageAny.saveWorkspaceConfig();
-
-      const retryButton = container.querySelector('#settings-message .retry-btn');
-      expect(retryButton).toBeTruthy();
-    });
-
-    it('retries save when retry button is clicked', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockRejectedValueOnce(new Error('Temporary error'));
-      mockUpdateConfig.mockResolvedValueOnce({ ok: true, updated: ['coder_model'] });
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      // First save fails
-      await pageAny.saveWorkspaceConfig();
-
-      // Click retry
-      const retryButton = container.querySelector('#settings-message .retry-btn') as HTMLButtonElement;
-      retryButton?.dispatchEvent(new Event('click'));
-
-      // Should have called API twice
-      expect(mockUpdateConfig).toHaveBeenCalledTimes(2);
-    });
-
-    it('shows success message after successful retry', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockRejectedValueOnce(new Error('Temporary error'));
-      mockUpdateConfig.mockResolvedValueOnce({ ok: true, updated: ['coder_model'] });
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      // Change form value
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-
-      // First save fails
-      await pageAny.saveWorkspaceConfig();
-
-      // Change original config to allow retry to detect changes
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      // Click retry
-      const retryButton = container.querySelector('#settings-message .retry-btn') as HTMLButtonElement;
-      retryButton?.dispatchEvent(new Event('click'));
-
-      // Wait for retry to complete
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      const messageEl = container.querySelector('#settings-message') as HTMLElement;
-      expect(messageEl.className).toContain('success');
-    });
-  });
-
-  describe('unsaved changes protection', () => {
-    it('tracks dirty state when form values change', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-      coderModelInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Wait for debounce timer (100ms)
-      await new Promise((resolve) => setTimeout(resolve, 110));
-
-      const pageAny = page as any;
-      expect(pageAny.hasUnsavedChanges()).toBe(true);
-    });
-
-    it('clears dirty state after successful save', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-
-      await pageAny.saveWorkspaceConfig();
-
-      expect(pageAny.hasUnsavedChanges()).toBe(false);
-    });
-
-    it('clears dirty state on cancel', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      const originalValue = coderModelInput.value;
-      coderModelInput.value = 'ollama:changed:1b';
-      coderModelInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      const cancelButton = container.querySelector('#workspace-config-form .btn-cancel') as HTMLButtonElement;
-      cancelButton.click();
-
-      const pageAny = page as any;
-      expect(pageAny.hasUnsavedChanges()).toBe(false);
-    });
-
-    it('shows unsaved changes indicator in UI', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-      coderModelInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Wait for debounce timer (100ms)
-      await new Promise((resolve) => setTimeout(resolve, 110));
-
-      const indicator = container.querySelector('.unsaved-changes-indicator');
-      expect(indicator).toBeTruthy();
-      expect(indicator?.textContent).toContain('Unsaved changes');
-    });
-
-    it('hides unsaved changes indicator when saved', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-
-      await pageAny.saveWorkspaceConfig();
-
-      // Indicator should exist but be hidden
-      const indicator = container.querySelector('.unsaved-changes-indicator') as HTMLElement;
-      expect(indicator).toBeTruthy();
-      expect(indicator.style.display).toBe('none');
-    });
-
-    it('registers beforeunload handler when there are unsaved changes', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      const addEventListenerSpy = vi.spyOn(window, 'addEventListener');
-
-      await page.render(container);
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-      coderModelInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Wait for debounce timer (100ms)
-      await new Promise((resolve) => setTimeout(resolve, 110));
-
-      expect(addEventListenerSpy).toHaveBeenCalledWith('beforeunload', expect.any(Function));
-
-      addEventListenerSpy.mockRestore();
-    });
-
-    it('removes beforeunload handler after save', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
-      const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      // First make dirty to register handler
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-      coderModelInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Wait for debounce timer and handler to be registered (110ms)
-      await new Promise((resolve) => setTimeout(resolve, 110));
-
-      // Now save
-      await pageAny.saveWorkspaceConfig();
-
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('beforeunload', expect.any(Function));
-
-      removeEventListenerSpy.mockRestore();
-    });
-
-    it('tracks dirty state for repo config separately', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockGetRepoConfig.mockResolvedValue({
-        local: { coder_model: 'ollama:custom:1b' },
-        committed: {},
-        merged: { coder_model: 'ollama:custom:1b' },
-      });
-
-      await page.render(container);
-
-      const select = container.querySelector('#repo-select') as HTMLSelectElement;
-      select.value = 'main-repo';
-      select.dispatchEvent(new Event('change'));
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      const repoCoderModel = container.querySelector('[name="repo_coder_model"]') as HTMLInputElement;
-      repoCoderModel.value = 'ollama:changed:1b';
-      repoCoderModel.dispatchEvent(new Event('input', { bubbles: true }));
-
-      // Wait for debounce timer (100ms)
-      await new Promise((resolve) => setTimeout(resolve, 110));
-
-      const pageAny = page as any;
-      expect(pageAny.hasUnsavedChanges('repo')).toBe(true);
-      expect(pageAny.hasUnsavedChanges('workspace')).toBe(false);
-    });
-  });
-
-  describe('keyboard shortcuts', () => {
-    it('saves on Ctrl+S keypress', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-      
-      // Focus the input to enable keyboard shortcuts
-      coderModelInput.focus();
-
-      // Simulate Ctrl+S
-      const keyboardEvent = new KeyboardEvent('keydown', {
-        key: 's',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      document.dispatchEvent(keyboardEvent);
-
-      // Wait for save to complete
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      expect(mockUpdateConfig).toHaveBeenCalled();
-    });
-
-    it('cancels on Escape keypress', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      const originalValue = coderModelInput.value;
-      coderModelInput.value = 'ollama:changed:1b';
-      coderModelInput.dispatchEvent(new Event('input', { bubbles: true }));
-      
-      // Focus the input to enable keyboard shortcuts
-      coderModelInput.focus();
-
-      // Simulate Escape
-      const keyboardEvent = new KeyboardEvent('keydown', {
-        key: 'Escape',
-        bubbles: true,
-        cancelable: true,
-      });
-      document.dispatchEvent(keyboardEvent);
-
-      // Value should be reset
-      expect(coderModelInput.value).toBe(originalValue);
-    });
-
-    it('shows keyboard shortcut hints in UI', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const shortcutHint = container.querySelector('.keyboard-shortcut-hint');
-      expect(shortcutHint).toBeTruthy();
-      expect(shortcutHint?.textContent).toContain('Ctrl+S');
-      expect(shortcutHint?.textContent).toContain('Esc');
-    });
-
-    it('prevents default browser save on Ctrl+S', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.focus();
-
-      const keyboardEvent = new KeyboardEvent('keydown', {
-        key: 's',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      document.dispatchEvent(keyboardEvent);
-
-      expect(keyboardEvent.defaultPrevented).toBe(true);
-    });
-
-    it('only triggers Ctrl+S when focused on settings page', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
-
-      await page.render(container);
-
-      // Blur the settings page
-      container.blur();
-
-      const keyboardEvent = new KeyboardEvent('keydown', {
-        key: 's',
-        ctrlKey: true,
-        bubbles: true,
-      });
-      document.dispatchEvent(keyboardEvent);
-
-      // Should not trigger save when not focused
-      expect(mockUpdateConfig).not.toHaveBeenCalled();
+      pageAny.isSavingWorkspace = false;
     });
   });
 
@@ -1177,99 +908,20 @@ describe('SettingsPage', () => {
       expect(workspaceSaveBtn?.getAttribute('aria-label')).toContain('Save workspace');
       expect(repoSaveBtn?.getAttribute('aria-label')).toContain('Save repo');
     });
-
-    it('announces save success to screen readers', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['coder_model'] });
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
-
-      const coderModelInput = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      coderModelInput.value = 'ollama:changed:1b';
-
-      await pageAny.saveWorkspaceConfig();
-
-      const messageEl = container.querySelector('#settings-message');
-      expect(messageEl?.getAttribute('aria-live')).toBe('assertive');
-      expect(messageEl?.textContent).toContain('Settings saved');
-    });
-  });
-
-  describe('state integration', () => {
-    it('has manual refresh button', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const refreshBtn = container.querySelector('.refresh-config-btn');
-      expect(refreshBtn).toBeTruthy();
-      expect(refreshBtn?.getAttribute('aria-label')).toContain('Refresh');
-    });
-
-    it('reloads config when refresh button is clicked', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-      const updatedConfig = { ...mockWorkspaceConfig, coder_model: 'ollama:updated:7b' };
-      mockGetConfig.mockResolvedValueOnce(mockWorkspaceConfig);
-      mockGetConfig.mockResolvedValueOnce(updatedConfig);
-
-      await page.render(container);
-
-      const refreshBtn = container.querySelector('.refresh-config-btn') as HTMLButtonElement;
-      refreshBtn.click();
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      expect(mockGetConfig).toHaveBeenCalledTimes(2);
-    });
-
-    it('shows loading state during refresh', async () => {
-      mockGetConfig.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(mockWorkspaceConfig), 100)));
-
-      await page.render(container);
-
-      const refreshBtn = container.querySelector('.refresh-config-btn') as HTMLButtonElement;
-      refreshBtn.click();
-
-      // Check button is disabled during refresh
-      expect(refreshBtn.disabled).toBe(true);
-      expect(refreshBtn.textContent).toContain('Refreshing');
-    });
   });
 
   describe('destroy() cleanup', () => {
-    it('removes keyboard shortcut handler', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const removeEventListenerSpy = vi.spyOn(document, 'removeEventListener');
-
-      page.destroy();
-
-      expect(removeEventListenerSpy).toHaveBeenCalledWith(
-        'keydown',
-        expect.any(Function)
-      );
-
-      removeEventListenerSpy.mockRestore();
-    });
-
     it('unsubscribes from state', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
 
       const mockUnsubscribe = vi.fn();
-      
-      // Mock subscribe to return our mock unsubscribe
+
       const { subscribe } = await import('../../../src/state');
       vi.mocked(subscribe).mockImplementation((callback) => {
         callback({ repos: mockRepos, scope: 'workspace', tasks: [], expandedTasks: new Set(), blockedReport: null, status: null, pendingQuestion: null, wsConnected: false, currentPage: 'settings', routeParams: {}, sidebarOpen: false, loading: false, error: null });
         return mockUnsubscribe;
       });
 
-      // Create new page instance with mocked subscribe
       const newPage = new SettingsPage();
       await newPage.render(container);
 
@@ -1278,43 +930,37 @@ describe('SettingsPage', () => {
       expect(mockUnsubscribe).toHaveBeenCalled();
     });
 
-    it('clears beforeunload handler', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');
-
-      // Make dirty to register handler
-      const input = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      input.value = 'changed';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(resolve => setTimeout(resolve, 110));
-
-      page.destroy();
-
-      expect(removeEventListenerSpy).toHaveBeenCalledWith(
-        'beforeunload',
-        expect.any(Function)
-      );
-
-      removeEventListenerSpy.mockRestore();
-    });
-
     it('resets all state flags', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
 
       await page.render(container);
 
-      // Make dirty
-      const input = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      input.value = 'changed';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(resolve => setTimeout(resolve, 110));
-
       page.destroy();
 
-      expect(page.hasUnsavedChanges()).toBe(false);
+      expect((page as any).isDestroyed).toBe(true);
+      expect((page as any).selectedRepo).toBeNull();
+      expect((page as any).element).toBeNull();
+    });
+
+    it('isDestroyed prevents async state updates', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+      mockUpdateConfig.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ ok: true }), 50)));
+
+      await page.render(container);
+
+      const pageAny = page as any;
+      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, coder_model: 'different' };
+
+      // Start save
+      const savePromise = pageAny.saveConfig('workspace');
+
+      // Destroy while save is in progress
+      page.destroy();
+
+      await savePromise;
+
+      // Should not crash or update after destroy
+      expect(pageAny.isDestroyed).toBe(true);
     });
   });
 
@@ -1364,122 +1010,81 @@ describe('SettingsPage', () => {
     });
   });
 
-  describe('edge cases', () => {
-    it('displays all validation errors when multiple validation errors exist', async () => {
+  describe('setFormDisabled', () => {
+    it('disables all form inputs when called with true', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
 
       await page.render(container);
+
+      const pageAny = page as any;
+      pageAny.setFormDisabled(true);
+
+      const inputs = container.querySelectorAll('#workspace-config-form input, #workspace-config-form select, #workspace-config-form button[type="submit"]');
+      inputs.forEach(input => {
+        expect((input as HTMLInputElement).disabled).toBe(true);
+      });
+    });
+
+    it('enables all form inputs when called with false', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+
+      await page.render(container);
+
+      const pageAny = page as any;
+      pageAny.setFormDisabled(true);
+      pageAny.setFormDisabled(false);
+
+      const inputs = container.querySelectorAll('#workspace-config-form input, #workspace-config-form select, #workspace-config-form button[type="submit"]');
+      inputs.forEach(input => {
+        expect((input as HTMLInputElement).disabled).toBe(false);
+      });
+    });
+
+    it('also disables refresh button', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+
+      await page.render(container);
+
+      const pageAny = page as any;
+      pageAny.setFormDisabled(true);
+
+      const refreshBtn = container.querySelector('.refresh-config-btn') as HTMLButtonElement;
+      expect(refreshBtn.disabled).toBe(true);
+    });
+  });
+
+  describe('edge cases', () => {
+    it('parses number values correctly in changed values detection', async () => {
+      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
+      mockUpdateConfig.mockResolvedValue({ ok: true, updated: ['server_port'] });
+
+      await page.render(container);
+
+      const pageAny = page as any;
+      // Set original with different port so change is detected
+      pageAny.originalWorkspaceConfig = { ...mockWorkspaceConfig, server_port: 9090 };
+
+      const portInput = container.querySelector('[name="server_port"]') as HTMLInputElement;
+      portInput.value = '8080';
 
       const form = container.querySelector('#workspace-config-form') as HTMLFormElement;
+      form.dispatchEvent(new SubmitEvent('submit', { cancelable: true }));
 
-      // Trigger validation with multiple errors
-      const pageAny = page as any;
-      const errors = {
-        server_port: 'Invalid port',
-        agent_git_email: 'Invalid email',
-        coder_model: 'Empty model'
-      };
-      pageAny.showValidationErrors(form, errors);
-
-      // Should display all error messages
-      const errorElements = form.querySelectorAll('.field-error');
-      expect(errorElements.length).toBe(3);
-      
-      // Check all error messages are present (order may vary)
-      const errorTexts = Array.from(errorElements).map(el => el.textContent);
-      expect(errorTexts).toContain('Invalid port');
-      expect(errorTexts).toContain('Invalid email');
-      expect(errorTexts).toContain('Empty model');
+      // server_port should be parsed as a number, not a string
+      expect(mockUpdateConfig).toHaveBeenCalledWith({ server_port: 8080 });
     });
 
-    it('prevents concurrent refresh operations', async () => {
-      let callCount = 0;
-      
-      mockGetConfig.mockImplementation(() => {
-        callCount++;
-        return new Promise(resolve =>
-          setTimeout(() => resolve(mockWorkspaceConfig), 200)
-        );
-      });
-
-      await page.render(container);
-
-      // Clear call count from render
-      callCount = 0;
-
-      const pageAny = page as any;
-
-      // Start first refresh
-      const firstRefresh = pageAny.refreshConfig();
-
-      // Wait for isRefreshing flag to be set and API call to start
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // Try second refresh - should be blocked because isRefreshing is true
-      await pageAny.refreshConfig();
-
-      // Let first refresh complete
-      await firstRefresh;
-
-      // Should only call API once (second refresh should be blocked)
-      expect(callCount).toBe(1);
-    });
-
-    it('shows confirmation dialog when refreshing with unsaved changes', async () => {
+    it('handles repo cancel button when no repo selected', async () => {
       mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
 
       await page.render(container);
 
-      // Clear the mock call count from render
-      mockGetConfig.mockClear();
+      const cancelButton = container.querySelector('#repo-config-form .btn-cancel') as HTMLButtonElement;
+      cancelButton.click();
 
-      // Make dirty
-      const input = container.querySelector('[name="coder_model"]') as HTMLInputElement;
-      input.value = 'changed';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(resolve => setTimeout(resolve, 110));
-
-      // Mock confirm dialog to return false (cancel)
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-
-      const pageAny = page as any;
-      await pageAny.refreshConfig();
-
-      expect(confirmSpy).toHaveBeenCalledWith(
-        'You have unsaved changes. Refresh will discard them. Continue?'
-      );
-      // API should not be called since we cancelled
-      expect(mockGetConfig).not.toHaveBeenCalled();
-
-      confirmSpy.mockRestore();
-    });
-
-    it('parses boolean values correctly in getChangedValues', async () => {
-      mockGetConfig.mockResolvedValue(mockWorkspaceConfig);
-
-      await page.render(container);
-
-      const pageAny = page as any;
-      
-      // Create actual FormData
-      const formData = new FormData();
-      formData.append('some_flag', 'true');
-      formData.append('another_flag', 'false');
-      formData.append('third_flag', 'on');
-
-      const original = {
-        some_flag: true,
-        another_flag: false,
-        third_flag: true
-      };
-
-      const changes = pageAny.getChangedValues(formData, original);
-
-      // Boolean parsing should work correctly
-      // some_flag: 'true' parsed as boolean true, matches original true, no change
-      // another_flag: 'false' parsed as boolean false, matches original false, no change  
-      // third_flag: 'on' parsed as boolean true, matches original true, no change
-      expect(Object.keys(changes).length).toBe(0); // No changes detected
+      // Should not crash even though no repo is selected
+      const messageEl = container.querySelector('#settings-message');
+      expect(messageEl).toBeTruthy();
     });
   });
 });

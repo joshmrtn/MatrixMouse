@@ -74,7 +74,7 @@ export class App {
    */
   private setupWebSocketHandlers(): void {
     // Status updates
-    wsManager.onStatusUpdate((data) => {
+    wsManager.on('status_update', (data) => {
       setState('status', data);
       if (data.idle) {
         setState('wsConnected', true);
@@ -82,7 +82,7 @@ export class App {
     });
 
     // Clarification requests
-    wsManager.onClarificationRequest((data) => {
+    wsManager.on('clarification_request', (data) => {
       setState('pendingQuestion', data.question);
     });
 

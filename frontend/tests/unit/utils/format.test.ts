@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { formatStatus, formatRole, formatTime, formatRelativeTime, escapeHtml, renderMarkdown } from '../../../src/utils/format';
+import { formatStatus, formatRole, escapeHtml, renderMarkdown } from '../../../src/utils/format';
 
 describe('formatStatus', () => {
   it('converts snake_case to Title Case', () => {
@@ -34,39 +34,6 @@ describe('formatRole', () => {
     expect(formatRole('writer')).toBe('Writer');
     expect(formatRole('critic')).toBe('Critic');
     expect(formatRole('merge')).toBe('Merge');
-  });
-});
-
-describe('formatTime', () => {
-  it('formats ISO timestamp to HH:MM', () => {
-    const result = formatTime('2024-01-15T14:30:00Z');
-    expect(result).toMatch(/^\d{1,2}:\d{2}\s?(AM|PM)?$/i);
-  });
-
-  it('returns empty string for empty input', () => {
-    expect(formatTime('')).toBe('');
-    expect(formatTime(null as unknown as string)).toBe('');
-  });
-});
-
-describe('formatRelativeTime', () => {
-  it('shows "just now" for recent times', () => {
-    const now = new Date().toISOString();
-    expect(formatRelativeTime(now)).toBe('just now');
-  });
-
-  it('shows minutes ago', () => {
-    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    expect(formatRelativeTime(fiveMinAgo)).toMatch(/\d+m ago/);
-  });
-
-  it('shows hours ago', () => {
-    const twoHourAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    expect(formatRelativeTime(twoHourAgo)).toMatch(/\d+h ago/);
-  });
-
-  it('returns empty string for empty input', () => {
-    expect(formatRelativeTime('')).toBe('');
   });
 });
 

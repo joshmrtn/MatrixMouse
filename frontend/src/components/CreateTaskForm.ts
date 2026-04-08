@@ -9,12 +9,6 @@
  * - Target files (comma-separated, optional)
  * - Importance (0-1)
  * - Urgency (0-1)
- *
- * Features:
- * - Loading spinner during submission
- * - Unsaved changes warning
- * - Keyboard shortcuts (Ctrl+S to save, Esc to cancel)
- * - Enhanced error messages
  */
 
 import { createTask } from '../api';
@@ -33,12 +27,6 @@ export class CreateTaskForm {
   private isSubmitting = false;
   private selectedRepos: string[] = [];
   private unsubscribe?: () => void;
-  private isDirty = false;
-  private beforeUnloadHandler?: (e: BeforeUnloadEvent) => void;
-  private keyboardHandler?: (e: KeyboardEvent) => void;
-  private lastRepoCount = 0;
-  private validationTimers: Map<string, number> = new Map();
-  private readonly VALIDATION_DEBOUNCE_MS = 150;
 
   constructor(options: CreateTaskFormOptions) {
     this.options = options;
@@ -54,7 +42,7 @@ export class CreateTaskForm {
       <form id="create-task-form" novalidate>
         <div class="form-field">
           <label for="task-title">Title <span class="required">*</span></label>
-          <input 
+          <input
             type="text"
             id="task-title"
             name="title"
@@ -159,7 +147,6 @@ export class CreateTaskForm {
           <button type="button" class="btn-cancel" id="btn-cancel">
             Cancel
           </button>
-          <span class="keyboard-hint">Ctrl+S to save, Esc to cancel</span>
         </div>
 
         <div class="form-message" id="form-message" style="display: none;"></div>
@@ -182,7 +169,6 @@ export class CreateTaskForm {
     const repoSelect = this.element.querySelector('#repo-select') as HTMLSelectElement;
     if (!repoSelect) return;
 
-    // Populate from state
     this.populateRepoOptions(repoSelect);
   }
 
@@ -192,7 +178,6 @@ export class CreateTaskForm {
   private populateRepoOptions(select: HTMLSelectElement): void {
     const { repos } = getState();
 
-    // Clear existing options except placeholder
     while (select.options.length > 1) {
       select.remove(1);
     }
@@ -210,12 +195,10 @@ export class CreateTaskForm {
    */
   private setupStateSubscription(): void {
     this.unsubscribe = subscribe((state) => {
-      // Only update when repo count changes to avoid unnecessary DOM operations
-      if (this.element && state.repos.length !== this.lastRepoCount) {
+      if (this.element) {
         const repoSelect = this.element.querySelector('#repo-select') as HTMLSelectElement;
         if (repoSelect) {
           this.populateRepoOptions(repoSelect);
-          this.lastRepoCount = state.repos.length;
         }
       }
     });
@@ -310,97 +293,31 @@ export class CreateTaskForm {
   }
 
   /**
-   * Debounce validation to avoid excessive DOM updates
-   */
-  private debounceValidation(field: string, validate: () => boolean): void {
-    // Clear existing timer for this field
-    const existingTimer = this.validationTimers.get(field);
-    if (existingTimer) {
-      window.clearTimeout(existingTimer);
-    }
-
-    // Set new timer
-    const timer = window.setTimeout(() => {
-      validate();
-      this.validationTimers.delete(field);
-    }, this.VALIDATION_DEBOUNCE_MS);
-
-    this.validationTimers.set(field, timer);
-  }
-
-  /**
-   * Clear all validation timers
-   */
-  private clearValidationTimers(): void {
-    this.validationTimers.forEach((timer) => {
-      window.clearTimeout(timer);
-    });
-    this.validationTimers.clear();
-  }
-
-  /**
-   * Log error for debugging (client-side only)
-   */
-  private logError(message: string, error?: unknown): void {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[CreateTaskForm] ${timestamp} - ${message}`;
-    
-    // Log to console in development
-    if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
-      console.error(logMessage, error || '');
-    }
-    
-    // Could be extended to send to error tracking service
-    // e.g., Sentry, LogRocket, etc.
-  }
-
-  /**
    * Set up form event listeners
    */
   private setupEventListeners(): void {
     if (!this.element) return;
 
     const form = this.element.querySelector('#create-task-form') as HTMLFormElement;
-    const submitBtn = this.element.querySelector('#btn-submit') as HTMLButtonElement;
     const cancelBtn = this.element.querySelector('#btn-cancel') as HTMLButtonElement;
     const repoSelect = this.element.querySelector('#repo-select') as HTMLSelectElement;
 
-    // Form validation on input (with debouncing)
     const titleInput = this.element.querySelector('#task-title') as HTMLInputElement;
     const importanceInput = this.element.querySelector('#task-importance') as HTMLInputElement;
     const urgencyInput = this.element.querySelector('#task-urgency') as HTMLInputElement;
-    const descriptionInput = this.element.querySelector('#task-description') as HTMLTextAreaElement;
-    const targetFilesInput = this.element.querySelector('#task-target-files') as HTMLInputElement;
 
-    // Mark form as dirty on any change
-    const markDirty = () => { this.isDirty = true; };
-
-    // Debounced validation for title
+    // Validation on input
     titleInput?.addEventListener('input', () => {
-      this.debounceValidation('title', () => {
-        this.validateTitle();
-        this.updateSubmitButton();
-      });
-      markDirty();
+      this.validateTitle();
+      this.updateSubmitButton();
     });
 
-    descriptionInput?.addEventListener('input', markDirty);
-    targetFilesInput?.addEventListener('input', markDirty);
-
-    // Debounced validation for importance
     importanceInput?.addEventListener('input', () => {
-      this.debounceValidation('importance', () => {
-        this.validateImportance();
-      });
-      markDirty();
+      this.validateRange('task-importance', 'importance-error');
     });
 
-    // Debounced validation for urgency
     urgencyInput?.addEventListener('input', () => {
-      this.debounceValidation('urgency', () => {
-        this.validateUrgency();
-      });
-      markDirty();
+      this.validateRange('task-urgency', 'urgency-error');
     });
 
     // Repo selection
@@ -408,9 +325,7 @@ export class CreateTaskForm {
       const value = (e.target as HTMLSelectElement).value;
       if (value) {
         this.addRepo(value);
-        // Reset select to placeholder
         repoSelect.value = '';
-        markDirty();
       }
     });
 
@@ -426,12 +341,6 @@ export class CreateTaskForm {
         this.options.onCancel();
       }
     });
-
-    // Keyboard shortcuts
-    this.setupKeyboardShortcuts(form, submitBtn, cancelBtn);
-
-    // Unsaved changes warning
-    this.setupUnsavedChangesWarning();
 
     // Initial validation
     this.updateSubmitButton();
@@ -460,46 +369,24 @@ export class CreateTaskForm {
   }
 
   /**
-   * Validate importance field
+   * Validate a numeric range field (importance/urgency)
    */
-  private validateImportance(): boolean {
+  private validateRange(inputId: string, errorId: string): boolean {
     if (!this.element) return false;
 
-    const importanceInput = this.element.querySelector('#task-importance') as HTMLInputElement;
-    const errorEl = this.element.querySelector('#importance-error') as HTMLElement;
-    const value = parseFloat(importanceInput?.value || '0');
+    const input = this.element.querySelector(`#${inputId}`) as HTMLInputElement;
+    const errorEl = this.element.querySelector(`#${errorId}`) as HTMLElement;
+    const value = parseFloat(input?.value || '0');
 
     if (value < 0 || value > 1) {
       errorEl.textContent = 'Must be between 0 and 1';
       errorEl.style.display = 'block';
-      importanceInput.classList.add('invalid');
+      input.classList.add('invalid');
       return false;
     }
 
     errorEl.style.display = 'none';
-    importanceInput.classList.remove('invalid');
-    return true;
-  }
-
-  /**
-   * Validate urgency field
-   */
-  private validateUrgency(): boolean {
-    if (!this.element) return false;
-
-    const urgencyInput = this.element.querySelector('#task-urgency') as HTMLInputElement;
-    const errorEl = this.element.querySelector('#urgency-error') as HTMLElement;
-    const value = parseFloat(urgencyInput?.value || '0');
-
-    if (value < 0 || value > 1) {
-      errorEl.textContent = 'Must be between 0 and 1';
-      errorEl.style.display = 'block';
-      urgencyInput.classList.add('invalid');
-      return false;
-    }
-
-    errorEl.style.display = 'none';
-    urgencyInput.classList.remove('invalid');
+    input.classList.remove('invalid');
     return true;
   }
 
@@ -508,8 +395,8 @@ export class CreateTaskForm {
    */
   private validateForm(): boolean {
     const titleValid = this.validateTitle();
-    const importanceValid = this.validateImportance();
-    const urgencyValid = this.validateUrgency();
+    const importanceValid = this.validateRange('task-importance', 'importance-error');
+    const urgencyValid = this.validateRange('task-urgency', 'urgency-error');
 
     return titleValid && importanceValid && urgencyValid;
   }
@@ -528,71 +415,15 @@ export class CreateTaskForm {
   }
 
   /**
-   * Set up keyboard shortcuts
-   */
-  private setupKeyboardShortcuts(
-    form: HTMLFormElement,
-    submitBtn: HTMLButtonElement,
-    cancelBtn: HTMLButtonElement
-  ): void {
-    this.keyboardHandler = (e: KeyboardEvent) => {
-      if (!this.element || !form.contains(e.target as Node)) return;
-
-      // Ctrl+S or Cmd+S to save
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-        e.preventDefault();
-        if (!submitBtn.disabled) {
-          form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-        }
-      }
-
-      // Esc to cancel
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cancelBtn.click();
-      }
-    };
-
-    document.addEventListener('keydown', this.keyboardHandler);
-  }
-
-  /**
-   * Set up unsaved changes warning
-   */
-  private setupUnsavedChangesWarning(): void {
-    this.beforeUnloadHandler = (e: BeforeUnloadEvent) => {
-      if (this.isDirty && !this.isSubmitting) {
-        e.preventDefault();
-        e.returnValue = '';
-        return '';
-      }
-    };
-
-    window.addEventListener('beforeunload', this.beforeUnloadHandler);
-  }
-
-  /**
-   * Remove unsaved changes warning
-   */
-  private removeUnsavedChangesWarning(): void {
-    if (this.beforeUnloadHandler) {
-      window.removeEventListener('beforeunload', this.beforeUnloadHandler);
-      this.beforeUnloadHandler = undefined;
-    }
-  }
-
-  /**
    * Handle form submission
    */
   private async handleSubmit(): Promise<void> {
     if (!this.element || this.isSubmitting) return;
 
-    // Set submitting state immediately to prevent race conditions
     this.isSubmitting = true;
     this.updateSubmitButton();
     this.setSubmittingState(true);
 
-    // Validate form
     if (!this.validateForm()) {
       this.isSubmitting = false;
       this.setSubmittingState(false);
@@ -601,7 +432,6 @@ export class CreateTaskForm {
       return;
     }
 
-    // Gather form data
     const formData = this.getFormData();
 
     try {
@@ -610,12 +440,8 @@ export class CreateTaskForm {
       const task = await createTask(formData);
 
       this.isSubmitting = false;
-      this.isDirty = false;
       this.setSubmittingState(false);
       this.updateSubmitButton();
-
-      // Remove unsaved changes warning on success
-      this.removeUnsavedChangesWarning();
 
       if (this.options.onSuccess) {
         this.options.onSuccess(task);
@@ -625,11 +451,11 @@ export class CreateTaskForm {
       this.setSubmittingState(false);
       this.updateSubmitButton();
 
-      // Log error for debugging
-      this.logError('Form submission failed', error);
-
-      // Enhanced error message handling
-      const errorMessage = this.getErrorMessage(error);
+      const errorMessage = error instanceof Error && 'detail' in error
+        ? (error as Error & { detail: string }).detail
+        : error instanceof Error
+          ? error.message
+          : 'Failed to create task. Please try again.';
       this.showMessage(errorMessage, 'error');
     }
   }
@@ -656,54 +482,6 @@ export class CreateTaskForm {
   }
 
   /**
-   * Get user-friendly error message from error
-   */
-  private getErrorMessage(error: unknown): string {
-    if (error instanceof Error) {
-      // Check for API error with detail
-      const apiError = error as Error & { detail?: string };
-      if (apiError.detail) {
-        return apiError.detail;
-      }
-
-      // Check for common error patterns
-      const message = error.message.toLowerCase();
-      if (message.includes('network') || message.includes('fetch')) {
-        return 'Unable to connect to server. Please check your connection.';
-      }
-      if (message.includes('timeout')) {
-        return 'Request timed out. Please try again.';
-      }
-      if (message.includes('400')) {
-        return 'Invalid task data. Please check the form fields.';
-      }
-      if (message.includes('401') || message.includes('403')) {
-        return 'Authentication error. Please refresh the page.';
-      }
-      if (message.includes('500')) {
-        return 'Server error. Please try again later.';
-      }
-
-      return error.message;
-    }
-
-    return 'Failed to create task. Please try again.';
-  }
-
-  /**
-   * Sanitize user input to prevent XSS
-   */
-  private sanitizeInput(input: string): string {
-    return input
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#x27;')
-      .replace(/\//g, '&#x2F;')
-      .trim();
-  }
-
-  /**
    * Get form data for API submission
    */
   private getFormData(): TaskCreateRequest {
@@ -718,22 +496,20 @@ export class CreateTaskForm {
     const urgencyInput = this.element.querySelector('#task-urgency') as HTMLInputElement;
     const targetFilesInput = this.element.querySelector('#task-target-files') as HTMLInputElement;
 
-    // Runtime validation for role
     const roleValue = roleInput.value;
     const validRoles = ['coder', 'writer', 'manager'];
     if (!validRoles.includes(roleValue)) {
       throw new Error(`Invalid role: ${roleValue}. Valid roles are: ${validRoles.join(', ')}`);
     }
 
-    // Parse target files from comma-separated string
     const targetFilesValue = targetFilesInput.value.trim();
     const targetFiles = targetFilesValue
       ? targetFilesValue.split(',').map((f) => f.trim()).filter((f) => f.length > 0)
       : [];
 
     return {
-      title: this.sanitizeInput(titleInput.value),
-      description: this.sanitizeInput(descriptionInput.value),
+      title: titleInput.value.trim(),
+      description: descriptionInput.value.trim(),
       role: roleValue as AgentRole,
       repo: [...this.selectedRepos],
       target_files: targetFiles,
@@ -765,23 +541,19 @@ export class CreateTaskForm {
     const form = this.element.querySelector('#create-task-form') as HTMLFormElement;
     form?.reset();
 
-    // Clear selected repos
     this.selectedRepos = [];
     this.renderSelectedRepos();
     this.checkRoleAutoSwitch();
 
-    // Clear errors
     this.element.querySelectorAll('.field-error').forEach((el) => {
       (el as HTMLElement).style.display = 'none';
     });
 
-    // Clear message
     const messageEl = this.element.querySelector('#form-message') as HTMLElement;
     if (messageEl) {
       messageEl.style.display = 'none';
     }
 
-    // Reset invalid classes
     this.element.querySelectorAll('input, textarea, select').forEach((el) => {
       el.classList.remove('invalid');
     });
@@ -797,15 +569,6 @@ export class CreateTaskForm {
     if (this.unsubscribe) {
       this.unsubscribe();
     }
-    this.removeUnsavedChangesWarning();
-    this.clearValidationTimers();
-    
-    // Remove keyboard handler
-    if (this.keyboardHandler) {
-      document.removeEventListener('keydown', this.keyboardHandler);
-      this.keyboardHandler = undefined;
-    }
-    
     this.element = null;
   }
 }

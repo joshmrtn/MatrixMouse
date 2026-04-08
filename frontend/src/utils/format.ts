@@ -135,27 +135,3 @@ export function formatStatus(status: string): string {
 export function formatRole(role: string): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
-
-/**
- * Format timestamp for display
- */
-export function formatTime(isoString: string): string {
-  if (!isoString) return '';
-  const d = new Date(isoString);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-/**
- * Format relative time
- */
-export function formatRelativeTime(isoString: string): string {
-  if (!isoString) return '';
-  const d = new Date(isoString);
-  const now = new Date();
-  const diff = Math.floor((now.getTime() - d.getTime()) / 1000);
-
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return formatTime(isoString);
-}

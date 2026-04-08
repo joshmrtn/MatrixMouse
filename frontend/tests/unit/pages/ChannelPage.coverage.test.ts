@@ -64,33 +64,11 @@ describe('ChannelPage - Additional Coverage', () => {
 
       await page.render(container);
       page.destroy();
-      
+
       expect((page as any).element).toBeNull();
       expect((page as any).logEl).toBeNull();
       expect((page as any).inputEl).toBeNull();
       expect((page as any).sendBtn).toBeNull();
-    });
-
-    it('clears messageIds set on destroy', async () => {
-      vi.mocked(apiClient.getContext).mockResolvedValue({
-        messages: [
-          { role: 'user', content: 'Message 1' },
-          { role: 'user', content: 'Message 2' },
-        ],
-        count: 2,
-        estimated_tokens: 20,
-      });
-
-      await page.render(container);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      
-      // Add some messages to the set
-      (page as any).messageIds.add('user:Message 1');
-      (page as any).messageIds.add('user:Message 2');
-      expect((page as any).messageIds.size).toBe(2);
-      
-      page.destroy();
-      expect((page as any).messageIds.size).toBe(0);
     });
 
     it('prevents event listeners from firing after destroy', async () => {
@@ -113,107 +91,6 @@ describe('ChannelPage - Additional Coverage', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
       
       expect(apiClient.interjectWorkspace).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('Message Deduplication', () => {
-    it('prevents duplicate messages from being added', async () => {
-      vi.mocked(apiClient.getContext).mockResolvedValue({
-        messages: [],
-        count: 0,
-        estimated_tokens: 0,
-      });
-
-      await page.render(container);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Add same message twice
-      (page as any).addMessage({ role: 'user', content: 'Duplicate test' });
-      (page as any).addMessage({ role: 'user', content: 'Duplicate test' });
-
-      const messages = container.querySelectorAll('.message-bubble.user');
-      expect(messages.length).toBe(1);
-    });
-
-    it('allows messages with same prefix but different endings', async () => {
-      vi.mocked(apiClient.getContext).mockResolvedValue({
-        messages: [],
-        count: 0,
-        estimated_tokens: 0,
-      });
-
-      await page.render(container);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Messages with same first 100 chars should NOT be deduplicated anymore
-      const longContent1 = 'A'.repeat(150) + 'version1';
-      const longContent2 = 'A'.repeat(150) + 'version2';
-      
-      (page as any).addMessage({ role: 'user', content: longContent1 });
-      (page as any).addMessage({ role: 'user', content: longContent2 });
-
-      const messages = container.querySelectorAll('.message-bubble.user');
-      expect(messages.length).toBe(2);
-    });
-
-    it('allows messages with different roles but same content', async () => {
-      vi.mocked(apiClient.getContext).mockResolvedValue({
-        messages: [],
-        count: 0,
-        estimated_tokens: 0,
-      });
-
-      await page.render(container);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      (page as any).addMessage({ role: 'user', content: 'Same text' });
-      (page as any).addMessage({ role: 'assistant', content: 'Same text' });
-
-      const userMessages = container.querySelectorAll('.message-bubble.user');
-      const assistantMessages = container.querySelectorAll('.message-bubble.assistant');
-      expect(userMessages.length).toBe(1);
-      expect(assistantMessages.length).toBe(1);
-    });
-
-    it('deduplication works across multiple addMessage calls', async () => {
-      vi.mocked(apiClient.getContext).mockResolvedValue({
-        messages: [],
-        count: 0,
-        estimated_tokens: 0,
-      });
-
-      await page.render(container);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Add 5 messages, 2 are duplicates
-      (page as any).addMessage({ role: 'user', content: 'Msg 1' });
-      (page as any).addMessage({ role: 'user', content: 'Msg 2' });
-      (page as any).addMessage({ role: 'user', content: 'Msg 1' }); // duplicate
-      (page as any).addMessage({ role: 'user', content: 'Msg 3' });
-      (page as any).addMessage({ role: 'user', content: 'Msg 2' }); // duplicate
-
-      const messages = container.querySelectorAll('.message-bubble.user');
-      expect(messages.length).toBe(3);
-    });
-
-    it('limits messageIds set growth to MAX_MESSAGE_IDS', async () => {
-      vi.mocked(apiClient.getContext).mockResolvedValue({
-        messages: [],
-        count: 0,
-        estimated_tokens: 0,
-      });
-
-      await page.render(container);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      // Add more messages than MAX_MESSAGE_IDS (1000)
-      const maxIds = (page as any).MAX_MESSAGE_IDS;
-      for (let i = 0; i < maxIds + 100; i++) {
-        (page as any).addMessage({ role: 'user', content: `Message ${i}` });
-      }
-
-      // Set should not exceed MAX_MESSAGE_IDS
-      expect((page as any).messageIds.size).toBeLessThanOrEqual(maxIds);
     });
   });
 
@@ -766,41 +643,6 @@ describe('ChannelPage - Additional Coverage', () => {
       expect(button?.classList.contains('sending')).toBe(false);
     });
 
-    it('tracks pending check failures', async () => {
-      vi.mocked(apiClient.getPending).mockRejectedValue(new Error('API error'));
-
-      // Don't use render() - it calls checkPendingQuestion() automatically
-      container.innerHTML = `<div id="channel-page"></div>`;
-      page = new ChannelPage('workspace');
-      (page as any).element = container.querySelector('#channel-page');
-      
-      // Call checkPendingQuestion 5 times
-      await (page as any).checkPendingQuestion();
-      await (page as any).checkPendingQuestion();
-      await (page as any).checkPendingQuestion();
-      await (page as any).checkPendingQuestion();
-      await (page as any).checkPendingQuestion();
-      
-      // Should track failures
-      expect((page as any).pendingCheckFailures).toBe(5);
-    });
-
-    it('resets pending check failures on success', async () => {
-      // Don't use render() - set up manually
-      container.innerHTML = `<div id="channel-page"></div>`;
-      page = new ChannelPage('workspace');
-      (page as any).element = container.querySelector('#channel-page');
-      
-      // First fail
-      vi.mocked(apiClient.getPending).mockRejectedValueOnce(new Error('API error'));
-      await (page as any).checkPendingQuestion();
-      expect((page as any).pendingCheckFailures).toBe(1);
-
-      // Then succeed
-      vi.mocked(apiClient.getPending).mockResolvedValue({ pending: null });
-      await (page as any).checkPendingQuestion();
-      expect((page as any).pendingCheckFailures).toBe(0);
-    });
   });
 
   describe('Missing Coverage - Critical Scenarios', () => {
@@ -871,91 +713,6 @@ describe('ChannelPage - Additional Coverage', () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         
         expect(apiClient.interjectWorkspace).toHaveBeenCalled();
-      });
-    });
-
-    describe('Message Deduplication After Eviction', () => {
-      it('allows re-adding messages after eviction', async () => {
-        vi.mocked(apiClient.getContext).mockResolvedValue({
-          messages: [],
-          count: 0,
-          estimated_tokens: 0,
-        });
-
-        await page.render(container);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-
-        const maxIds = (page as any).MAX_MESSAGE_IDS;
-        
-        // Fill the set to capacity
-        for (let i = 0; i < maxIds; i++) {
-          (page as any).addMessage({ role: 'user', content: `Message ${i}` });
-        }
-        
-        expect((page as any).messageIds.size).toBe(maxIds);
-        
-        // Add one more message (should evict oldest)
-        (page as any).addMessage({ role: 'user', content: `Message ${maxIds}` });
-        
-        // Size should stay at max
-        expect((page as any).messageIds.size).toBe(maxIds);
-        
-        // The oldest message (Message 0) should have been evicted
-        // So we should be able to add it again
-        (page as any).addMessage({ role: 'user', content: 'Message 0' });
-        
-        // Should still be at max (Message 0 was re-added, Message 1 was evicted)
-        expect((page as any).messageIds.size).toBe(maxIds);
-      });
-
-      it('maintains deduplication for recent messages after eviction', async () => {
-        vi.mocked(apiClient.getContext).mockResolvedValue({
-          messages: [],
-          count: 0,
-          estimated_tokens: 0,
-        });
-
-        await page.render(container);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-
-        const maxIds = (page as any).MAX_MESSAGE_IDS;
-        
-        // Fill the set
-        for (let i = 0; i < maxIds; i++) {
-          (page as any).addMessage({ role: 'user', content: `Message ${i}` });
-        }
-        
-        // Add one more (evicts oldest)
-        (page as any).addMessage({ role: 'user', content: `Message ${maxIds}` });
-        
-        // Try to add duplicate of most recent message
-        const initialSize = (page as any).messageIds.size;
-        (page as any).addMessage({ role: 'user', content: `Message ${maxIds}` });
-        
-        // Size should not increase (deduplication still works)
-        expect((page as any).messageIds.size).toBe(initialSize);
-      });
-
-      it('handles batch eviction efficiently', async () => {
-        vi.mocked(apiClient.getContext).mockResolvedValue({
-          messages: [],
-          count: 0,
-          estimated_tokens: 0,
-        });
-
-        await page.render(container);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-
-        const maxIds = (page as any).MAX_MESSAGE_IDS;
-        
-        // Add messages in burst (simulate WebSocket burst)
-        const batchSize = 100;
-        for (let i = 0; i < maxIds + batchSize; i++) {
-          (page as any).addMessage({ role: 'user', content: `Burst ${i}` });
-        }
-        
-        // Size should not exceed max by much (eviction keeps up)
-        expect((page as any).messageIds.size).toBeLessThanOrEqual(maxIds + 1);
       });
     });
 
@@ -1299,17 +1056,15 @@ describe('ChannelPage - Additional Coverage', () => {
         // Add some state
         (page as any).isLoading = true;
         (page as any).error = 'Test error';
-        (page as any).messageIds.add('test-id');
-        
+
         // Destroy
         page.destroy();
-        
+
         // Verify cleanup
         expect((page as any).element).toBeNull();
         expect((page as any).logEl).toBeNull();
         expect((page as any).inputEl).toBeNull();
         expect((page as any).sendBtn).toBeNull();
-        expect((page as any).messageIds.size).toBe(0);
       });
     });
   });
@@ -1327,17 +1082,13 @@ describe('ChannelPage - Additional Coverage', () => {
           estimated_tokens: 0,
         });
 
-        const onTokenSpy = vi.spyOn(wsManager, 'onToken');
-        const onContentSpy = vi.spyOn(wsManager, 'onContent');
-        const onToolCallSpy = vi.spyOn(wsManager, 'onToolCall');
-        const onToolResultSpy = vi.spyOn(wsManager, 'onToolResult');
+        const onSpy = vi.spyOn(wsManager, 'on');
 
         await page.render(container);
 
-        expect(onTokenSpy).toHaveBeenCalled();
-        expect(onContentSpy).toHaveBeenCalled();
-        expect(onToolCallSpy).toHaveBeenCalled();
-        expect(onToolResultSpy).toHaveBeenCalled();
+        expect(onSpy).toHaveBeenCalledWith('content', expect.any(Function));
+        expect(onSpy).toHaveBeenCalledWith('tool_call', expect.any(Function));
+        expect(onSpy).toHaveBeenCalledWith('tool_result', expect.any(Function));
       });
 
       it('uses arrow function handlers for proper this binding', async () => {
@@ -1350,7 +1101,6 @@ describe('ChannelPage - Additional Coverage', () => {
         await page.render(container);
 
         // Verify handlers are instance methods (arrow functions)
-        expect(typeof (page as any).handleToken).toBe('function');
         expect(typeof (page as any).handleContent).toBe('function');
         expect(typeof (page as any).handleToolCall).toBe('function');
         expect(typeof (page as any).handleToolResult).toBe('function');
@@ -1358,29 +1108,7 @@ describe('ChannelPage - Additional Coverage', () => {
     });
 
     describe('Handler Cleanup', () => {
-      it('unregisters all WebSocket handlers on destroy', async () => {
-        vi.mocked(apiClient.getContext).mockResolvedValue({
-          messages: [],
-          count: 0,
-          estimated_tokens: 0,
-        });
-
-        await page.render(container);
-
-        const offTokenSpy = vi.spyOn(wsManager, 'offToken');
-        const offContentSpy = vi.spyOn(wsManager, 'offContent');
-        const offToolCallSpy = vi.spyOn(wsManager, 'offToolCall');
-        const offToolResultSpy = vi.spyOn(wsManager, 'offToolResult');
-
-        page.destroy();
-
-        expect(offTokenSpy).toHaveBeenCalled();
-        expect(offContentSpy).toHaveBeenCalled();
-        expect(offToolCallSpy).toHaveBeenCalled();
-        expect(offToolResultSpy).toHaveBeenCalled();
-      });
-
-      it('aborts AbortController on destroy', async () => {
+      it('cleans up via AbortController on destroy', async () => {
         vi.mocked(apiClient.getContext).mockResolvedValue({
           messages: [],
           count: 0,
@@ -1392,8 +1120,10 @@ describe('ChannelPage - Additional Coverage', () => {
         const abortSpy = vi.spyOn((page as any).abortController, 'abort');
         page.destroy();
 
+        // Cleanup happens via AbortController signal aborting event listeners
         expect(abortSpy).toHaveBeenCalled();
       });
+
     });
 
     describe('Handler Event Processing', () => {
@@ -1513,15 +1243,10 @@ describe('ChannelPage - Additional Coverage', () => {
         consoleSpy.mockRestore();
       });
 
-      it('handleToken is reserved (no-op)', () => {
-        expect(() => (page as any).handleToken({ text: 'Test' })).not.toThrow();
-        // Should not add any messages
-        expect(container.querySelectorAll('.message-bubble').length).toBe(0);
-      });
     });
 
-    describe('Message Deduplication with :: delimiter', () => {
-      beforeEach(async () => {
+    describe('Message Addition', () => {
+      it('adds messages without deduplication', async () => {
         vi.mocked(apiClient.getContext).mockResolvedValue({
           messages: [],
           count: 0,
@@ -1529,26 +1254,31 @@ describe('ChannelPage - Additional Coverage', () => {
         });
         await page.render(container);
         await new Promise((resolve) => setTimeout(resolve, 10));
-      });
 
-      it('prevents collision with :: delimiter', () => {
-        // Using :: delimiter reduces collision probability
-        // Messages with different roles but same content should NOT be deduplicated
-        (page as any).addMessage({ role: 'user', content: 'Same content' });
-        (page as any).addMessage({ role: 'assistant', content: 'Same content' });
-
-        // Check total messages (different roles = different msgId)
-        const allMessages = container.querySelectorAll('.message-bubble');
-        // Should have 2 messages (different roles = different msgId)
-        expect(allMessages.length).toBe(2);
-      });
-
-      it('deduplicates identical messages', () => {
+        // Add same message twice - both should appear since no deduplication
         (page as any).addMessage({ role: 'user', content: 'Same message' });
         (page as any).addMessage({ role: 'user', content: 'Same message' });
 
         const messages = container.querySelectorAll('.message-bubble.user');
-        expect(messages.length).toBe(1);
+        expect(messages.length).toBe(2);
+      });
+
+      it('adds messages with different roles', async () => {
+        vi.mocked(apiClient.getContext).mockResolvedValue({
+          messages: [],
+          count: 0,
+          estimated_tokens: 0,
+        });
+        await page.render(container);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        (page as any).addMessage({ role: 'user', content: 'User says hi' });
+        (page as any).addMessage({ role: 'assistant', content: 'Assistant says hello' });
+
+        const userMessages = container.querySelectorAll('.message-bubble.user');
+        const assistantMessages = container.querySelectorAll('.message-bubble.assistant');
+        expect(userMessages.length).toBe(1);
+        expect(assistantMessages.length).toBe(1);
       });
     });
   });
