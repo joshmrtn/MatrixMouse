@@ -36,8 +36,8 @@ export class Conversation {
       <div id="clarification-banner" style="display:none;">
         <div class="clar-q">🔔 Awaiting your answer...</div>
         <div class="clar-row">
-          <input id="clar-input" type="text" placeholder="Type your answer..." />
-          <button id="clar-answer-btn">Answer</button>
+          <textarea id="clar-input" placeholder="Type your answer..." aria-label="Answer clarification question"></textarea>
+          <button id="clar-answer-btn" aria-label="Submit clarification answer">Answer</button>
         </div>
       </div>
       <div id="inference-bar" style="display:none;">
@@ -62,11 +62,24 @@ export class Conversation {
     });
 
     // Clarification answer
-    const clarInput = this.element.querySelector('#clar-input') as HTMLInputElement;
+    const clarInput = this.element.querySelector('#clar-input') as HTMLTextAreaElement;
     const clarBtn = this.element.querySelector('#clar-answer-btn');
     clarBtn?.addEventListener('click', () => this.sendClarificationAnswer(clarInput.value));
+
+    // Enter sends, Shift+Enter inserts newline
     clarInput?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') this.sendClarificationAnswer(clarInput.value);
+      if (e.key === 'Enter' && !e.shiftKey && clarInput.value.trim()) {
+        e.preventDefault();
+        this.sendClarificationAnswer(clarInput.value);
+      }
+    });
+
+    // Auto-resize clarification textarea
+    clarInput?.addEventListener('input', () => {
+      if (clarInput) {
+        clarInput.style.height = 'auto';
+        clarInput.style.height = `${Math.min(clarInput.scrollHeight, 150)}px`;
+      }
     });
 
     // Load conversation
@@ -157,6 +170,10 @@ export class Conversation {
       clarBanner.style.display = 'none';
     }
 
+    // Reset textarea height
+    const clarInput = this.element?.querySelector('#clar-input') as HTMLTextAreaElement;
+    if (clarInput) clarInput.style.height = 'auto';
+
     this.addMessage({ role: 'user', content: answer });
 
     answerTask(this.options.taskId, answer).catch((error) => {
@@ -223,12 +240,13 @@ export class Conversation {
   showClarification(question: string): void {
     const banner = this.element?.querySelector('#clarification-banner');
     const questionEl = this.element?.querySelector('.clar-q');
-    const input = this.element?.querySelector('#clar-input') as HTMLInputElement;
+    const input = this.element?.querySelector('#clar-input') as HTMLTextAreaElement;
 
     if (banner && questionEl && input) {
       banner.style.display = 'flex';
       questionEl.textContent = `🔔 ${question}`;
       input.value = '';
+      input.style.height = 'auto';
       input.focus();
     }
   }

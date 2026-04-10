@@ -13,6 +13,7 @@
 import { TaskPage } from '../../../src/pages/TaskPage';
 import * as api from '../../../src/api';
 import * as state from '../../../src/state';
+import { wsManager } from '../../../src/api/websocket';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 // Mock dependencies
@@ -32,8 +33,23 @@ vi.mock('../../../src/components/Conversation', () => ({
     render: vi.fn().mockImplementation(() => {
       const el = document.createElement('div');
       el.id = 'conversation';
+      el.innerHTML = `
+        <div id="conversation-log"></div>
+        <div id="conversation-input"><input type="text" /><button>Send</button></div>
+        <div id="clarification-banner" style="display:none;">
+          <div class="clar-q"></div>
+          <div class="clar-row">
+            <textarea id="clar-input"></textarea>
+            <button id="clar-answer-btn">Answer</button>
+          </div>
+        </div>
+      `;
       return el;
     }),
+    appendToken: vi.fn(),
+    appendThinking: vi.fn(),
+    showClarification: vi.fn(),
+    hideClarification: vi.fn(),
   })),
 }));
 
@@ -804,5 +820,59 @@ describe('TaskPage', () => {
       expect(h1).toBeDefined();
       expect(h1?.className).toContain('task-title');
     });
+  });
+});
+
+describe('TaskPage - WebSocket Streaming Handlers', () => {
+  it('registers all streaming handlers when rendering conversation', async () => {
+    const registeredEvents: string[] = [];
+    const originalOn = wsManager.on;
+    wsManager.on = ((eventType: string) => {
+      registeredEvents.push(eventType);
+    }) as any;
+
+    vi.mocked(api.getTask).mockResolvedValue(mockTask);
+    vi.mocked(api.getTaskDependencies).mockResolvedValue({ task_id: 'test-123', dependencies: [], count: 0 });
+
+    const container = document.createElement('div');
+    const page = new TaskPage('task-001');
+    await page.render(container);
+
+    expect(registeredEvents).toContain('token');
+    expect(registeredEvents).toContain('thinking');
+    expect(registeredEvents).toContain('content');
+    expect(registeredEvents).toContain('tool_call');
+    expect(registeredEvents).toContain('tool_result');
+    expect(registeredEvents).toContain('clarification_request');
+
+    wsManager.on = originalOn;
+  });
+
+  it('token handler filters by taskId', async () => {
+    let capturedHandler: ((data: any) => void) | null = null;
+    const originalOn = wsManager.on;
+    wsManager.on = ((eventType: string, handler: any) => {
+      if (eventType === 'token') capturedHandler = handler;
+    }) as any;
+
+    vi.mocked(api.getTask).mockResolvedValue(mockTask);
+    vi.mocked(api.getTaskDependencies).mockResolvedValue({ task_id: 'test-123', dependencies: [], count: 0 });
+
+    const container = document.createElement('div');
+    const page = new TaskPage('task-001');
+    await page.render(container);
+
+    expect(capturedHandler).not.toBeNull();
+    const appendTokenSpy = vi.fn();
+    (page as any).conversation.appendToken = appendTokenSpy;
+
+    capturedHandler!({ text: 'Hello', task_id: 'task-001' });
+    expect(appendTokenSpy).toHaveBeenCalledWith('Hello');
+
+    appendTokenSpy.mockClear();
+    capturedHandler!({ text: 'Hello', task_id: 'task-999' });
+    expect(appendTokenSpy).not.toHaveBeenCalled();
+
+    wsManager.on = originalOn;
   });
 });

@@ -892,6 +892,79 @@ def create_frontend_test_app() -> FastAPI:
     async def get_pending():
         return {"pending": None}
 
+    @app.get("/context")
+    async def get_context(repo: str = None):
+        return {
+            "messages": [],
+            "count": 0,
+            "estimated_tokens": 0,
+            "repo": repo
+        }
+
+    # =========================================================================
+    # Interjection Endpoints - For testing channel/task interjections
+    # =========================================================================
+
+    _interjection_count = 0
+
+    @app.post("/interject/workspace")
+    async def interject_workspace(body: dict):
+        nonlocal _interjection_count
+        _interjection_count += 1
+        task_id = f"task{_interjection_count:03d}"
+        mock_tasks.append({
+            "id": task_id,
+            "title": f"Manager task from interjection: {body.get('message', '')[:30]}",
+            "status": "pending",
+            "role": "manager",
+            "repo": [],
+            "description": body.get('message', ''),
+            "branch": f"task/{task_id}",
+            "created_at": "2024-01-01T00:00:00Z",
+            "importance": 0.5,
+            "urgency": 0.5,
+        })
+        return {"ok": True, "manager_task_id": task_id}
+
+    @app.post("/interject/repo/{repo_name}")
+    async def interject_repo(repo_name: str, body: dict):
+        # Simulate error for "broken-repo" for testing
+        if repo_name == "broken-repo":
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "This repo is intentionally broken for testing"}
+            )
+        nonlocal _interjection_count
+        _interjection_count += 1
+        task_id = f"task{_interjection_count:03d}"
+        mock_tasks.append({
+            "id": task_id,
+            "title": f"Manager task from interjection: {body.get('message', '')[:30]}",
+            "status": "pending",
+            "role": "manager",
+            "repo": [repo_name],
+            "description": body.get('message', ''),
+            "branch": f"task/{task_id}",
+            "created_at": "2024-01-01T00:00:00Z",
+            "importance": 0.5,
+            "urgency": 0.5,
+        })
+        return {"ok": True, "manager_task_id": task_id, "repo": repo_name}
+
+    @app.post("/interject")
+    async def interject(body: dict):
+        nonlocal _interjection_count
+        _interjection_count += 1
+        return {"ok": True}
+
+    @app.post("/tasks/{task_id}/interject")
+    async def interject_task(task_id: str, body: dict):
+        return {"ok": True, "task_id": task_id}
+
+    @app.post("/tasks/{task_id}/answer")
+    async def answer_task(task_id: str, body: dict):
+        return {"ok": True, "task_id": task_id}
+
     # =========================================================================
     # Decision Endpoint - For testing decision modal integration
     # =========================================================================

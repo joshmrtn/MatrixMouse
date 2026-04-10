@@ -648,3 +648,93 @@ describe('Conversation', () => {
     });
   });
 });
+
+describe('Conversation - Clarification Textarea', () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('uses textarea for clarification input', () => {
+    const conv = new Conversation({ scope: 'workspace', taskId: 'task-001' });
+    container.appendChild(conv.render());
+
+    const clarInput = container.querySelector('#clar-input');
+    expect(clarInput?.tagName).toBe('TEXTAREA');
+  });
+
+  it('has aria-label on clarification input', () => {
+    const conv = new Conversation({ scope: 'workspace', taskId: 'task-001' });
+    container.appendChild(conv.render());
+
+    const clarInput = container.querySelector('#clar-input');
+    expect(clarInput?.getAttribute('aria-label')).toBe('Answer clarification question');
+  });
+
+  it('has aria-label on clarification answer button', () => {
+    const conv = new Conversation({ scope: 'workspace', taskId: 'task-001' });
+    container.appendChild(conv.render());
+
+    const clarBtn = container.querySelector('#clar-answer-btn');
+    expect(clarBtn?.getAttribute('aria-label')).toBe('Submit clarification answer');
+  });
+
+  it('showClarification displays banner and focuses input', () => {
+    const conv = new Conversation({ scope: 'workspace', taskId: 'task-001' });
+    container.appendChild(conv.render());
+
+    conv.showClarification('What do you mean?');
+
+    const banner = container.querySelector('#clarification-banner');
+    expect(banner?.getAttribute('style')).toContain('display: flex');
+
+    const questionEl = container.querySelector('.clar-q');
+    expect(questionEl?.textContent).toContain('What do you mean?');
+
+    const clarInput = container.querySelector('#clar-input') as HTMLTextAreaElement;
+    expect(clarInput.value).toBe('');
+  });
+
+  it('resets textarea height on showClarification', () => {
+    const conv = new Conversation({ scope: 'workspace', taskId: 'task-001' });
+    container.appendChild(conv.render());
+
+    const clarInput = container.querySelector('#clar-input') as HTMLTextAreaElement;
+    clarInput.style.height = '100px';
+
+    conv.showClarification('Test question');
+    expect(clarInput.style.height).toBe('auto');
+  });
+
+  it('hides clarification banner', () => {
+    const conv = new Conversation({ scope: 'workspace', taskId: 'task-001' });
+    container.appendChild(conv.render());
+
+    conv.showClarification('Question?');
+    conv.hideClarification();
+
+    const banner = container.querySelector('#clarification-banner');
+    expect(banner?.getAttribute('style')).toContain('display: none');
+  });
+
+  it('auto-resizes textarea on input event', () => {
+    const conv = new Conversation({ scope: 'workspace', taskId: 'task-001' });
+    container.appendChild(conv.render());
+
+    const clarInput = container.querySelector('#clar-input') as HTMLTextAreaElement;
+    clarInput.value = 'Some text\nwith\nnewlines';
+    clarInput.style.height = 'auto';
+    // Simulate scrollHeight (JSDOM doesn't compute real scrollHeight)
+    Object.defineProperty(clarInput, 'scrollHeight', { value: 80, configurable: true });
+
+    clarInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(clarInput.style.height).toBe('80px');
+  });
+});

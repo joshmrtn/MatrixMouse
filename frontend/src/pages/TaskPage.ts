@@ -5,6 +5,7 @@
  */
 
 import { getTask, getTaskDependencies } from '../api';
+import { wsManager } from '../api/websocket';
 import { getState, setState, subscribe } from '../state';
 import { formatStatus, formatRole, escapeHtml } from '../utils';
 import { Conversation } from '../components/Conversation';
@@ -212,6 +213,9 @@ export class TaskPage {
 
     container.appendChild(this.conversation.render());
 
+    // Wire WebSocket events to Conversation for live streaming + clarification
+    this.setupStreamingHandlers();
+
     // Render decision banner
     const bannerContainer = this.element.querySelector('#task-decision-banner');
     if (bannerContainer) {
@@ -222,6 +226,60 @@ export class TaskPage {
       this.decisionBanner = new DecisionBanner();
       this.decisionBanner.render(bannerContainer);
     }
+  }
+
+  /**
+   * Wire WebSocket streaming events to the Conversation component.
+   * Filters by taskId so only events for THIS task are displayed.
+   */
+  private setupStreamingHandlers(): void {
+    const conv = this.conversation;
+    if (!conv) return;
+
+    const taskId = this.taskId;
+
+    // Token-by-token streaming
+    wsManager.on('token', (data: { text: string; task_id?: string }) => {
+      if (data.task_id === taskId && data.text) {
+        conv.appendToken(data.text);
+      }
+    });
+
+    // Thinking/reasoning streaming
+    wsManager.on('thinking', (data: { text: string; task_id?: string }) => {
+      if (data.task_id === taskId && data.text) {
+        conv.appendThinking(data.text);
+      }
+    });
+
+    // Full content messages
+    wsManager.on('content', (data: { text: string; task_id?: string }) => {
+      if (data.task_id === taskId && data.text) {
+        conv.appendToken(data.text); // Reuse appendToken for content (same rendering)
+      }
+    });
+
+    // Tool calls
+    wsManager.on('tool_call', (data: { name: string; arguments: Record<string, unknown>; task_id?: string }) => {
+      if (data.task_id === taskId) {
+        const callText = `${data.name}(${JSON.stringify(data.arguments)})`;
+        conv.appendToken(callText); // Render as message content
+      }
+    });
+
+    // Tool results
+    wsManager.on('tool_result', (data: { result: string; task_id?: string }) => {
+      if (data.task_id === taskId) {
+        conv.appendToken(data.result); // Render as message content
+      }
+    });
+
+    // Clarification requests
+    wsManager.on('clarification_request', (data: { question: string; task_id?: string }) => {
+      if (data.task_id === taskId && data.question) {
+        conv.showClarification(data.question);
+      }
+    });
   }
 
   private updateHeader(): void {

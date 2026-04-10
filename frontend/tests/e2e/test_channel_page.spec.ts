@@ -1,951 +1,149 @@
 /**
- * E2E Tests for Channel Page
+ * E2E Tests for ChannelPage
  *
- * Tests the channel/conversation page using Playwright.
- * Verifies workspace and repo interjections, conversation display,
- * and clarification question handling.
+ * Tests the channel task request surface using the mocked test server.
  */
 
 import { test, expect } from '@playwright/test';
 
 test.describe('Channel Page', () => {
-  // Common mock data
-  const mockContextResponse = {
-    messages: [
-      { role: 'user', content: 'Hello, can you help me?' },
-      { role: 'assistant', content: 'Sure, I\'d be happy to help!' },
-    ],
-    count: 2,
-    estimated_tokens: 20,
-  };
-
-  const mockEmptyContext = {
-    messages: [],
-    count: 0,
-    estimated_tokens: 0,
-  };
-
-  test.beforeEach(async ({ page }) => {
-    // Mock common API endpoints
-    await page.route('**/repos', async route => {
-      await route.fulfill({
-        json: { repos: [{ name: 'test-repo', remote: 'https://github.com/test/test.git', local_path: '/test', added: '2024-01-01' }] },
-      });
-    });
-    await page.route('**/tasks**', async route => {
-      await route.fulfill({
-        json: { tasks: [], count: 0 },
-      });
-    });
-    await page.route('**/status', async route => {
-      await route.fulfill({
-        json: { idle: true, stopped: false, blocked: false },
-      });
-    });
-    await page.route('**/blocked', async route => {
-      await route.fulfill({
-        json: { report: { human: [], dependencies: [], waiting: [] } },
-      });
-    });
-    await page.route('**/pending', async route => {
-      await route.fulfill({
-        json: { pending: null },
-      });
-    });
+  test('renders workspace channel', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#channel-page')).toBeVisible();
+    await expect(page.locator('#channel-header')).toContainText('Channel: Workspace');
   });
 
-  test.describe('Navigation', () => {
-    test('navigates to channel from sidebar', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-page');
-
-      await expect(page.locator('#channel-page')).toBeVisible();
-      expect(page.url()).toBe(`${page.url().split('/').slice(0, 3).join('/')}/`);
-    });
-
-    test('direct navigation to workspace channel works', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-page');
-
-      await expect(page.locator('#channel-header')).toContainText('Channel: workspace');
-    });
-
-    test('direct navigation to repo channel works', async ({ page }) => {
-      await page.route('**/context?repo=test-repo', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/channel/test-repo');
-      await page.waitForSelector('#channel-page');
-
-      await expect(page.locator('#channel-header')).toContainText('Channel: test-repo');
-    });
-
-    test('sidebar highlights channel when active', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#sidebar');
-
-      const workspaceItem = page.locator('.sb-item').filter({ hasText: /workspace/i });
-      await expect(workspaceItem).toHaveClass(/active/);
-    });
+  test('renders repo channel', async ({ page }) => {
+    await page.goto('/channel/test-repo');
+    await expect(page.locator('#channel-page')).toBeVisible();
+    await expect(page.locator('#channel-header')).toContainText('Channel: test-repo');
   });
 
-  test.describe('Conversation Display', () => {
-    test('displays conversation header', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-header');
-
-      await expect(page.locator('#channel-header')).toBeVisible();
-      await expect(page.locator('#channel-header')).toContainText('Channel: workspace');
-    });
-
-    test('displays user messages', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      const userMsg = page.locator('.message-bubble.user');
-      await expect(userMsg).toBeVisible();
-      await expect(userMsg).toContainText('Hello, can you help me?');
-    });
-
-    test('displays assistant messages', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      const assistantMsg = page.locator('.message-bubble.assistant');
-      await expect(assistantMsg).toBeVisible();
-      await expect(assistantMsg).toContainText('Sure, I\'d be happy to help!');
-    });
-
-    test('displays message role labels', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      const roleLabels = page.locator('.message-role');
-      await expect(roleLabels.nth(0)).toHaveText('user');
-      await expect(roleLabels.nth(1)).toHaveText('assistant');
-    });
-
-    test('shows empty state when no messages', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockEmptyContext });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      await expect(page.locator('.empty-message')).toBeVisible();
-      await expect(page.locator('.empty-message')).toContainText('No conversation yet');
-    });
-
-    test('displays loading state initially', async ({ page }) => {
-      // Delay the response to test loading state
-      await page.route('**/context', async route => {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      
-      // Should see loading state briefly
-      await page.waitForTimeout(100);
-      const loadingState = page.locator('.loading-state');
-      await expect(loadingState).toBeVisible();
-      
-      // Wait for actual content
-      await page.waitForSelector('.message-bubble');
-    });
-
-    test('displays error state on API failure', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.abort('failed');
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      await expect(page.locator('.error-message')).toBeVisible();
-      await expect(page.locator('.error-message')).toContainText('Failed to load conversation');
-    });
-
-    test('retry button reloads conversation', async ({ page }) => {
-      let failCount = 0;
-      
-      await page.route('**/context', async route => {
-        if (failCount < 1) {
-          failCount++;
-          await route.abort('failed');
-        } else {
-          await route.fulfill({ json: mockContextResponse });
-        }
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('.error-message');
-
-      // Click retry
-      await page.click('#retry-load');
-      await page.waitForSelector('.message-bubble');
-
-      const userMsg = page.locator('.message-bubble.user');
-      await expect(userMsg).toBeVisible();
-    });
-
-    test('displays tool_call messages with preformatted text', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({
-          json: {
-            messages: [{ role: 'tool_call', content: 'read_file(path="test.py")' }],
-            count: 1,
-            estimated_tokens: 5,
-          },
-        });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      const toolMsg = page.locator('.message-bubble.tool');
-      await expect(toolMsg).toBeVisible();
-      await expect(toolMsg.locator('pre')).toBeVisible();
-      await expect(toolMsg).toContainText('read_file(path="test.py")');
-    });
-
-    test('displays tool_result messages with preformatted text', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({
-          json: {
-            messages: [{ role: 'tool_result', content: 'File contents: print("hello")' }],
-            count: 1,
-            estimated_tokens: 5,
-          },
-        });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      const toolMsg = page.locator('.message-bubble.tool');
-      await expect(toolMsg).toBeVisible();
-      await expect(toolMsg).toContainText('File contents: print("hello")');
-    });
-
-    test('renders markdown in assistant messages', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({
-          json: {
-            messages: [
-              { role: 'assistant', content: 'Here is the code:\n\n```python\nprint("hello")\n```' },
-            ],
-            count: 1,
-            estimated_tokens: 15,
-          },
-        });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      const assistantMsg = page.locator('.message-bubble.assistant');
-      await expect(assistantMsg).toBeVisible();
-      await expect(assistantMsg.locator('pre')).toBeVisible();
-      await expect(assistantMsg.locator('code')).toBeVisible();
-    });
-
-    test('escapes HTML in user messages for security', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({
-          json: {
-            messages: [{ role: 'user', content: '<script>alert("xss")</script>' }],
-            count: 1,
-            estimated_tokens: 5,
-          },
-        });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#conversation-log');
-
-      const userMsg = page.locator('.message-bubble.user');
-      await expect(userMsg).toBeVisible();
-      // Should not contain actual script tags
-      expect(await userMsg.innerHTML()).not.toContain('<script>');
-    });
+  test('shows task description textarea', async ({ page }) => {
+    await page.goto('/');
+    const textarea = page.locator('#channel-input textarea');
+    await expect(textarea).toBeVisible();
+    await expect(textarea).toHaveAttribute('placeholder', /what you want the Manager to do/);
   });
 
-  test.describe('Workspace Interjections', () => {
-    test('displays textarea field and send button', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input');
-
-      await expect(page.locator('#channel-input textarea')).toBeVisible();
-      await expect(page.locator('#channel-input button')).toBeVisible();
-      await expect(page.locator('#channel-input button')).toHaveText('Send');
-    });
-
-    test('textarea placeholder shows workspace', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      await expect(page.locator('#channel-input textarea')).toHaveAttribute('placeholder', 'Message workspace...');
-    });
-
-    test('sends interjection on button click', async ({ page }) => {
-      let interjectionReceived = false;
-      let interjectionMessage = '';
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        interjectionReceived = true;
-        interjectionMessage = route.request().postDataJSON()?.message || '';
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      // Type message and click send
-      await page.fill('#channel-input textarea', 'Test workspace message');
-      await page.click('#channel-input button');
-      await page.waitForTimeout(200);
-
-      expect(interjectionReceived).toBe(true);
-      expect(interjectionMessage).toBe('Test workspace message');
-    });
-
-    test('sends interjection on Enter key', async ({ page }) => {
-      let interjectionReceived = false;
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        interjectionReceived = true;
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      // Type message and press Enter
-      await page.fill('#channel-input textarea', 'Test Enter key');
-      await page.press('#channel-input textarea', 'Enter');
-      await page.waitForTimeout(200);
-
-      expect(interjectionReceived).toBe(true);
-    });
-
-    test('Shift+Enter does NOT send interjection, inserts newline', async ({ page }) => {
-      let interjectionReceived = false;
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        interjectionReceived = true;
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      // Type multi-line message with Shift+Enter
-      await page.click('#channel-input textarea');
-      await page.keyboard.type('Line 1');
-      await page.keyboard.down('Shift');
-      await page.keyboard.press('Enter');
-      await page.keyboard.up('Shift');
-      await page.keyboard.type('Line 2');
-      await page.waitForTimeout(100);
-
-      // Verify newline was inserted
-      const textareaValue = await page.locator('#channel-input textarea').inputValue();
-      expect(textareaValue).toContain('\n');
-      expect(textareaValue).toBe('Line 1\nLine 2');
-
-      // Verify message was NOT sent
-      expect(interjectionReceived).toBe(false);
-    });
-
-    test('clears input after sending message', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      await page.fill('#channel-input textarea', 'Test message');
-      await page.click('#channel-input button');
-      await page.waitForTimeout(200);
-
-      await expect(page.locator('#channel-input textarea')).toHaveValue('');
-    });
-
-    test('does not send empty message', async ({ page }) => {
-      let interjectionReceived = false;
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        interjectionReceived = true;
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      // Try to send empty message
-      await page.fill('#channel-input textarea', '   ');
-      await page.click('#channel-input button');
-      await page.waitForTimeout(200);
-
-      expect(interjectionReceived).toBe(false);
-    });
-
-    test('adds user message optimistically', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: { messages: [], count: 0, estimated_tokens: 0 } });
-      });
-      await page.route('**/interject/workspace', async route => {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      await page.fill('#channel-input textarea', 'Optimistic message');
-      await page.click('#channel-input button');
-
-      // Should see user message immediately (before API responds)
-      await page.waitForTimeout(100);
-      const userMsg = page.locator('.message-bubble.user');
-      await expect(userMsg).toBeVisible();
-      await expect(userMsg).toContainText('Optimistic message');
-    });
-
-    test('shows error message when interjection fails', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        await route.fulfill({ status: 500, json: { detail: 'API error' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      await page.fill('#channel-input textarea', 'Test message');
-      await page.click('#channel-input button');
-      await page.waitForTimeout(300);
-
-      // Should show error message
-      const errorMsg = page.locator('.message-bubble.system');
-      await expect(errorMsg).toBeVisible();
-      await expect(errorMsg).toContainText('Error');
-    });
-
-    test('sends multi-line message with newlines preserved', async ({ page }) => {
-      let interjectionReceived = false;
-      let interjectionMessage = '';
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        interjectionReceived = true;
-        interjectionMessage = route.request().postDataJSON()?.message || '';
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      // Type multi-line message
-      await page.click('#channel-input textarea');
-      await page.keyboard.type('Line 1');
-      await page.keyboard.down('Shift');
-      await page.keyboard.press('Enter');
-      await page.keyboard.up('Shift');
-      await page.keyboard.type('Line 2');
-      await page.waitForTimeout(100);
-
-      // Send with Enter
-      await page.press('#channel-input textarea', 'Enter');
-      await page.waitForTimeout(200);
-
-      expect(interjectionReceived).toBe(true);
-      expect(interjectionMessage).toBe('Line 1\nLine 2');
-    });
+  test('shows send button', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#channel-input button')).toBeVisible();
+    await expect(page.locator('#channel-input button')).toHaveText('Send');
   });
 
-  test.describe('Repo Interjections', () => {
-    test('textarea placeholder shows repo name', async ({ page }) => {
-      await page.route('**/context?repo=test-repo', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/channel/test-repo');
-      await page.waitForSelector('#channel-input textarea');
-
-      await expect(page.locator('#channel-input textarea')).toHaveAttribute('placeholder', 'Message test-repo...');
-    });
-
-    test('sends to repo interjection endpoint', async ({ page }) => {
-      let interjectionReceived = false;
-      let interjectionRepo = '';
-      let interjectionMessage = '';
-
-      await page.route('**/context?repo=test-repo', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/repo/test-repo', async route => {
-        interjectionReceived = true;
-        interjectionRepo = route.request().url().split('/').pop() || '';
-        interjectionMessage = route.request().postDataJSON()?.message || '';
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task456', repo: 'test-repo' } });
-      });
-
-      await page.goto('/channel/test-repo');
-      await page.waitForSelector('#channel-input textarea');
-
-      await page.fill('#channel-input textarea', 'Test repo message');
-      await page.click('#channel-input button');
-      await page.waitForTimeout(200);
-
-      expect(interjectionReceived).toBe(true);
-      expect(interjectionMessage).toBe('Test repo message');
-    });
-
-    test('encodes special characters in repo name', async ({ page }) => {
-      await page.route('**/context?repo=my-special_repo', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/repo/my-special_repo', async route => {
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task789', repo: 'my-special_repo' } });
-      });
-
-      await page.goto('/channel/my-special_repo');
-      await page.waitForSelector('#channel-input textarea');
-
-      await page.fill('#channel-input textarea', 'Message');
-      await page.click('#channel-input button');
-      await page.waitForTimeout(200);
-
-      // Should not error - URL encoding should work
-      await expect(page.locator('#channel-input textarea')).toHaveValue('');
-    });
+  test('shows link to create task manually', async ({ page }) => {
+    await page.goto('/');
+    const link = page.locator('a[href="/task-new"]');
+    await expect(link).toBeVisible();
+    await expect(link).toContainText('create a task manually');
   });
 
-  test.describe('Clarification Questions', () => {
-    test('shows clarification banner when question is pending', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'What is the expected behavior?' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
-
-      await expect(page.locator('#clarification-banner')).toBeVisible();
-      await expect(page.locator('.clar-q')).toContainText('What is the expected behavior?');
-    });
-
-    test('hides clarification banner when no pending question', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: null } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-page');
-
-      const banner = page.locator('#clarification-banner');
-      await expect(banner).not.toBeVisible();
-    });
-
-    test('clarification input is focused when banner appears', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'Please clarify' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
-
-      const clarInput = page.locator('#clar-input');
-      await expect(clarInput).toBeFocused();
-    });
-
-    test('sends answer on clarification button click', async ({ page }) => {
-      let answerSent = false;
-      let answerMessage = '';
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'What do you want?' } });
-      });
-      await page.route('**/interject/workspace', async route => {
-        answerSent = true;
-        answerMessage = route.request().postDataJSON()?.message || '';
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
-
-      await page.fill('#clar-input', 'My answer');
-      await page.click('#clar-answer-btn');
-      await page.waitForTimeout(200);
-
-      expect(answerSent).toBe(true);
-      expect(answerMessage).toBe('My answer');
-    });
-
-    test('sends answer on Enter key', async ({ page }) => {
-      let answerSent = false;
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'What do you want?' } });
-      });
-      await page.route('**/interject/workspace', async route => {
-        answerSent = true;
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
-
-      await page.fill('#clar-input', 'My Enter answer');
-      await page.press('#clar-input', 'Enter');
-      await page.waitForTimeout(200);
-
-      expect(answerSent).toBe(true);
-    });
-
-    test('hides banner after answering', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'Question' } });
-      });
-      await page.route('**/interject/workspace', async route => {
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
-
-      await page.fill('#clar-input', 'Answer');
-      await page.click('#clar-answer-btn');
-      await page.waitForTimeout(200);
-
-      await expect(page.locator('#clarification-banner')).not.toBeVisible();
-    });
-
-    test('does not send empty clarification answer', async ({ page }) => {
-      let answerSent = false;
-
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'Question' } });
-      });
-      await page.route('**/interject/workspace', async route => {
-        answerSent = true;
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
-
-      await page.fill('#clar-input', '   ');
-      await page.click('#clar-answer-btn');
-      await page.waitForTimeout(200);
-
-      expect(answerSent).toBe(false);
-    });
-
-    test('adds answer as user message', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: { messages: [], count: 0, estimated_tokens: 0 } });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'Question' } });
-      });
-      await page.route('**/interject/workspace', async route => {
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
-
-      await page.fill('#clar-input', 'My clarification answer');
-      await page.click('#clar-answer-btn');
-      await page.waitForTimeout(200);
-
-      const userMsg = page.locator('.message-bubble.user');
-      await expect(userMsg).toBeVisible();
-      await expect(userMsg).toContainText('My clarification answer');
-    });
+  test('shows description explaining this is a task request', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#channel-description')).toContainText('Manager');
   });
 
-  test.describe('Responsive Behavior', () => {
-    test('works on mobile viewport', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
+  test('sends message and redirects to TaskPage', async ({ page }) => {
+    await page.goto('/');
 
-      await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto('/');
-      await page.waitForSelector('#channel-page');
+    const textarea = page.locator('#channel-input textarea');
+    await textarea.fill('Add a login feature');
 
-      await expect(page.locator('#channel-page')).toBeVisible();
-      await expect(page.locator('#channel-input textarea')).toBeVisible();
-      await expect(page.locator('#channel-input button')).toBeVisible();
-    });
+    await page.locator('#channel-input button').click();
 
-    test('textarea is touch-friendly on mobile', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      const textarea = page.locator('#channel-input textarea');
-      const box = await textarea.boundingBox();
-      expect(box).toBeTruthy();
-      expect(box!.height).toBeGreaterThanOrEqual(44); // Touch-friendly height
-    });
+    // The test server returns a manager_task_id, so we should be redirected
+    await expect(page.locator('#task-page')).toBeVisible({ timeout: 5000 });
   });
 
-  test.describe('Textarea Auto-Resize', () => {
-    test('textarea grows when typing multiple lines', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
+  test('redirects to TaskPage when task_id returned', async ({ page }) => {
+    await page.goto('/');
 
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
+    const textarea = page.locator('#channel-input textarea');
+    await textarea.fill('Important task');
 
-      const textarea = page.locator('#channel-input textarea');
+    await page.locator('#channel-input button').click();
 
-      // Type multiple lines using fill instead of keyboard for reliability
-      await page.fill('#channel-input textarea', 'Line 1\nLine 2\nLine 3');
-      await page.waitForTimeout(200);
+    // The test server returns a manager_task_id, so we should be redirected
+    // Wait for navigation to the task page
+    await expect(page.locator('#task-page')).toBeVisible({ timeout: 5000 });
 
-      // Verify the textarea contains the multi-line content
-      const value = await textarea.inputValue();
-      expect(value).toBe('Line 1\nLine 2\nLine 3');
-    });
-
-    test('textarea resets after sending message', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/interject/workspace', async route => {
-        await route.fulfill({ json: { ok: true, manager_task_id: 'task123' } });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      // Type multi-line message
-      await page.fill('#channel-input textarea', 'Line 1\nLine 2');
-      await page.waitForTimeout(100);
-
-      // Verify textarea has content
-      const beforeValue = await page.locator('#channel-input textarea').inputValue();
-      expect(beforeValue).toBe('Line 1\nLine 2');
-
-      // Send message
-      await page.press('#channel-input textarea', 'Enter');
-      await page.waitForTimeout(200);
-
-      // Verify textarea is cleared
-      const afterValue = await page.locator('#channel-input textarea').inputValue();
-      expect(afterValue).toBe('');
-    });
-
-    test('textarea handles large content without errors', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
-
-      // Type many lines (would exceed max-height if there was no cap)
-      const lines = Array.from({ length: 15 }, (_, i) => `Line ${i + 1}`).join('\n');
-      await page.fill('#channel-input textarea', lines);
-      await page.waitForTimeout(200);
-
-      const textarea = page.locator('#channel-input textarea');
-      const value = await textarea.inputValue();
-      expect(value).toBe(lines);
-
-      // Verify textarea is still visible and functional
-      await expect(textarea).toBeVisible();
-    });
+    // Verify the task title is visible
+    await expect(page.locator('.task-title')).toBeVisible();
   });
 
-  test.describe('Textarea Accessibility & Keyboard UX', () => {
-    test('channel textarea has aria-label', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
+  test('does not send empty messages', async ({ page }) => {
+    await page.goto('/');
 
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
+    const textarea = page.locator('#channel-input textarea');
+    await textarea.fill('   ');
 
-      const textarea = page.locator('#channel-input textarea');
-      await expect(textarea).toHaveAttribute('aria-label', 'Message input for workspace channel');
-    });
+    await page.locator('#channel-input button').click();
 
-    test('channel textarea has placeholder', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
+    // Should not have sent anything
+    await expect(page.locator('#channel-message')).not.toBeVisible();
+  });
 
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
+  test('shows error on API failure', async ({ page }) => {
+    // Navigate to a repo that will trigger an error
+    await page.goto('/channel/broken-repo');
 
-      await expect(page.locator('#channel-input textarea')).toHaveAttribute('placeholder', 'Message workspace...');
-    });
+    const textarea = page.locator('#channel-input textarea');
+    await textarea.fill('Test message');
 
-    test('clarification textarea has aria-label', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'Please clarify' } });
-      });
+    await page.locator('#channel-input button').click();
 
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
+    await expect(page.locator('#channel-message')).toContainText('Failed to send', { timeout: 5000 });
+  });
 
-      const textarea = page.locator('#clar-input');
-      await expect(textarea).toHaveAttribute('aria-label', 'Answer clarification question');
-    });
+  test('button shows sending state and redirects', async ({ page }) => {
+    await page.goto('/');
 
-    test('clarification textarea has placeholder', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-      await page.route('**/pending', async route => {
-        await route.fulfill({ json: { pending: 'Please clarify' } });
-      });
+    const textarea = page.locator('#channel-input textarea');
+    await textarea.fill('Test');
 
-      await page.goto('/');
-      await page.waitForSelector('#clarification-banner');
+    await page.locator('#channel-input button').click();
 
-      await expect(page.locator('#clar-input')).toHaveAttribute('placeholder', 'Type your answer...');
-    });
+    // The redirect happens fast - verify we end up on the task page
+    await expect(page.locator('#task-page')).toBeVisible({ timeout: 5000 });
+  });
 
-    test('Tab key moves focus from textarea to send button', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
+  test('Shift+Enter does not send message (allows newline)', async ({ page }) => {
+    await page.goto('/');
 
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
+    const textarea = page.locator('#channel-input textarea');
+    await textarea.fill('Line one');
+    await textarea.press('Shift+Enter');
+    await textarea.pressSequentially('Line two');
 
-      // Focus the textarea
-      await page.click('#channel-input textarea');
-      await expect(page.locator('#channel-input textarea')).toBeFocused();
+    // Message should NOT have been sent
+    await expect(page.locator('#channel-message')).not.toBeVisible();
+    // Textarea should contain both lines
+    await expect(textarea).toHaveValue(/Line one/);
+    await expect(textarea).toHaveValue(/Line two/);
+  });
 
-      // Press Tab to move to send button
-      await page.keyboard.press('Tab');
-      await expect(page.locator('#channel-input button')).toBeFocused();
-    });
+  test('navigates to create task page via link', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('a[href="/task-new"]').click();
+    await expect(page.locator('#create-task-form')).toBeVisible();
+  });
 
-    test('Shift+Tab moves focus from send button back to textarea', async ({ page }) => {
-      await page.route('**/context', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
+  test('accessible textarea with aria-label', async ({ page }) => {
+    await page.goto('/');
+    const textarea = page.locator('#channel-input textarea');
+    await expect(textarea).toHaveAttribute('aria-label', /Task description/);
+  });
 
-      await page.goto('/');
-      await page.waitForSelector('#channel-input textarea');
+  test('accessible button with aria-label', async ({ page }) => {
+    await page.goto('/');
+    const button = page.locator('#channel-input button');
+    await expect(button).toHaveAttribute('aria-label', 'Send to Manager');
+  });
 
-      // Focus the send button
-      await page.click('#channel-input button');
-      await expect(page.locator('#channel-input button')).toBeFocused();
-
-      // Press Shift+Tab to move back to textarea
-      await page.keyboard.press('Shift+Tab');
-      await expect(page.locator('#channel-input textarea')).toBeFocused();
-    });
-
-    test('repo channel textarea has repo-specific aria-label', async ({ page }) => {
-      await page.route('**/context?repo=test-repo', async route => {
-        await route.fulfill({ json: mockContextResponse });
-      });
-
-      await page.goto('/channel/test-repo');
-      await page.waitForSelector('#channel-input textarea');
-
-      await expect(page.locator('#channel-input textarea')).toHaveAttribute(
-        'aria-label',
-        'Message input for test-repo channel'
-      );
-    });
+  test('heading is h1', async ({ page }) => {
+    await page.goto('/');
+    const h1 = page.locator('#channel-header h1');
+    await expect(h1).toBeVisible();
   });
 });

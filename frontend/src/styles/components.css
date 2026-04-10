@@ -987,42 +987,54 @@
   display: flex;
   flex-direction: column;
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  padding: var(--spacing-md);
+  gap: var(--spacing-md);
 }
 
-#channel-header {
-  padding: var(--spacing-sm) var(--spacing-md);
-  font-size: 10px;
-  color: var(--text3);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg1);
+#channel-header h1 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  flex-shrink: 0;
+  letter-spacing: 0.08em;
 }
 
-#channel-conversation {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+#channel-description {
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: var(--spacing-sm) 0;
+}
+
+.channel-link {
+  display: block;
+  margin-top: var(--spacing-xs);
+  color: var(--blue);
+  font-size: 11px;
+}
+
+.channel-link:hover {
+  color: var(--cyan);
+  text-decoration: underline;
 }
 
 #channel-input {
   display: flex;
   gap: 0;
   border-top: 1px solid var(--border);
-  background: var(--bg1);
-  padding-bottom: env(safe-area-inset-bottom, 0);
+  padding-top: var(--spacing-md);
+  background: transparent;
   flex-shrink: 0;
 }
 
 #channel-input textarea {
   flex: 1;
-  background: transparent;
-  border: none;
+  background: var(--bg1);
+  border: 1px solid var(--border2);
   color: var(--text);
-  padding: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
   font-family: var(--font-mono);
   font-size: 12px;
   outline: none;
@@ -1033,9 +1045,12 @@
   line-height: 1.5;
 }
 
+#channel-input textarea:focus {
+  border-color: var(--green2);
+}
+
 #channel-input textarea::placeholder {
-  color: inherit;
-  opacity: 0.5;
+  color: var(--text3);
 }
 
 #channel-input button {
@@ -1043,7 +1058,7 @@
   border: none;
   border-left: 1px solid var(--border);
   color: var(--green);
-  padding: var(--spacing-md) var(--spacing-lg);
+  padding: var(--spacing-sm) var(--spacing-lg);
   font-family: var(--font-ui);
   font-size: 11px;
   font-weight: 700;
@@ -1052,6 +1067,7 @@
   letter-spacing: 0.08em;
   transition: background var(--transition-fast);
   flex-shrink: 0;
+  min-height: 44px;
 }
 
 #channel-input button:hover,
@@ -1063,6 +1079,25 @@
 #channel-input button.sending {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.channel-message {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.channel-message.success {
+  background: var(--bg3);
+  color: var(--green);
+  border: 1px solid var(--green2);
+}
+
+.channel-message.error {
+  background: var(--bg3);
+  color: var(--red);
+  border: 1px solid var(--red2);
 }
 
 /* ============================================================================
