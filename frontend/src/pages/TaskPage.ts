@@ -6,7 +6,7 @@
 
 import { getTask, getTaskDependencies } from '../api';
 import { wsManager } from '../api/websocket';
-import { getState, setState, subscribe } from '../state';
+import { setState, subscribe } from '../state';
 import { formatStatus, formatRole, escapeHtml } from '../utils';
 import { Conversation } from '../components/Conversation';
 import { TaskEditForm } from '../components/TaskEditForm';
@@ -19,7 +19,8 @@ export class TaskPage {
   private task: Task | null = null;
   private conversation: Conversation | null = null;
   private editForm: TaskEditForm | null = null;
-  private decisionBanner: DecisionBanner | null = null;
+  /** DecisionBanner instance — public for test access */
+  decisionBanner: DecisionBanner | null = null;
   private isEditing = false;
 
   constructor(taskId: string) {
@@ -45,13 +46,16 @@ export class TaskPage {
 
     this.element = document.createElement('div');
     this.element.id = 'task-page';
+    const unblockBtnText = this.task.status === 'blocked_by_human'
+      ? this.getUnblockButtonText()
+      : '';
     this.element.innerHTML = `
       <div id="task-header">
         <div class="task-header-main">
           <h1 class="task-title">${escapeHtml(this.task.title)}</h1>
           <div class="task-actions">
-            <button id="task-edit-btn" class="btn-edit">✎ Edit</button>
-            ${this.task.status === 'blocked_by_human' ? '<button id="task-unblock-btn" class="btn-unblock">✓ Unblock</button>' : ''}
+            <button id="task-edit-btn" class="btn-edit">Edit</button>
+            ${this.task.status === 'blocked_by_human' ? `<button id="task-unblock-btn" class="btn-unblock">${escapeHtml(unblockBtnText)}</button>` : ''}
           </div>
         </div>
         <div class="task-meta">
@@ -147,15 +151,74 @@ export class TaskPage {
     }
   }
 
+  /**
+   * Determine the unblock button text based on current task state.
+   * - If pending_question exists: "Answer Question"
+   * - If DecisionBanner is showing: "Review Decision"
+   * - Otherwise: "See Blocking Reason"
+   */
+  private getUnblockButtonText(): string {
+    if (!this.task) return 'Unblock';
+
+    // Check for pending clarification question
+    if (this.task.pending_question && this.task.pending_question.trim() !== '') {
+      return 'Answer Question';
+    }
+
+    // Check for pending decision
+    if (this.decisionBanner?.isShowing) {
+      return 'Review Decision';
+    }
+
+    // Generic — show task notes
+    return 'See Blocking Reason';
+  }
+
+  /**
+   * Update the unblock button text to reflect current state.
+   * Called when WebSocket events arrive that change the block reason.
+   * Public for test access.
+   */
+  updateUnblockButton(): void {
+    if (!this.element || !this.task) return;
+    if (this.task.status !== 'blocked_by_human') return;
+
+    const btn = this.element.querySelector('#task-unblock-btn');
+    if (btn) {
+      btn.textContent = this.getUnblockButtonText();
+    }
+  }
+
   private async handleUnblock(): Promise<void> {
-    if (!this.task) return;
+    if (!this.task || !this.element) return;
 
-    const note = prompt('Optional note to include with unblock:');
-    if (note === null) return; // User cancelled
+    // Check for pending clarification question
+    if (this.task.pending_question && this.task.pending_question.trim() !== '') {
+      // Scroll to clarification input
+      const clarInput = this.element.querySelector('#clar-input') as HTMLTextAreaElement;
+      if (clarInput) {
+        clarInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        clarInput.focus();
+      }
+      return;
+    }
 
-    // Navigate to tasks and trigger unblock
-    // (Will be implemented with proper API call)
-    console.log('[TaskPage] Unblock task:', this.task.id, 'with note:', note);
+    // Check for pending decision
+    if (this.decisionBanner?.isShowing) {
+      // Scroll to decision banner
+      const banner = this.element.querySelector('#decision-banner');
+      if (banner) {
+        banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    // No specific action available — show blocking reason in notes
+    // The task notes contain the blocking reason
+    const notesSection = this.element.querySelector('.task-meta') as HTMLElement | null;
+    if (notesSection) {
+      notesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   }
 
   private async loadDependencies(): Promise<void> {
@@ -163,7 +226,7 @@ export class TaskPage {
 
     try {
       const data = await getTaskDependencies(this.taskId);
-      const depsEl = this.element.querySelector('#task-dependencies');
+      const depsEl = this.element.querySelector('#task-dependencies') as HTMLElement | null;
 
       if (depsEl && data.dependencies.length > 0) {
         depsEl.style.display = 'block';
@@ -209,6 +272,7 @@ export class TaskPage {
     this.conversation = new Conversation({
       scope: this.task?.repo?.[0] || 'workspace',
       taskId: this.taskId,
+      contextMessages: this.task?.context_messages || [],
     });
 
     container.appendChild(this.conversation.render());
@@ -217,7 +281,7 @@ export class TaskPage {
     this.setupStreamingHandlers();
 
     // Render decision banner
-    const bannerContainer = this.element.querySelector('#task-decision-banner');
+    const bannerContainer = this.element.querySelector('#task-decision-banner') as HTMLElement | null;
     if (bannerContainer) {
       // Destroy previous banner if it exists to prevent listener accumulation
       if (this.decisionBanner) {
@@ -225,6 +289,30 @@ export class TaskPage {
       }
       this.decisionBanner = new DecisionBanner();
       this.decisionBanner.render(bannerContainer);
+    }
+
+    // Listen for decision events to update unblock button
+    this.setupDecisionEventListeners();
+  }
+
+  /**
+   * Listen for decision events so the unblock button text updates
+   * when a new decision is pending.
+   */
+  private setupDecisionEventListeners(): void {
+    const decisionEvents = [
+      'decomposition_confirmation_required',
+      'pr_approval_required',
+      'turn_limit_reached',
+      'planning_turn_limit_reached',
+      'merge_conflict_resolution_turn_limit_reached',
+      'critic_turn_limit_reached',
+    ];
+
+    for (const eventName of decisionEvents) {
+      window.addEventListener(eventName, () => {
+        this.updateUnblockButton();
+      });
     }
   }
 

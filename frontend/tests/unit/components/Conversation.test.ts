@@ -16,7 +16,6 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 // Mock API
 vi.mock('../../../src/api', () => ({
-  getContext: vi.fn(),
   interjectTask: vi.fn(),
   interjectRepo: vi.fn(),
   interjectWorkspace: vi.fn(),
@@ -140,176 +139,88 @@ describe('Conversation', () => {
       expect(inferenceBar?.getAttribute('style')).toContain('display:none');
     });
 
-    it('loads conversation on render', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
+    it('renders messages from contextMessages option', async () => {
+      vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
+      vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
-      const conv = new Conversation({ scope: 'workspace' });
+      const conv = new Conversation({ scope: 'workspace', contextMessages: mockMessages });
       container.appendChild(conv.render());
 
-      // Wait for async
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      expect(api.getContext).toHaveBeenCalledWith('workspace');
+      // No async needed — messages are passed synchronously
+      const log = container.querySelector('#conversation-log');
+      expect(log?.querySelectorAll('.message-bubble').length).toBe(3);
     });
-  });
 
-  describe('loadConversation()', () => {
-    it('displays empty state when no messages', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
-
-      const conv = new Conversation({ scope: 'workspace' });
+    it('displays empty state when no contextMessages', async () => {
+      const conv = new Conversation({ scope: 'workspace', contextMessages: [] });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const log = container.querySelector('#conversation-log');
       expect(log?.textContent).toContain('No conversation yet');
     });
 
-    it('displays messages when loaded', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({
-        messages: mockMessages,
-        count: 3,
-        estimated_tokens: 100,
-      });
-      vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
-      vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
-
-      const conv = new Conversation({ scope: 'workspace' });
-      container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      const log = container.querySelector('#conversation-log');
-      expect(log?.querySelectorAll('.message-bubble').length).toBe(3);
-    });
-
     it('renders user messages with user class', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({
-        messages: [{ role: 'user', content: 'Hello' }],
-        count: 1,
-        estimated_tokens: 50,
-      });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
-      const conv = new Conversation({ scope: 'workspace' });
+      const conv = new Conversation({ scope: 'workspace', contextMessages: [{ role: 'user', content: 'Hello' }] });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const userBubble = container.querySelector('.message-bubble.user');
       expect(userBubble).toBeDefined();
     });
 
     it('renders assistant messages with assistant class', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({
-        messages: [{ role: 'assistant', content: 'Hi!' }],
-        count: 1,
-        estimated_tokens: 50,
-      });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
-      const conv = new Conversation({ scope: 'workspace' });
+      const conv = new Conversation({ scope: 'workspace', contextMessages: [{ role: 'assistant', content: 'Hi!' }] });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const assistantBubble = container.querySelector('.message-bubble.assistant');
       expect(assistantBubble).toBeDefined();
     });
 
     it('renders system messages with system class', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({
-        messages: [{ role: 'system', content: 'System msg' }],
-        count: 1,
-        estimated_tokens: 50,
-      });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
-      const conv = new Conversation({ scope: 'workspace' });
+      const conv = new Conversation({ scope: 'workspace', contextMessages: [{ role: 'system', content: 'System msg' }] });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const systemBubble = container.querySelector('.message-bubble.system');
       expect(systemBubble).toBeDefined();
     });
 
     it('renders tool_call messages with preformatted text', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({
-        messages: [{ role: 'tool_call', content: 'code here' }],
-        count: 1,
-        estimated_tokens: 50,
-      });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
-      const conv = new Conversation({ scope: 'workspace' });
+      const conv = new Conversation({ scope: 'workspace', contextMessages: [{ role: 'tool_call', content: 'code here' }] });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const toolBubble = container.querySelector('.message-bubble');
       expect(toolBubble?.querySelector('pre')).toBeDefined();
     });
 
     it('skips empty messages', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({
-        messages: [{ role: 'user', content: 'Hello' }, { role: 'user', content: '' }],
-        count: 2,
-        estimated_tokens: 50,
-      });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
-      const conv = new Conversation({ scope: 'workspace' });
+      const conv = new Conversation({ scope: 'workspace', contextMessages: [{ role: 'user', content: 'Hello' }, { role: 'user', content: '' }] });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const log = container.querySelector('#conversation-log');
       expect(log?.querySelectorAll('.message-bubble').length).toBe(1);
-    });
-
-    it('handles load error gracefully', async () => {
-      vi.mocked(api.getContext).mockRejectedValue(new Error('Failed'));
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      const conv = new Conversation({ scope: 'workspace' });
-      container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      const log = container.querySelector('#conversation-log');
-      expect(log?.textContent).toContain('Failed to load conversation');
-      expect(consoleSpy).toHaveBeenCalled();
-    });
-
-    it('fetches task context when taskId provided', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
-
-      const conv = new Conversation({ scope: 'my-repo', taskId: 'task-123' });
-      container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // Task ID provided, should fetch task context (undefined scope)
-      expect(api.getContext).toHaveBeenCalledWith(undefined);
     });
   });
 
   describe('sendInterjection()', () => {
     it('sends message and clears input', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.interjectWorkspace).mockResolvedValue(undefined);
 
       const conv = new Conversation({ scope: 'workspace' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const input = container.querySelector('#conversation-input input') as HTMLInputElement;
       const button = container.querySelector('#conversation-input button') as HTMLButtonElement;
@@ -324,12 +235,8 @@ describe('Conversation', () => {
     });
 
     it('does not send empty message', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
-
       const conv = new Conversation({ scope: 'workspace' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const button = container.querySelector('#conversation-input button') as HTMLButtonElement;
       button.click();
@@ -340,13 +247,10 @@ describe('Conversation', () => {
     });
 
     it('sends to task interjection when taskId provided', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.interjectTask).mockResolvedValue(undefined);
 
       const conv = new Conversation({ scope: 'my-repo', taskId: 'task-123' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const input = container.querySelector('#conversation-input input') as HTMLInputElement;
       const button = container.querySelector('#conversation-input button') as HTMLButtonElement;
@@ -360,13 +264,10 @@ describe('Conversation', () => {
     });
 
     it('sends to repo interjection for repo scope', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.interjectRepo).mockResolvedValue(undefined);
 
       const conv = new Conversation({ scope: 'my-repo' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const input = container.querySelector('#conversation-input input') as HTMLInputElement;
       const button = container.querySelector('#conversation-input button') as HTMLButtonElement;
@@ -380,15 +281,12 @@ describe('Conversation', () => {
     });
 
     it('adds user message to conversation immediately', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.interjectWorkspace).mockResolvedValue(undefined);
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
       const conv = new Conversation({ scope: 'workspace' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const input = container.querySelector('#conversation-input input') as HTMLInputElement;
       const button = container.querySelector('#conversation-input button') as HTMLButtonElement;
@@ -403,7 +301,6 @@ describe('Conversation', () => {
     });
 
     it('shows error message on failure', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.interjectWorkspace).mockRejectedValue(new Error('Network error'));
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
@@ -411,8 +308,6 @@ describe('Conversation', () => {
 
       const conv = new Conversation({ scope: 'workspace' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const input = container.querySelector('#conversation-input input') as HTMLInputElement;
       const button = container.querySelector('#conversation-input button') as HTMLButtonElement;
@@ -428,13 +323,10 @@ describe('Conversation', () => {
     });
 
     it('sends on Enter key press', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.interjectWorkspace).mockResolvedValue(undefined);
 
       const conv = new Conversation({ scope: 'workspace' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       const input = container.querySelector('#conversation-input input') as HTMLInputElement;
       input.value = 'Enter message';
@@ -472,15 +364,12 @@ describe('Conversation', () => {
     });
 
     it('sends clarification answer', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.answerTask).mockResolvedValue(undefined);
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
       const conv = new Conversation({ scope: 'workspace', taskId: 'task-123' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       conv.showClarification('Question?');
 
@@ -499,12 +388,8 @@ describe('Conversation', () => {
     });
 
     it('does not send empty clarification answer', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
-
       const conv = new Conversation({ scope: 'workspace', taskId: 'task-123' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       conv.showClarification('Question?');
 
@@ -517,15 +402,12 @@ describe('Conversation', () => {
     });
 
     it('sends clarification on Enter key', async () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(api.answerTask).mockResolvedValue(undefined);
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
       vi.mocked(utils.escapeHtml).mockImplementation((text) => text);
 
       const conv = new Conversation({ scope: 'workspace', taskId: 'task-123' });
       container.appendChild(conv.render());
-
-      await new Promise(resolve => setTimeout(resolve, 50));
 
       conv.showClarification('Question?');
 
@@ -563,7 +445,6 @@ describe('Conversation', () => {
 
   describe('streaming support', () => {
     it('creates streaming row on first token', () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
 
       const conv = new Conversation({ scope: 'workspace' });
@@ -576,7 +457,6 @@ describe('Conversation', () => {
     });
 
     it('appends tokens to streaming row', () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
 
       const conv = new Conversation({ scope: 'workspace' });
@@ -590,7 +470,6 @@ describe('Conversation', () => {
     });
 
     it('creates thinking row on first thinking token', () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
 
       const conv = new Conversation({ scope: 'workspace' });
@@ -603,7 +482,6 @@ describe('Conversation', () => {
     });
 
     it('appends tokens to thinking row', () => {
-      vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
       vi.mocked(utils.renderMarkdown).mockImplementation((text) => text);
 
       const conv = new Conversation({ scope: 'workspace' });
@@ -654,7 +532,6 @@ describe('Conversation - Clarification Textarea', () => {
 
   beforeEach(() => {
     container = document.createElement('div');
-    vi.mocked(api.getContext).mockResolvedValue({ messages: [], count: 0, estimated_tokens: 0 });
   });
 
   afterEach(() => {

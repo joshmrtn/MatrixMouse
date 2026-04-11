@@ -3,13 +3,15 @@
  * Displays context messages as conversation bubbles
  */
 
-import { getContext, interjectTask, interjectRepo, interjectWorkspace, answerTask } from '../api';
+import { interjectTask, interjectRepo, interjectWorkspace, answerTask } from '../api';
 import { renderMarkdown, escapeHtml, ts } from '../utils';
 import type { ContextMessage } from '../types';
 
 export interface ConversationOptions {
   scope: string;
   taskId?: string;
+  /** Pre-loaded conversation messages from task.context_messages. */
+  contextMessages?: ContextMessage[];
   onInterjection?: (message: string) => Promise<void>;
 }
 
@@ -91,24 +93,20 @@ export class Conversation {
   private async loadConversation(): Promise<void> {
     if (!this.logEl) return;
 
-    try {
-      const data = await getContext(this.options.taskId ? undefined : this.options.scope);
-      const messages = data.messages || [];
+    // Use pre-loaded messages from task.context_messages
+    // (GET /tasks/{task_id} already returns context_messages — no need for /context)
+    const messages = this.options.contextMessages || [];
 
-      if (messages.length === 0) {
-        this.logEl.innerHTML = '<div style="padding:14px;color:var(--text3)">No conversation yet.</div>';
-        return;
-      }
-
-      this.logEl.innerHTML = messages
-        .map((msg) => this.renderMessage(msg))
-        .join('');
-
-      this.logEl.scrollTop = this.logEl.scrollHeight;
-    } catch (error) {
-      console.error('[Conversation] Failed to load:', error);
-      this.logEl.innerHTML = '<div style="padding:14px;color:var(--text3)">Failed to load conversation.</div>';
+    if (messages.length === 0) {
+      this.logEl.innerHTML = '<div style="padding:14px;color:var(--text3)">No conversation yet.</div>';
+      return;
     }
+
+    this.logEl.innerHTML = messages
+      .map((msg) => this.renderMessage(msg))
+      .join('');
+
+    this.logEl.scrollTop = this.logEl.scrollHeight;
   }
 
   private renderMessage(msg: ContextMessage): string {

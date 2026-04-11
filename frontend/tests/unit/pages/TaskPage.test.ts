@@ -29,28 +29,29 @@ vi.mock('../../../src/state', () => ({
 }));
 
 vi.mock('../../../src/components/Conversation', () => ({
-  Conversation: vi.fn().mockImplementation(() => ({
-    render: vi.fn().mockImplementation(() => {
-      const el = document.createElement('div');
-      el.id = 'conversation';
-      el.innerHTML = `
-        <div id="conversation-log"></div>
-        <div id="conversation-input"><input type="text" /><button>Send</button></div>
-        <div id="clarification-banner" style="display:none;">
-          <div class="clar-q"></div>
-          <div class="clar-row">
-            <textarea id="clar-input"></textarea>
-            <button id="clar-answer-btn">Answer</button>
-          </div>
+  Conversation: vi.fn().mockImplementation(() => {
+    const mockEl = document.createElement('div');
+    mockEl.id = 'conversation';
+    mockEl.innerHTML = `
+      <div id="conversation-log"></div>
+      <div id="conversation-input"><input type="text" /><button>Send</button></div>
+      <div id="clarification-banner" style="display:none;">
+        <div class="clar-q"></div>
+        <div class="clar-row">
+          <textarea id="clar-input"></textarea>
+          <button id="clar-answer-btn">Answer</button>
         </div>
-      `;
-      return el;
-    }),
-    appendToken: vi.fn(),
-    appendThinking: vi.fn(),
-    showClarification: vi.fn(),
-    hideClarification: vi.fn(),
-  })),
+      </div>
+    `;
+    return {
+      render: vi.fn().mockReturnValue(mockEl),
+      appendToken: vi.fn(),
+      appendThinking: vi.fn(),
+      showClarification: vi.fn(),
+      hideClarification: vi.fn(),
+      element: mockEl,
+    };
+  }),
 }));
 
 vi.mock('../../../src/components/TaskEditForm', () => ({
@@ -70,6 +71,47 @@ vi.mock('../../../src/components/TaskEditForm', () => ({
     }),
     options,
   })),
+}));
+
+vi.mock('../../../src/components/DecisionModal', () => ({
+  DecisionBanner: vi.fn().mockImplementation(() => {
+    const state = { bannerElement: null as HTMLElement | null, isShowing: false };
+
+    return {
+      render: vi.fn().mockImplementation((container: HTMLElement) => {
+        const el = document.createElement('div');
+        el.id = 'decision-banner';
+        el.style.display = 'none';
+        el.innerHTML = `
+          <div class="decision-banner-header"><h3 id="decision-banner-title"></h3></div>
+          <div class="decision-banner-body">
+            <div id="decision-banner-body"></div>
+            <div id="decision-banner-choices"></div>
+          </div>
+        `;
+        container.appendChild(el);
+        state.bannerElement = el;
+        return el;
+      }),
+      show: vi.fn().mockImplementation((_type: string, event: any) => {
+        if (state.bannerElement) {
+          state.bannerElement.style.display = '';
+          const titleEl = state.bannerElement.querySelector('#decision-banner-title');
+          if (titleEl) titleEl.textContent = event.task_title || 'Decision';
+        }
+        state.isShowing = true;
+      }),
+      hide: vi.fn().mockImplementation(() => {
+        if (state.bannerElement) {
+          state.bannerElement.style.display = 'none';
+        }
+        state.isShowing = false;
+      }),
+      destroy: vi.fn(),
+      get isShowing() { return state.isShowing; },
+      get element() { return state.bannerElement; },
+    };
+  }),
 }));
 
 // Mock window methods
@@ -107,6 +149,8 @@ const mockTask = {
   pending_tool_calls: [],
   decomposition_confirmed_depth: 0,
   merge_resolution_decisions: [],
+  notes: '',
+  pending_question: '',
 };
 
 const mockTaskBlockedByHuman = {
@@ -131,9 +175,9 @@ describe('TaskPage', () => {
   beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
-    
+
     vi.clearAllMocks();
-    
+
     // Capture subscribe callback
     vi.mocked(state.subscribe).mockImplementation((cb) => {
       subscribeCallback = cb as any;
@@ -145,6 +189,9 @@ describe('TaskPage', () => {
       currentPage: 'task',
       routeParams: { id: 'test-123' },
     } as any);
+
+    // Mock scrollIntoView (not available in JSDOM)
+    Element.prototype.scrollIntoView = vi.fn();
   });
 
   afterEach(() => {
@@ -295,7 +342,8 @@ describe('TaskPage', () => {
 
       const unblockBtn = container.querySelector('#task-unblock-btn');
       expect(unblockBtn).toBeDefined();
-      expect(unblockBtn?.textContent).toContain('Unblock');
+      // Button text depends on block reason: "Answer Question", "Review Decision", or "See Blocking Reason"
+      expect(unblockBtn?.textContent?.length).toBeGreaterThan(0);
     });
 
     it('hides unblock button when not blocked by human', async () => {
@@ -323,10 +371,12 @@ describe('TaskPage', () => {
     });
 
     it('sets up unblock button click handler', async () => {
-      vi.mocked(api.getTask).mockResolvedValue(mockTaskBlockedByHuman);
-      
-      // Mock prompt
-      vi.spyOn(window, 'prompt').mockReturnValue('Test note');
+      const taskWithNotes = {
+        ...mockTaskBlockedByHuman,
+        pending_question: '',
+        notes: 'Blocked waiting for approval',
+      };
+      vi.mocked(api.getTask).mockResolvedValue(taskWithNotes);
 
       const page = new TaskPage('test-123');
       await page.render(container);
@@ -514,22 +564,127 @@ describe('TaskPage', () => {
   });
 
   describe('handleUnblock()', () => {
-    it('prompts for note when unblocking', async () => {
-      vi.mocked(api.getTask).mockResolvedValue(mockTaskBlockedByHuman);
-      const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Test note');
+    it('shows "Answer Question" button when pending_question exists', async () => {
+      const taskWithQuestion = {
+        ...mockTaskBlockedByHuman,
+        pending_question: 'What is the correct approach here?',
+      };
+      vi.mocked(api.getTask).mockResolvedValue(taskWithQuestion);
 
       const page = new TaskPage('test-123');
       await page.render(container);
 
       const unblockBtn = container.querySelector('#task-unblock-btn') as HTMLButtonElement;
-      unblockBtn.click();
-
-      expect(promptSpy).toHaveBeenCalledWith('Optional note to include with unblock:');
+      expect(unblockBtn).toBeDefined();
+      expect(unblockBtn.textContent).toContain('Answer Question');
     });
 
-    it('does nothing when user cancels prompt', async () => {
+    it('shows "Review Decision" button when DecisionBanner is active', async () => {
       vi.mocked(api.getTask).mockResolvedValue(mockTaskBlockedByHuman);
-      vi.spyOn(window, 'prompt').mockReturnValue(null);
+
+      const page = new TaskPage('test-123');
+      await page.render(container);
+
+      // Verify banner exists and isShowing is false initially
+      expect(page.decisionBanner).toBeDefined();
+      expect(page.decisionBanner?.isShowing).toBe(false);
+
+      // Show the banner
+      page.decisionBanner!.show('decomposition', {
+        task_id: 'test-123',
+        task_title: 'Test Task',
+        current_depth: 1,
+        allowed_depth: 3,
+        choices: [{ id: 'allow', label: 'Allow' }, { id: 'deny', label: 'Deny' }],
+      } as any);
+
+      // Verify isShowing is now true
+      expect(page.decisionBanner?.isShowing).toBe(true);
+
+      // Manually update button (simulates what happens when decision event arrives)
+      page.updateUnblockButton();
+
+      const unblockBtn = container.querySelector('#task-unblock-btn') as HTMLButtonElement;
+      expect(unblockBtn).toBeDefined();
+      expect(unblockBtn.textContent).toContain('Review Decision');
+    });
+
+    it('shows "See Blocking Reason" button when no question or decision pending', async () => {
+      const taskWithNotes = {
+        ...mockTaskBlockedByHuman,
+        pending_question: '',
+        notes: '[BLOCKED] Awaiting PR approval from manager',
+      };
+      vi.mocked(api.getTask).mockResolvedValue(taskWithNotes);
+
+      const page = new TaskPage('test-123');
+      await page.render(container);
+
+      const unblockBtn = container.querySelector('#task-unblock-btn') as HTMLButtonElement;
+      expect(unblockBtn).toBeDefined();
+      expect(unblockBtn.textContent).toContain('See Blocking Reason');
+    });
+
+    it('scrolls to clarification input when "Answer Question" is clicked', async () => {
+      const taskWithQuestion = {
+        ...mockTaskBlockedByHuman,
+        pending_question: 'What is the correct approach?',
+      };
+      vi.mocked(api.getTask).mockResolvedValue(taskWithQuestion);
+
+      const page = new TaskPage('test-123');
+      await page.render(container);
+
+      const unblockBtn = container.querySelector('#task-unblock-btn') as HTMLButtonElement;
+      const scrollIntoViewSpy = vi.fn();
+      // Mock scrollIntoView on the conversation container
+      const clarInput = container.querySelector('#clar-input');
+      if (clarInput) {
+        clarInput.scrollIntoView = scrollIntoViewSpy;
+      }
+
+      unblockBtn.click();
+
+      // Should focus on clarification input
+      expect(scrollIntoViewSpy).toHaveBeenCalled();
+    });
+
+    it('scrolls to decision banner when "Review Decision" is clicked', async () => {
+      vi.mocked(api.getTask).mockResolvedValue(mockTaskBlockedByHuman);
+
+      const page = new TaskPage('test-123');
+      await page.render(container);
+
+      // Show the banner
+      page.decisionBanner!.show('decomposition', {
+        task_id: 'test-123',
+        task_title: 'Test Task',
+        current_depth: 1,
+        allowed_depth: 3,
+        choices: [{ id: 'allow', label: 'Allow' }, { id: 'deny', label: 'Deny' }],
+      } as any);
+
+      // Update button to reflect decision pending
+      page.updateUnblockButton();
+
+      const unblockBtn = container.querySelector('#task-unblock-btn') as HTMLButtonElement;
+      const banner = container.querySelector('#decision-banner');
+      expect(banner).toBeDefined();
+
+      // Check scrollIntoView was called on banner
+      const scrollSpy = vi.spyOn(banner!, 'scrollIntoView');
+      unblockBtn.click();
+
+      expect(scrollSpy).toHaveBeenCalled();
+    });
+
+    it('does nothing when user clicks without pending question or decision', async () => {
+      const taskWithNotes = {
+        ...mockTaskBlockedByHuman,
+        pending_question: '',
+        notes: 'Blocked waiting for external approval',
+      };
+      vi.mocked(api.getTask).mockResolvedValue(taskWithNotes);
 
       const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -539,6 +694,7 @@ describe('TaskPage', () => {
       const unblockBtn = container.querySelector('#task-unblock-btn') as HTMLButtonElement;
       unblockBtn.click();
 
+      // Should just show the notes, no prompt or error
       expect(consoleSpy).not.toHaveBeenCalled();
     });
   });

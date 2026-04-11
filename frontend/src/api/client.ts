@@ -401,6 +401,8 @@ export async function getOrchestratorStatus(): Promise<{
 
 /**
  * Get context messages for a scope
+ * @deprecated GET /tasks/{task_id} already returns context_messages.
+ * This function is kept for backward compatibility only and will be removed.
  */
 export async function getContext(repo?: string): Promise<{
   messages: Array<{ role: string; content: string }>;

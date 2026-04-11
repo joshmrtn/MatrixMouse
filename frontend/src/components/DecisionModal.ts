@@ -202,7 +202,8 @@ export class DecisionBanner {
   private errorEl: HTMLElement | null = null;
   private collapseBtn: HTMLElement | null = null;
 
-  private isShowing = false;
+  /** Whether the banner is currently showing a pending decision — public for TaskPage access */
+  isShowing = false;
   private isCollapsed = false;
   private currentType: DecisionModalType | null = null;
   private currentEvent: DecisionEventData | null = null;
